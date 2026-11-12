@@ -41,7 +41,7 @@
 
 mod common;
 
-use common::{dump, exec, foreign_key_violations, issue_row, undo_v5_schema, user_version, Env, V0_LABELS_FIXTURE};
+use common::{dump, exec, foreign_key_violations, fts_integrity, FTS_TABLES, issue_row, undo_v5_schema, undo_v6_schema, user_version, Env, V0_LABELS_FIXTURE};
 use lcl_core::SCHEMA_VERSION;
 use rusqlite::types::Value as SqlValue;
 use serde_json::{json, Value};
@@ -433,12 +433,13 @@ fn upgrade_maps_0_1_0_labels() {
         row.remove("assignee");
     }
     undo_v5_schema(&mut after, &mut before);
+    undo_v6_schema(&mut after);
     for d in [&mut before, &mut after] {
         d.schema.retain(|r| r["name"] != t("issues"));
         d.tables.retain(|t, _| !t.starts_with("issues_fts") && t != "labels" && t != "issue_labels");
     }
     assert_eq!(after, before);
-    exec(&db, "INSERT INTO issues_fts(issues_fts) VALUES('integrity-check');");
+    fts_integrity(&db, &FTS_TABLES);
 }
 
 fn label_rows(db: &Path) -> Vec<(String, String, String)> {

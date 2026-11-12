@@ -19,7 +19,7 @@
 
 mod common;
 
-use common::{dump, exec, foreign_key_violations, set_user_version, undo_v5_schema, user_version, Env, Out, V0_FIXTURE};
+use common::{dump, foreign_key_violations, fts_integrity, FTS_TABLES, set_user_version, undo_v5_schema, undo_v6_schema, user_version, Env, Out, V0_FIXTURE};
 use lcl_core::SCHEMA_VERSION;
 use rusqlite::types::Value as SqlValue;
 use serde_json::{json, Value};
@@ -102,6 +102,7 @@ fn upgrades_a_0_1_0_database() {
         row.insert("label_id".into(), text("hitl")); // as 0.1.0 left it
     }
     undo_v5_schema(&mut after, &mut before);
+    undo_v6_schema(&mut after);
     assert_eq!(foreign_key_violations(&db), vec![]);
     // v3's ADD COLUMN rewrote the issues table's CREATE statement, and its
     // backfill UPDATE fired the FTS trigger, which rewrote that row's index
@@ -113,7 +114,7 @@ fn upgrades_a_0_1_0_database() {
         d.tables.retain(|t, _| !t.starts_with("issues_fts"));
     }
     assert_eq!(after, before);
-    exec(&db, "INSERT INTO issues_fts(issues_fts) VALUES('integrity-check'); INSERT INTO docs_fts(docs_fts) VALUES('integrity-check');");
+    fts_integrity(&db, &FTS_TABLES);
 }
 
 #[test]

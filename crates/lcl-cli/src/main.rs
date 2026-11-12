@@ -4,6 +4,7 @@ use clap::{ArgGroup, CommandFactory, Parser, Subcommand};
 use lcl_core::db::{IssueFilter, Store};
 use lcl_core::error::LclError;
 use lcl_core::models::*;
+use lcl_core::search::SearchQuery;
 use std::io::{IsTerminal, Read};
 use std::time::Duration;
 use std::path::PathBuf;
@@ -43,7 +44,30 @@ enum Commands {
         #[command(subcommand)]
         cmd: CycleCmd,
     },
-    Search { query: String },
+    /// Search issues (with their comments) and docs.
+    ///
+    /// The query is split on whitespace, and every word must match. Words are
+    /// literal: AND, OR, NOT, NEAR, quotes, parentheses and punctuation are
+    /// plain text, and BZR-1532, v1.3.1 or writer_lock.rs match as written. A
+    /// word ending in * matches as a prefix: writ* finds writer. Case and
+    /// diacritics are ignored: cafe finds café.
+    ///
+    /// An issue matches when every word is in its title and description
+    /// together, or every word is in one of its comments. Words split between
+    /// the issue and a comment, or across two comments, don't match.
+    ///
+    /// A query that is exactly an issue's KEY-N or #N lists that issue first.
+    ///
+    /// Quoting the query is optional. Words that start with - go after --,
+    /// e.g. lcl search -- --no-commit.
+    Search {
+        /// The words to search for.
+        #[arg(value_name = "WORD", required = true, num_args = 1..)]
+        words: Vec<String>,
+        /// Show at most N issues and N docs.
+        #[arg(long, value_name = "N", default_value_t = 50, value_parser = clap::value_parser!(u32).range(1..))]
+        limit: u32,
+    },
     Tui,
 }
 
@@ -292,6 +316,19 @@ fn read_stdin(flag: &str) -> std::result::Result<Vec<u8>, String> {
         Ok(Msg::Done(all)) => all.map_err(|e| format!("can't read stdin: {e}")),
         _ => Err("can't read stdin".into()),
     }
+}
+
+/// The search words joined with one space, made safe for FTS5 (see
+/// `lcl_core::search`). A query with nothing to search for exits 2 as a clap
+/// error does, with search's usage line, before a database is opened.
+fn search_query(words: &[String]) -> SearchQuery {
+    let joined = words.join(" ");
+    SearchQuery::parse(&joined).unwrap_or_else(|e| {
+        let mut cli = Cli::command();
+        cli.build();
+        let search = cli.find_subcommand_mut("search").expect("the search command");
+        search.error(clap::error::ErrorKind::ValueValidation, format!("invalid value '{joined}' for '<WORD>...': {e}")).exit()
+    })
 }
 
 /// A label name, trimmed; blank is refused.
@@ -609,16 +646,20 @@ fn run(cli: Cli) -> Result<()> {
                 }
             }
         },
-        Commands::Search { query } => {
+        Commands::Search { words, limit } => {
+            let query = search_query(&words);
             let store = resolve_store(&cli.project)?;
-            let issues = store.search_issues(&query)?;
-            let docs = store.search_docs(&query)?;
-            if cli.json { print_json(&serde_json::json!({"issues": issues, "docs": docs})); }
+            let found = store.search(&query, limit as usize)?;
+            if cli.json { print_json(&found); }
             else {
-                println!("Issues:");
-                for i in &issues { println!("  {} {}", i.identifier, i.title); }
-                println!("Docs:");
-                for d in &docs { println!("  {} {}", d.id, d.title); }
+                for h in &found.issues {
+                    let fields: Vec<&str> = h.matched_in.iter().map(|f| f.as_str()).collect();
+                    println!("{}\t[{}]\t{}\t{}", h.issue.identifier, h.issue.status, h.issue.title, fields.join(", "));
+                }
+                for d in &found.docs { println!("doc\t{}\t{}", d.id, d.title); }
+                if found.issue_total > found.issues.len() { println!("showing {} of {} issues", found.issues.len(), found.issue_total); }
+                if found.doc_total > found.docs.len() { println!("showing {} of {} docs", found.docs.len(), found.doc_total); }
+                if found.issue_total == 0 && found.doc_total == 0 { println!("no matches"); }
             }
         },
         Commands::Tui => {

@@ -40,6 +40,11 @@ pub enum LclError {
     LabelNotFound(String),
     #[error("doc {0} not found")]
     DocNotFound(String),
+    #[error("the search query is empty")]
+    EmptyQuery,
+    /// Every word lacks token characters (`--`, `*`, a lone `"`).
+    #[error("the search query {0:?} has no words to search for")]
+    NothingToSearch(String),
     #[error("{0}")]
     Msg(String),
 }
@@ -53,7 +58,12 @@ impl LclError {
     pub fn is_usage(&self) -> bool {
         matches!(
             self,
-            LclError::WrongWorkspace { .. } | LclError::SelfParent(_) | LclError::ParentCycle { .. } | LclError::UnknownLabel(_)
+            LclError::WrongWorkspace { .. }
+                | LclError::SelfParent(_)
+                | LclError::ParentCycle { .. }
+                | LclError::UnknownLabel(_)
+                | LclError::EmptyQuery
+                | LclError::NothingToSearch(_)
         )
     }
 }

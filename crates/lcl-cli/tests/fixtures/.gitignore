@@ -1,0 +1,4 @@
+# Tests open copies of these fixtures (Env::install_db), never the files
+# here. A -wal or -shm beside one means something opened it in place.
+*.sqlite-wal
+*.sqlite-shm

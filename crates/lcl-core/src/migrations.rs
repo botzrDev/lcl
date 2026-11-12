@@ -13,13 +13,15 @@
 /// adding a migration bumps it and the two can't drift apart.
 pub const SCHEMA_VERSION: i64 = MIGRATIONS.len() as i64;
 
-pub(crate) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5];
+pub(crate) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6];
 
 /// v0 -> v1: the lcl 0.1.0 schema, verbatim.
 ///
 /// 0.1.0 ran this DDL on every open and never set `user_version`, so a 0.1.0
 /// database is at v0 and already has every object here. `IF NOT EXISTS` makes
 /// this a no-op for it, and the upgrade just records v1. No detection needed.
+// The FTS tables here (issues_fts, docs_fts) index by implicit rowid. lcl
+// never runs VACUUM, which may renumber those rowids: see V6.
 const V1: &str = r#"
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS labels (id TEXT PRIMARY KEY, name TEXT NOT NULL, color TEXT NOT NULL);
@@ -248,4 +250,32 @@ WHERE assignee <> trim(assignee, char(9, 10, 11, 12, 13, 32, 133, 160, 5760, 819
 
 DROP TABLE v5_label;
 DROP TABLE v5_raw;
+"#;
+
+/// v5 -> v6: comments become searchable.
+///
+/// comments_fts indexes comment bodies, kept in step by triggers the same
+/// way as issues_fts and docs_fts (V1). 'rebuild' then indexes the comments
+/// that already exist.
+///
+/// All three FTS tables use external content keyed by the content table's
+/// implicit rowid. SQLite documents that VACUUM may renumber implicit
+/// rowids (3.45 was tested and didn't), which would point the indexes at
+/// the wrong rows. So lcl never runs VACUUM; anything that ever does must
+/// run 'rebuild' on issues_fts, docs_fts and comments_fts afterwards.
+const V6: &str = r#"
+-- External content keyed by comments' implicit rowid: never VACUUM without
+-- rebuilding every fts table afterwards (see the doc comment on V6).
+CREATE VIRTUAL TABLE comments_fts USING fts5(body, content='comments', content_rowid='rowid');
+CREATE TRIGGER comments_ai AFTER INSERT ON comments BEGIN
+    INSERT INTO comments_fts(rowid, body) VALUES (new.rowid, new.body);
+END;
+CREATE TRIGGER comments_ad AFTER DELETE ON comments BEGIN
+    INSERT INTO comments_fts(comments_fts, rowid, body) VALUES ('delete', old.rowid, old.body);
+END;
+CREATE TRIGGER comments_au AFTER UPDATE ON comments BEGIN
+    INSERT INTO comments_fts(comments_fts, rowid, body) VALUES ('delete', old.rowid, old.body);
+    INSERT INTO comments_fts(rowid, body) VALUES (new.rowid, new.body);
+END;
+INSERT INTO comments_fts(comments_fts) VALUES ('rebuild');
 "#;

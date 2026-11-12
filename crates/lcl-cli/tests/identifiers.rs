@@ -186,7 +186,7 @@ fn issues_print_as_key_n() {
 
     let found = env.lcl(&["search", "zebra", "--json"]).assert_ok().json();
     assert_eq!(found["issues"][0]["identifier"], "DREA-2", "{found:#}");
-    assert!(env.lcl(&["search", "zebra"]).assert_ok().stdout.contains("\n  DREA-2 zebra\n"));
+    assert_eq!(env.lcl(&["search", "zebra"]).assert_ok().stdout, "DREA-2\t[Backlog]\tzebra\ttitle\n");
 
     assert_eq!(env.lcl(&["issue", "delete", "2"]).assert_ok().stdout, "Deleted DREA-2\n");
     let u = uuid(&env, 1);

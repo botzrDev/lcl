@@ -211,6 +211,19 @@ fn rows(conn: &rusqlite::Connection, sql: &str) -> Vec<Row> {
         .unwrap_or_else(|e| panic!("{sql}: {e}"))
 }
 
+/// Every FTS index lcl keeps.
+pub const FTS_TABLES: [&str; 3] = ["issues_fts", "docs_fts", "comments_fts"];
+
+/// Runs FTS5's integrity-check on each table, panicking on a mismatch. The
+/// `1` in the rank column matters: for an external-content table, only
+/// then is the index compared with the content table's rows. Without it
+/// the check covers the index's internal structure alone.
+pub fn fts_integrity(db: &Path, tables: &[&str]) {
+    for t in tables {
+        exec(db, &format!("INSERT INTO {t}({t}, rank) VALUES('integrity-check', 1);"));
+    }
+}
+
 /// Rows of `PRAGMA foreign_key_check`: empty when every foreign key holds.
 pub fn foreign_key_violations(db: &Path) -> Vec<Row> {
     let conn = rusqlite::Connection::open(db).expect("open db");
@@ -235,6 +248,23 @@ pub fn undo_v5_schema(after: &mut Dump, before: &mut Dump) {
     for d in [after, before] {
         d.schema.retain(|r| r["name"] != t("issue_labels"));
     }
+}
+
+/// Undoes migration 6's schema changes on an upgraded dump, after checking
+/// them: the comments_fts table (with its shadow tables, rows dropped too)
+/// and its three triggers. Check the index itself with FTS5's
+/// integrity-check.
+pub fn undo_v6_schema(after: &mut Dump) {
+    let t = |s: &str| Value::Text(s.into());
+    let fts = after.schema.iter().find(|r| r["name"] == t("comments_fts")).expect("comments_fts");
+    assert_eq!(fts["sql"], t("CREATE VIRTUAL TABLE comments_fts USING fts5(body, content='comments', content_rowid='rowid')"));
+    for trigger in ["comments_ai", "comments_ad", "comments_au"] {
+        let row = after.schema.iter().find(|r| r["name"] == t(trigger)).unwrap_or_else(|| panic!("trigger {trigger}"));
+        assert_eq!((&row["type"], &row["tbl_name"]), (&t("trigger"), &t("comments")), "{trigger}");
+    }
+    let ours = |name: &Value| matches!(name, Value::Text(n) if n.starts_with("comments_fts") || ["comments_ai", "comments_ad", "comments_au"].contains(&n.as_str()));
+    after.schema.retain(|r| !ours(&r["name"]));
+    after.tables.retain(|name, _| !name.starts_with("comments_fts"));
 }
 
 /// The schema plus every row of every table, for before/after comparisons.

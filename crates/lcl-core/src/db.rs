@@ -1,8 +1,9 @@
 use crate::error::{LclError, Result};
 use crate::migrations::{MIGRATIONS, SCHEMA_VERSION};
 use crate::models::*;
+use crate::search::{Field, IssueHit, SearchQuery, SearchResults};
 use rusqlite::{params, Connection, OptionalExtension, ToSql, Transaction, TransactionBehavior};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::time::Duration;
 
@@ -301,17 +302,106 @@ impl Store {
     }
 
     // ----- search -----
-    pub fn search_issues(&self, q: &str) -> Result<Vec<Issue>> {
-        let mut stmt = self.conn.prepare("SELECT i.id FROM issues i JOIN issues_fts f ON f.rowid=i.rowid WHERE issues_fts MATCH ?1")?;
-        let ids: Vec<String> = stmt.query_map(params![q], |r| r.get(0))?.collect::<std::result::Result<Vec<_>,_>>()?;
-        fetch_issues(&self.conn, &ids)
-    }
-    pub fn search_docs(&self, q: &str) -> Result<Vec<Doc>> {
-        let mut stmt = self.conn.prepare("SELECT d.id FROM docs d JOIN docs_fts f ON f.rowid=d.rowid WHERE docs_fts MATCH ?1")?;
-        let ids: Vec<String> = stmt.query_map(params![q], |r| r.get(0))?.collect::<std::result::Result<Vec<_>,_>>()?;
-        let mut out = vec![];
-        for id in ids { if let Some(d) = self.get_doc(&id)? { out.push(d); } }
-        Ok(out)
+    /// Issues and docs matching `q`, at most `limit` of each.
+    ///
+    /// An issue matches when every word is in its title and description
+    /// together, or every word is in one of its comments; it is listed once
+    /// either way, ranked by the best (lowest) bm25 of those matches. If the
+    /// query is exactly this workspace's `KEY-N` or `#N` for an issue that
+    /// exists, that issue comes first. `matched_in` comes from per-column
+    /// MATCHes (`{title} : (any word)`), counted only for issues whose own
+    /// text matched.
+    pub fn search(&self, q: &SearchQuery, limit: usize) -> Result<SearchResults> {
+        let conn = &self.conn;
+        struct Hit {
+            rank: f64,
+            number: i64,
+            fields: Vec<Field>,
+        }
+        let mut hits: HashMap<String, Hit> = HashMap::new();
+        let all = q.all_words();
+
+        let mut stmt = conn.prepare(
+            "SELECT i.id, i.number, bm25(issues_fts) FROM issues_fts JOIN issues i ON i.rowid = issues_fts.rowid WHERE issues_fts MATCH ?1",
+        )?;
+        for row in stmt.query_map(params![all], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, f64>(2)?)))? {
+            let (id, number, rank) = row?;
+            hits.insert(id, Hit { rank, number, fields: vec![] });
+        }
+        for (field, col) in [(Field::Title, "title"), (Field::Description, "description")] {
+            let mut stmt = conn.prepare("SELECT i.id FROM issues_fts JOIN issues i ON i.rowid = issues_fts.rowid WHERE issues_fts MATCH ?1")?;
+            for id in stmt.query_map(params![q.any_word_in(col)], |r| r.get::<_, String>(0))? {
+                if let Some(hit) = hits.get_mut(&id?) {
+                    hit.fields.push(field);
+                }
+            }
+        }
+
+        let mut stmt = conn.prepare(
+            "SELECT c.issue_id, i.number, bm25(comments_fts) FROM comments_fts
+             JOIN comments c ON c.rowid = comments_fts.rowid JOIN issues i ON i.id = c.issue_id
+             WHERE comments_fts MATCH ?1",
+        )?;
+        for row in stmt.query_map(params![all], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, f64>(2)?)))? {
+            let (id, number, rank) = row?;
+            let hit = hits.entry(id).or_insert(Hit { rank, number, fields: vec![] });
+            hit.rank = hit.rank.min(rank);
+            if !hit.fields.contains(&Field::Comments) {
+                hit.fields.push(Field::Comments);
+            }
+        }
+
+        // The issue the query names, if it's ours and exists. Another
+        // workspace's key, or a missing number, is just text.
+        let mut named = None;
+        if let Some(IssueRef::Number { key: typed, number }) = q.identifier() {
+            let key = read_key(conn)?;
+            let ours = match typed {
+                Some(typed) => !key.is_empty() && typed.to_lowercase() == key.to_lowercase(),
+                None => true,
+            };
+            if ours && let Some(id) = conn.query_row("SELECT id FROM issues WHERE number=?1", params![number], |r| r.get::<_, String>(0)).optional()? {
+                let hit = hits.entry(id.clone()).or_insert(Hit { rank: 0.0, number: *number, fields: vec![] });
+                hit.fields.insert(0, Field::Identifier);
+                named = Some(id);
+            }
+        }
+
+        let mut ranked: Vec<(String, Hit)> = hits.into_iter().collect();
+        ranked.sort_by(|(a_id, a), (b_id, b)| {
+            let (a_named, b_named) = (named.as_ref() == Some(a_id), named.as_ref() == Some(b_id));
+            b_named.cmp(&a_named).then(a.rank.total_cmp(&b.rank)).then(b.number.cmp(&a.number))
+        });
+        let issue_total = ranked.len();
+        let key = read_key(conn)?;
+        let mut issues = Vec::with_capacity(limit.min(issue_total));
+        for (id, hit) in ranked.into_iter().take(limit) {
+            if let Some(issue) = fetch_issue_by(conn, &key, "id", &id)? {
+                issues.push(IssueHit { issue, matched_in: hit.fields });
+            }
+        }
+
+        let mut stmt = conn.prepare(
+            "SELECT d.id FROM docs_fts JOIN docs d ON d.rowid = docs_fts.rowid WHERE docs_fts MATCH ?1 ORDER BY bm25(docs_fts), d.updated_at DESC",
+        )?;
+        let doc_ids: Vec<String> = stmt.query_map(params![all], |r| r.get(0))?.collect::<std::result::Result<_, _>>()?;
+        let doc_total = doc_ids.len();
+        let mut docs = Vec::with_capacity(limit.min(doc_total));
+        for id in doc_ids.iter().take(limit) {
+            if let Some(d) = read_doc(conn, id)? {
+                docs.push(d);
+            }
+        }
+
+        Ok(SearchResults {
+            query: q.raw().to_string(),
+            truncated: issue_total > limit || doc_total > limit,
+            issues,
+            docs,
+            issue_total,
+            doc_total,
+            limit,
+        })
     }
 }
 
