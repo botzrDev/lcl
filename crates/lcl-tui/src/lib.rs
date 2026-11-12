@@ -2,7 +2,7 @@ use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
 use crossterm::ExecutableCommand;
-use lcl_core::db::Store;
+use lcl_core::db::{IssueFilter, Store};
 use ratatui::prelude::*;
 use ratatui::widgets::*;
 use std::io::stdout;
@@ -33,7 +33,7 @@ pub fn run(project: Option<String>) -> Result<()> {
 
     let mut selected: usize = 0;
     let mut status_filter: Option<&str> = None;
-    let issues = store.list_issues(None, None, 200).unwrap_or_default();
+    let issues = store.list_issues(&IssueFilter { status: None, assignee: None, parent_id: None, limit: 200 }).unwrap_or_default();
 
     loop {
         terminal.draw(|f| {
@@ -43,7 +43,7 @@ pub fn run(project: Option<String>) -> Result<()> {
 
             let filtered: Vec<&lcl_core::models::Issue> = issues.iter().filter(|i| status_filter.is_none() || i.status.as_str() == status_filter.unwrap()).collect();
             let items: Vec<ListItem> = filtered.iter().map(|i| {
-                ListItem::new(format!("#{} [{}] {} - {}", i.number, i.status, i.priority.label(), i.title))
+                ListItem::new(format!("{} [{}] {} - {}", i.identifier, i.status, i.priority.label(), i.title))
             }).collect();
             let list = List::new(items).block(Block::default().borders(Borders::ALL).title("Issues")).highlight_style(Style::default().bg(Color::DarkGray)).highlight_symbol(">> ");
             let mut state = ListState::default();

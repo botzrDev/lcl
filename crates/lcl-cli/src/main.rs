@@ -1,9 +1,11 @@
 use anyhow::{Context, Result};
 use chrono::NaiveDate;
 use clap::{CommandFactory, Parser, Subcommand};
-use lcl_core::db::Store;
+use lcl_core::db::{IssueFilter, Store};
+use lcl_core::error::LclError;
 use lcl_core::models::*;
 use std::path::PathBuf;
+use std::process::ExitCode;
 
 #[derive(Parser)]
 #[command(name = "lcl", version, about = "Local Linear-like tracker (SQLite per project)")]
@@ -52,16 +54,18 @@ enum ProjectCmd {
 
 #[derive(Subcommand)]
 enum IssueCmd {
-    // Status and Priority parse through their FromStr impls, and dates,
-    // estimates and colors through the parsers below. A bad value is a clap
-    // error: exit 2, before any database is opened.
+    // Status, Priority and IssueRef parse through their FromStr impls, and
+    // dates, estimates and colors through the parsers below. A bad value is a
+    // clap error: exit 2, before any database is opened. Issue arguments allow
+    // a leading '-' so that "-3" reaches the IssueRef parser and is rejected
+    // there, rather than being taken for a flag.
     Create {
         #[arg(long)] title: String,
         #[arg(long, default_value = "")] description: String,
         #[arg(long, default_value = "Backlog")] status: Status,
         #[arg(long, default_value = "0")] priority: Priority,
         #[arg(long)] assignee: Option<String>,
-        #[arg(long)] parent: Option<String>,
+        #[arg(long, allow_negative_numbers = true)] parent: Option<IssueRef>,
         #[arg(long)] label: Vec<String>,
         #[arg(long, allow_negative_numbers = true, value_parser = clap::value_parser!(i64).range(0..))] estimate: Option<i64>,
         #[arg(long, value_parser = parse_date)] due: Option<NaiveDate>,
@@ -69,11 +73,13 @@ enum IssueCmd {
     List {
         #[arg(long)] status: Option<Status>,
         #[arg(long)] assignee: Option<String>,
+        /// Only the direct sub-issues of this issue.
+        #[arg(long, allow_negative_numbers = true)] parent: Option<IssueRef>,
         #[arg(long, default_value_t = 50)] limit: i64,
     },
-    Show { id: String },
+    Show { #[arg(allow_negative_numbers = true)] id: IssueRef },
     Update {
-        id: String,
+        #[arg(allow_negative_numbers = true)] id: IssueRef,
         #[arg(long)] title: Option<String>,
         #[arg(long)] description: Option<String>,
         #[arg(long)] status: Option<Status>,
@@ -82,10 +88,14 @@ enum IssueCmd {
         #[arg(long, allow_negative_numbers = true, value_parser = clap::value_parser!(i64).range(0..))] estimate: Option<i64>,
         #[arg(long, value_parser = parse_date)] due: Option<NaiveDate>,
         #[arg(long)] label: Vec<String>,
+        /// Move the issue under this one.
+        #[arg(long, allow_negative_numbers = true, conflicts_with = "no_parent")] parent: Option<IssueRef>,
+        /// Make the issue top-level.
+        #[arg(long)] no_parent: bool,
     },
-    Delete { id: String },
-    Comment { id: String, body: String, #[arg(long)] author: Option<String> },
-    Comments { id: String },
+    Delete { #[arg(allow_negative_numbers = true)] id: IssueRef },
+    Comment { #[arg(allow_negative_numbers = true)] id: IssueRef, body: String, #[arg(long)] author: Option<String> },
+    Comments { #[arg(allow_negative_numbers = true)] id: IssueRef },
 }
 
 #[derive(Subcommand)]
@@ -192,9 +202,22 @@ fn print_json<T: serde::Serialize>(v: &T) {
     println!("{}", serde_json::to_string_pretty(v).unwrap());
 }
 
-fn main() -> Result<()> {
+/// Exit 2 for a usage error, as clap does for a bad argument; 1 for anything
+/// else. Errors print as `fn main() -> Result` would print them.
+fn main() -> ExitCode {
     let cli = Cli::parse();
     validate(&cli);
+    match run(cli) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("Error: {e:?}");
+            let usage = e.downcast_ref::<LclError>().is_some_and(LclError::is_usage);
+            ExitCode::from(if usage { 2 } else { 1 })
+        }
+    }
+}
+
+fn run(cli: Cli) -> Result<()> {
     match cli.cmd {
         Commands::Init { name } => {
             let pname = name.unwrap_or_else(|| {
@@ -259,37 +282,52 @@ fn main() -> Result<()> {
             let mut store = resolve_store(&cli.project)?;
             match cmd {
                 IssueCmd::Create { title, description, status, priority, assignee, parent, label, estimate, due } => {
+                    let parent_id = parent.map(|p| store.resolve(&p)).transpose()?.map(|p| p.id);
                     let issue = store.create_issue(Issue {
-                        id: String::new(), number: 0, title, description, status, priority,
-                        assignee, parent_id: parent, estimate, due_date: due.map(|d| d.to_string()), labels: label,
+                        id: String::new(), number: 0, identifier: String::new(), title, description, status, priority,
+                        assignee, parent_id, parent_identifier: None, estimate, due_date: due.map(|d| d.to_string()), labels: label,
                         created_at: 0, updated_at: 0, completed_at: None, started_at: None, canceled_at: None,
                     })?;
-                    if cli.json { print_json(&issue); } else { println!("Created {}-{}", store.get_meta("key").ok().flatten().unwrap_or_default(), issue.number); }
+                    if cli.json { print_json(&issue); } else { println!("Created {}", issue.identifier); }
                 }
-                IssueCmd::List { status, assignee, limit } => {
-                    let issues = store.list_issues(status, assignee.as_deref(), limit)?;
+                IssueCmd::List { status, assignee, parent, limit } => {
+                    let parent_id = parent.map(|p| store.resolve(&p)).transpose()?.map(|p| p.id);
+                    let issues = store.list_issues(&IssueFilter { status, assignee, parent_id, limit })?;
                     if cli.json { print_json(&issues); }
                     else {
-                        let key = store.get_meta("key").ok().flatten().unwrap_or_default();
-                        for i in &issues { println!("{}-{}\t[{}]\t{}\t{}", key, i.number, i.status, i.priority.label(), i.title); }
+                        for i in &issues { println!("{}\t[{}]\t{}\t{}", i.identifier, i.status, i.priority.label(), i.title); }
                     }
                 }
                 IssueCmd::Show { id } => {
-                    let issue = store.get_issue(&id)?.ok_or_else(|| anyhow::anyhow!("issue not found"))?;
+                    let issue = store.resolve(&id)?;
                     let comments = store.list_comments(&issue.id)?;
-                    if cli.json { print_json(&serde_json::json!({"issue": issue, "comments": comments})); }
+                    let children = store.children(&issue.id)?;
+                    if cli.json {
+                        let children: Vec<&str> = children.iter().map(|c| c.identifier.as_str()).collect();
+                        print_json(&serde_json::json!({"issue": issue, "comments": comments, "children": children}));
+                    }
                     else {
-                        let key = store.get_meta("key").ok().flatten().unwrap_or_default();
-                        println!("{}-{} {}", key, issue.number, issue.title);
+                        println!("{} {}", issue.identifier, issue.title);
                         println!("Status: {}  Priority: {}  Assignee: {:?}", issue.status, issue.priority.label(), issue.assignee);
+                        if let Some(p) = &issue.parent_identifier { println!("Parent: {p}"); }
                         if !issue.description.is_empty() { println!("\n{}", issue.description); }
+                        if !children.is_empty() {
+                            println!("\nSub-issues:");
+                            for c in &children { println!("  {} {}", c.identifier, c.title); }
+                        }
                         if !comments.is_empty() {
                             println!("\nComments:");
                             for c in comments { println!("  - {}: {}", c.author.as_deref().unwrap_or("anon"), c.body); }
                         }
                     }
                 }
-                IssueCmd::Update { id, title, description, status, priority, assignee, estimate, due, label } => {
+                IssueCmd::Update { id, title, description, status, priority, assignee, estimate, due, label, parent, no_parent } => {
+                    // Some(new parent UUID or None), or None to leave it alone.
+                    let new_parent = match (parent, no_parent) {
+                        (_, true) => Some(None),
+                        (Some(p), false) => Some(Some(store.resolve(&p)?.id)),
+                        (None, false) => None,
+                    };
                     let issue = store.update_issue(&id, |i| {
                         if let Some(t) = title { i.title = t; }
                         if let Some(d) = description { i.description = d; }
@@ -299,19 +337,20 @@ fn main() -> Result<()> {
                         if let Some(e) = estimate { i.estimate = Some(e); }
                         if let Some(d) = due { i.due_date = Some(d.to_string()); }
                         if !label.is_empty() { i.labels = label; }
+                        if let Some(p) = new_parent { i.parent_id = p; }
                     })?;
-                    if cli.json { print_json(&issue); } else { println!("Updated {}", id); }
+                    if cli.json { print_json(&issue); } else { println!("Updated {}", issue.identifier); }
                 }
                 IssueCmd::Delete { id } => {
-                    store.delete_issue(&id)?;
-                    if cli.json { print_json(&serde_json::json!({"deleted": id})); } else { println!("Deleted {}", id); }
+                    let issue = store.delete_issue(&id)?;
+                    if cli.json { print_json(&serde_json::json!({"deleted": issue.identifier, "id": issue.id})); } else { println!("Deleted {}", issue.identifier); }
                 }
                 IssueCmd::Comment { id, body, author } => {
-                    let c = store.add_comment(&id, body, author)?.ok_or_else(|| anyhow::anyhow!("issue not found"))?;
+                    let c = store.add_comment(&id, body, author)?;
                     if cli.json { print_json(&c); } else { println!("Comment added"); }
                 }
                 IssueCmd::Comments { id } => {
-                    let issue = store.get_issue(&id)?.ok_or_else(|| anyhow::anyhow!("issue not found"))?;
+                    let issue = store.resolve(&id)?;
                     let comments = store.list_comments(&issue.id)?;
                     if cli.json { print_json(&comments); }
                     else { for c in comments { println!("[{}] {}: {}", c.created_at, c.author.as_deref().unwrap_or("anon"), c.body); } }
@@ -382,8 +421,7 @@ fn main() -> Result<()> {
             if cli.json { print_json(&serde_json::json!({"issues": issues, "docs": docs})); }
             else {
                 println!("Issues:");
-                let key = store.get_meta("key").ok().flatten().unwrap_or_default();
-                for i in &issues { println!("  {}-{} {}", key, i.number, i.title); }
+                for i in &issues { println!("  {} {}", i.identifier, i.title); }
                 println!("Docs:");
                 for d in &docs { println!("  {} {}", d.id, d.title); }
             }

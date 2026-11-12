@@ -100,16 +100,75 @@ impl FromStr for Priority {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Label { pub id: String, pub name: String, pub color: String }
 
+/// An issue as a user names it: parsed, but not yet looked up. Resolving it
+/// against a workspace (`Store::resolve`) checks the key and finds the issue.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IssueRef {
+    /// `N`, `#N` (key `None`) or `KEY-N` (the key as typed; it must equal the
+    /// workspace key, ignoring case). `number` is always positive.
+    Number { key: Option<String>, number: i64 },
+    /// A full UUID, lowercased: the form issue ids are stored in.
+    Id(String),
+}
+
+impl FromStr for IssueRef {
+    type Err = InvalidValue;
+    /// Accepts `KEY-N`, `#N`, `N` (N a positive integer) or a hyphenated UUID
+    /// in either case. The UUID is tried before `KEY-N`, because a UUID also
+    /// ends in "-digits" more often than not.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        fn positive(digits: &str) -> Option<i64> {
+            if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+                return None;
+            }
+            digits.parse::<i64>().ok().filter(|n| *n > 0)
+        }
+        let number = |key: Option<&str>, n: i64| IssueRef::Number { key: key.map(String::from), number: n };
+        let parsed = if let Some(rest) = s.strip_prefix('#') {
+            positive(rest).map(|n| number(None, n))
+        } else if let Some(n) = positive(s) {
+            Some(number(None, n))
+        } else if let Some(id) = (s.len() == 36).then(|| uuid::Uuid::parse_str(s).ok()).flatten() {
+            Some(IssueRef::Id(id.hyphenated().to_string()))
+        } else {
+            s.rsplit_once('-')
+                .filter(|(key, _)| !key.is_empty() && !key.chars().any(char::is_whitespace))
+                .and_then(|(key, n)| positive(n).map(|n| number(Some(key), n)))
+        };
+        parsed.ok_or_else(|| InvalidValue(format!("invalid issue id \"{s}\"; expected KEY-N, #N, N or an issue UUID")))
+    }
+}
+
+impl std::fmt::Display for IssueRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            IssueRef::Number { key: Some(key), number } => write!(f, "{key}-{number}"),
+            IssueRef::Number { key: None, number } => write!(f, "#{number}"),
+            IssueRef::Id(id) => f.write_str(id),
+        }
+    }
+}
+
+/// How an issue is shown to people: `KEY-N`, or `#N` in a workspace with no key.
+pub fn identifier(key: &str, number: i64) -> String {
+    if key.is_empty() { format!("#{number}") } else { format!("{key}-{number}") }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Issue {
     pub id: String,
     pub number: i64,
+    /// `KEY-N`. Derived when the issue is read; ignored on write.
+    pub identifier: String,
     pub title: String,
     pub description: String,
     pub status: Status,
     pub priority: Priority,
     pub assignee: Option<String>,
+    /// The parent's UUID.
     pub parent_id: Option<String>,
+    /// The parent's `KEY-N`. Derived when the issue is read; ignored on write.
+    pub parent_identifier: Option<String>,
     pub estimate: Option<i64>,
     pub due_date: Option<String>,
     pub labels: Vec<String>,
@@ -255,8 +314,8 @@ mod tests {
 
     fn issue(status: Status, started: Option<i64>, completed: Option<i64>, canceled: Option<i64>) -> Issue {
         Issue {
-            id: "id".into(), number: 1, title: "t".into(), description: String::new(), status,
-            priority: Priority::None, assignee: None, parent_id: None, estimate: None, due_date: None,
+            id: "id".into(), number: 1, identifier: String::new(), title: "t".into(), description: String::new(), status,
+            priority: Priority::None, assignee: None, parent_id: None, parent_identifier: None, estimate: None, due_date: None,
             labels: vec![], created_at: 1, updated_at: 1,
             completed_at: completed, started_at: started, canceled_at: canceled,
         }
@@ -282,6 +341,28 @@ mod tests {
             }
         }
         assert_eq!(seen.len(), 7 + 7 * 7);
+    }
+
+    #[test]
+    fn issue_ref_forms() {
+        let num = |key: Option<&str>, n: i64| IssueRef::Number { key: key.map(String::from), number: n };
+        let u = "0f8fad5b-d9cb-469f-a165-70867728950e";
+        for (s, want) in [
+            ("7", num(None, 7)),
+            ("#7", num(None, 7)),
+            ("DREA-7", num(Some("DREA"), 7)),
+            ("drea-7", num(Some("drea"), 7)),
+            ("MY-KEY-7", num(Some("MY-KEY"), 7)),
+            ("007", num(None, 7)),
+            (u, IssueRef::Id(u.into())),
+            ("0F8FAD5B-D9CB-469F-A165-70867728950E", IssueRef::Id(u.into())),
+        ] {
+            assert_eq!(s.parse::<IssueRef>(), Ok(want), "{s:?}");
+        }
+        for bad in ["", "0", "#0", "-3", "#-3", "+3", "#", "#x", "abc", "DREA-", "DREA-x", "DREA-0", "-7", "DREA 7-1", " 7", "7 ", "1.5",
+                    "99999999999999999999", "0f8fad5bd9cb469fa16570867728950e", "{0f8fad5b-d9cb-469f-a165-70867728950e}"] {
+            assert!(bad.parse::<IssueRef>().is_err(), "{bad:?} parsed as {:?}", bad.parse::<IssueRef>());
+        }
     }
 
     #[test]

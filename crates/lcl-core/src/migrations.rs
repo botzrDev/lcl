@@ -13,7 +13,7 @@
 /// adding a migration bumps it and the two can't drift apart.
 pub const SCHEMA_VERSION: i64 = MIGRATIONS.len() as i64;
 
-pub(crate) const MIGRATIONS: &[&str] = &[V1, V2, V3];
+pub(crate) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4];
 
 /// v0 -> v1: the lcl 0.1.0 schema, verbatim.
 ///
@@ -112,4 +112,55 @@ ALTER TABLE issues ADD COLUMN started_at INTEGER;
 ALTER TABLE issues ADD COLUMN canceled_at INTEGER;
 UPDATE issues SET canceled_at = updated_at WHERE status = 'Canceled';
 UPDATE issues SET completed_at = updated_at WHERE status = 'Done' AND completed_at IS NULL;
+"#;
+
+/// v3 -> v4: repair `issues.parent_id`, which 0.1.0 stored as typed.
+///
+/// Every value becomes the UUID of the issue it names, or NULL:
+/// - a UUID of an existing issue stays (lowercased, the stored form);
+/// - `N`, `#N` or `KEY-N` (this workspace's key, in any ASCII case) naming an
+///   existing issue becomes that issue's UUID;
+/// - anything else becomes NULL: another key, a number with no issue, text,
+///   or "". These were dangling, and nothing could follow them.
+///
+/// Then every link on a cycle (an issue that is its own ancestor, itself
+/// included) becomes NULL. No link in a loop is more wrong than another, so
+/// all of them go; issues hanging below the loop keep their parents.
+///
+/// Rows whose value is already right are not rewritten (so their FTS entries
+/// are untouched). Idempotent.
+const V4: &str = r#"
+CREATE TEMP TABLE v4_parent AS
+WITH k(key) AS (SELECT COALESCE((SELECT value FROM meta WHERE key = 'key'), '')),
+c AS (
+    SELECT i.id, i.parent_id AS raw,
+        CASE
+            WHEN i.parent_id GLOB '#*' THEN substr(i.parent_id, 2)
+            WHEN k.key <> '' AND lower(substr(i.parent_id, 1, length(k.key) + 1)) = lower(k.key) || '-'
+                THEN substr(i.parent_id, length(k.key) + 2)
+            ELSE i.parent_id
+        END AS n
+    FROM issues i, k
+    WHERE i.parent_id IS NOT NULL
+)
+SELECT c.id, c.raw,
+    COALESCE(
+        (SELECT p.id FROM issues p WHERE p.id = lower(c.raw)),
+        CASE WHEN c.n <> '' AND c.n NOT GLOB '*[^0-9]*'
+            THEN (SELECT p.id FROM issues p WHERE p.number = CAST(c.n AS INTEGER)) END
+    ) AS parent
+FROM c;
+
+UPDATE issues SET parent_id = (SELECT v.parent FROM v4_parent v WHERE v.id = issues.id)
+WHERE id IN (SELECT id FROM v4_parent WHERE parent IS NOT raw);
+
+DROP TABLE v4_parent;
+
+WITH RECURSIVE up(start, cur) AS (
+    SELECT id, parent_id FROM issues WHERE parent_id IS NOT NULL
+    UNION
+    SELECT up.start, i.parent_id FROM up JOIN issues i ON i.id = up.cur
+    WHERE i.parent_id IS NOT NULL AND up.cur <> up.start
+)
+UPDATE issues SET parent_id = NULL WHERE id IN (SELECT start FROM up WHERE cur = start);
 "#;

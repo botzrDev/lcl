@@ -18,6 +18,10 @@ pub fn argv(args: &[&str]) -> Vec<String> {
 /// A database written by lcl 0.1.0. See tests/schema.rs for how it was built.
 pub const V0_FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/v0.sqlite");
 
+/// A 0.1.0 database whose issues have parents typed in every form 0.1.0
+/// accepted. See tests/parents.rs for how it was built.
+pub const V0_PARENTS_FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/v0-parents.sqlite");
+
 /// What one `lcl` invocation produced.
 #[derive(Debug)]
 pub struct Out {

@@ -1,7 +1,8 @@
 use crate::error::{LclError, Result};
 use crate::migrations::{MIGRATIONS, SCHEMA_VERSION};
 use crate::models::*;
-use rusqlite::{params, Connection, Transaction, TransactionBehavior};
+use rusqlite::{params, Connection, OptionalExtension, ToSql, Transaction, TransactionBehavior};
+use std::collections::HashSet;
 use std::path::Path;
 use std::time::Duration;
 
@@ -16,6 +17,17 @@ const NEXT_ISSUE_NUMBER: &str = "next_issue_number";
 
 pub struct Store {
     pub conn: Connection,
+}
+
+/// Which issues `Store::list_issues` returns.
+#[derive(Debug, Clone)]
+pub struct IssueFilter {
+    pub status: Option<Status>,
+    pub assignee: Option<String>,
+    /// Only the direct sub-issues of the issue with this UUID.
+    pub parent_id: Option<String>,
+    /// At most this many, newest first. Negative means no limit.
+    pub limit: i64,
 }
 
 impl Store {
@@ -97,10 +109,13 @@ impl Store {
     }
 
     // ----- issues -----
-    /// Inserts `issue`. A zero `number` is allocated from the high-water mark;
-    /// either way the mark ends up past the number used.
+    /// Inserts `issue` and returns it as stored. A zero `number` is allocated
+    /// from the high-water mark; either way the mark ends up past the number
+    /// used. A `parent_id` must be the UUID of an existing issue.
     pub fn create_issue(&mut self, mut issue: Issue) -> Result<Issue> {
         self.write(|tx| {
+            let key = read_key(tx)?;
+            if let Some(parent) = &issue.parent_id { check_parent(tx, &key, None, parent)?; }
             if issue.id.is_empty() { issue.id = uuid::Uuid::new_v4().to_string(); }
             let next = next_issue_number(tx)?;
             if issue.number == 0 { issue.number = next; }
@@ -118,39 +133,48 @@ impl Store {
                 tx.execute("INSERT OR IGNORE INTO issue_labels(issue_id,label_id) VALUES(?1,?2)", params![issue.id, lid])?;
             }
             put_meta(tx, NEXT_ISSUE_NUMBER, &next.max(issue.number + 1).to_string())?;
-            Ok(issue)
+            reread(tx, &key, &issue.id)
         })
     }
-    pub fn get_issue(&self, id_or_number: &str) -> Result<Option<Issue>> {
-        read_issue(&self.conn, id_or_number)
+    /// The issue `r` names. This is the one resolver: every command that
+    /// takes an issue goes through it (writes through `resolve_issue`, inside
+    /// their transaction).
+    pub fn resolve(&self, r: &IssueRef) -> Result<Issue> {
+        resolve_issue(&self.conn, r)
     }
-    pub fn list_issues(&self, status: Option<Status>, assignee: Option<&str>, limit: i64) -> Result<Vec<Issue>> {
+    /// The issues directly under the issue with UUID `parent_id`, by number.
+    pub fn children(&self, parent_id: &str) -> Result<Vec<Issue>> {
+        let mut stmt = self.conn.prepare("SELECT id FROM issues WHERE parent_id=?1 ORDER BY number")?;
+        let ids = stmt.query_map(params![parent_id], |r| r.get(0))?.collect::<std::result::Result<Vec<String>, _>>()?;
+        fetch_issues(&self.conn, &ids)
+    }
+    pub fn list_issues(&self, filter: &IssueFilter) -> Result<Vec<Issue>> {
+        let mut conds: Vec<&str> = vec![];
+        let mut args: Vec<String> = vec![];
+        if let Some(st) = filter.status { conds.push("status=?"); args.push(st.as_str().to_string()); }
+        if let Some(p) = &filter.parent_id { conds.push("parent_id=?"); args.push(p.clone()); }
         let mut sql = String::from("SELECT id FROM issues");
-        if status.is_some() { sql.push_str(" WHERE status=?1"); }
-        sql.push_str(" ORDER BY number DESC LIMIT ");
-        sql.push_str(&limit.to_string());
+        if !conds.is_empty() { sql.push_str(" WHERE "); sql.push_str(&conds.join(" AND ")); }
+        sql.push_str(&format!(" ORDER BY number DESC LIMIT {}", filter.limit));
         let mut stmt = self.conn.prepare(&sql)?;
-        let ids: Vec<String> = if let Some(st) = status {
-            stmt.query_map(params![st.as_str()], |r| r.get(0))?.collect::<std::result::Result<Vec<_>,_>>()?
-        } else {
-            stmt.query_map([], |r| r.get(0))?.collect::<std::result::Result<Vec<_>,_>>()?
-        };
-        let mut out = Vec::new();
-        for id in ids {
-            if let Some(iss) = self.get_issue(&id)? {
-                if let Some(a) = assignee && iss.assignee.as_deref() != Some(a) { continue; }
-                out.push(iss);
-            }
-        }
+        let ids = stmt.query_map(rusqlite::params_from_iter(&args), |r| r.get(0))?.collect::<std::result::Result<Vec<String>, _>>()?;
+        let mut out = fetch_issues(&self.conn, &ids)?;
+        if let Some(a) = &filter.assignee { out.retain(|i| i.assignee.as_ref() == Some(a)); }
         Ok(out)
     }
     /// Reads the issue, applies `f` and writes it back, all under the write
     /// lock, so a concurrent update can't be overwritten with a stale copy.
-    pub fn update_issue(&mut self, id_or_number: &str, f: impl FnOnce(&mut Issue)) -> Result<Issue> {
+    /// A changed `parent_id` must be the UUID of an existing issue that is
+    /// neither this one nor below it.
+    pub fn update_issue(&mut self, r: &IssueRef, f: impl FnOnce(&mut Issue)) -> Result<Issue> {
         self.write(|tx| {
-            let mut issue = read_issue(tx, id_or_number)?.ok_or_else(|| LclError::NotFound(id_or_number.to_string()))?;
-            let from = issue.status;
+            let key = read_key(tx)?;
+            let mut issue = resolve_issue(tx, r)?;
+            let (from, old_parent) = (issue.status, issue.parent_id.clone());
             f(&mut issue);
+            if issue.parent_id != old_parent && let Some(parent) = &issue.parent_id {
+                check_parent(tx, &key, Some(&issue), parent)?;
+            }
             issue.updated_at = crate::models::now();
             issue.apply_lifecycle(Some(from), issue.updated_at);
             let status = issue.status.as_str();
@@ -164,31 +188,40 @@ impl Store {
             for lid in &issue.labels {
                 tx.execute("INSERT OR IGNORE INTO issue_labels(issue_id,label_id) VALUES(?1,?2)", params![issue.id, lid])?;
             }
-            Ok(issue)
+            reread(tx, &key, &issue.id)
         })
     }
-    /// Deletes the issue and its child rows. The number-allocation mark is
-    /// deliberately left alone, so the number is never reused.
-    pub fn delete_issue(&mut self, id_or_number: &str) -> Result<()> {
+    /// Deletes the issue and its comments, labels and cycle links, and returns
+    /// it. Refused while it has sub-issues, which would be left pointing at
+    /// nothing. The number-allocation mark is deliberately left alone, so the
+    /// number is never reused.
+    pub fn delete_issue(&mut self, r: &IssueRef) -> Result<Issue> {
         self.write(|tx| {
-            let issue = read_issue(tx, id_or_number)?.ok_or_else(|| LclError::NotFound(id_or_number.to_string()))?;
+            let key = read_key(tx)?;
+            let issue = resolve_issue(tx, r)?;
+            let mut stmt = tx.prepare("SELECT number FROM issues WHERE parent_id=?1 ORDER BY number")?;
+            let children = stmt.query_map(params![issue.id], |r| r.get(0))?.collect::<std::result::Result<Vec<i64>, _>>()?;
+            if !children.is_empty() {
+                let children: Vec<String> = children.into_iter().map(|n| identifier(&key, n)).collect();
+                return Err(LclError::HasChildren { issue: issue.identifier, children: children.join(", ") });
+            }
             tx.execute("DELETE FROM comments WHERE issue_id=?1", params![issue.id])?;
             tx.execute("DELETE FROM issue_labels WHERE issue_id=?1", params![issue.id])?;
             tx.execute("DELETE FROM issue_cycles WHERE issue_id=?1", params![issue.id])?;
             tx.execute("DELETE FROM issues WHERE id=?1", params![issue.id])?;
-            Ok(())
+            Ok(issue)
         })
     }
 
     // ----- comments -----
-    /// Looks up the issue (number or id) and adds the comment in one
-    /// transaction. `Ok(None)` means there is no such issue.
-    pub fn add_comment(&mut self, issue: &str, body: String, author: Option<String>) -> Result<Option<Comment>> {
+    /// Resolves the issue and adds the comment in one transaction, so the
+    /// issue can't be deleted in between.
+    pub fn add_comment(&mut self, r: &IssueRef, body: String, author: Option<String>) -> Result<Comment> {
         self.write(|tx| {
-            let Some(target) = read_issue(tx, issue)? else { return Ok(None) };
+            let target = resolve_issue(tx, r)?;
             let c = Comment { id: uuid::Uuid::new_v4().to_string(), issue_id: target.id, body, author, created_at: crate::models::now() };
             tx.execute("INSERT INTO comments(id,issue_id,body,author,created_at) VALUES(?1,?2,?3,?4,?5)", params![c.id, c.issue_id, c.body, c.author, c.created_at])?;
-            Ok(Some(c))
+            Ok(c)
         })
     }
     pub fn list_comments(&self, issue_id: &str) -> Result<Vec<Comment>> {
@@ -252,9 +285,7 @@ impl Store {
     pub fn search_issues(&self, q: &str) -> Result<Vec<Issue>> {
         let mut stmt = self.conn.prepare("SELECT i.id FROM issues i JOIN issues_fts f ON f.rowid=i.rowid WHERE issues_fts MATCH ?1")?;
         let ids: Vec<String> = stmt.query_map(params![q], |r| r.get(0))?.collect::<std::result::Result<Vec<_>,_>>()?;
-        let mut out = vec![];
-        for id in ids { if let Some(iss) = self.get_issue(&id)? { out.push(iss); } }
-        Ok(out)
+        fetch_issues(&self.conn, &ids)
     }
     pub fn search_docs(&self, q: &str) -> Result<Vec<Doc>> {
         let mut stmt = self.conn.prepare("SELECT d.id FROM docs d JOIN docs_fts f ON f.rowid=d.rowid WHERE docs_fts MATCH ?1")?;
@@ -293,21 +324,81 @@ fn next_issue_number(conn: &Connection) -> Result<i64> {
     Ok(mark.max(past_max))
 }
 
-fn read_issue(conn: &Connection, id_or_number: &str) -> Result<Option<Issue>> {
-    // try number first
-    if let Ok(n) = id_or_number.parse::<i64>() {
-        fetch_issue_by(conn, "number", n.to_string().as_str())
-    } else {
-        fetch_issue_by(conn, "id", id_or_number)
+/// This workspace's key, as used in `KEY-N` ("" if it has none).
+fn read_key(conn: &Connection) -> Result<String> {
+    Ok(read_meta(conn, "key")?.unwrap_or_default())
+}
+
+/// The issue `r` names, or why there is none. `KEY-N` must carry this
+/// workspace's key, compared ignoring case. A miss names the issue as
+/// `KEY-N` whichever number form was given.
+fn resolve_issue(conn: &Connection, r: &IssueRef) -> Result<Issue> {
+    let key = read_key(conn)?;
+    match r {
+        IssueRef::Number { key: typed, number } => {
+            if let Some(typed) = typed && typed.to_lowercase() != key.to_lowercase() {
+                return Err(LclError::WrongWorkspace { given: r.to_string(), key });
+            }
+            fetch_issue_by(conn, &key, "number", number)?.ok_or_else(|| LclError::IssueNotFound(identifier(&key, *number)))
+        }
+        IssueRef::Id(id) => fetch_issue_by(conn, &key, "id", id)?.ok_or_else(|| LclError::IssueNotFound(id.clone())),
     }
 }
 
-fn fetch_issue_by(conn: &Connection, col: &str, val: &str) -> Result<Option<Issue>> {
-    let sql = format!("SELECT id,number,title,description,status,priority,assignee,parent_id,estimate,due_date,created_at,updated_at,completed_at,started_at,canceled_at FROM issues WHERE {}=?1", col);
+/// Checks a parent link before it is written. The parent must exist, and for
+/// an existing issue (`child`) it must be neither the issue itself nor below
+/// it: walking up from the new parent must never reach the issue.
+fn check_parent(conn: &Connection, key: &str, child: Option<&Issue>, parent_id: &str) -> Result<()> {
+    let up = |id: &str| -> Result<Option<(i64, Option<String>)>> {
+        Ok(conn.query_row("SELECT number, parent_id FROM issues WHERE id=?1", params![id], |r| Ok((r.get(0)?, r.get(1)?))).optional()?)
+    };
+    let (parent_number, mut next) = up(parent_id)?.ok_or_else(|| LclError::IssueNotFound(parent_id.to_string()))?;
+    let Some(child) = child else { return Ok(()) };
+    if parent_id == child.id {
+        return Err(LclError::SelfParent(identifier(key, child.number)));
+    }
+    let mut path = vec![child.number, parent_number];
+    let mut seen = HashSet::from([parent_id.to_string()]);
+    while let Some(id) = next {
+        if id == child.id {
+            path.push(child.number);
+            let path: Vec<String> = path.into_iter().map(|n| identifier(key, n)).collect();
+            return Err(LclError::ParentCycle { issue: identifier(key, child.number), parent: identifier(key, parent_number), path: path.join(" -> ") });
+        }
+        // A dangling link, or a loop above that doesn't pass through this
+        // issue (only a 0.1.0 binary could write one now), ends the walk.
+        if !seen.insert(id.clone()) { break; }
+        let Some((number, above)) = up(&id)? else { break };
+        path.push(number);
+        next = above;
+    }
+    Ok(())
+}
+
+/// The issue as just written, read back inside the same transaction so the
+/// caller gets the derived fields (identifiers) too.
+fn reread(conn: &Connection, key: &str, id: &str) -> Result<Issue> {
+    fetch_issue_by(conn, key, "id", &id)?.ok_or_else(|| LclError::Msg(format!("issue {id} vanished inside its own transaction")))
+}
+
+/// The issues with these UUIDs, in this order, skipping any that are gone.
+fn fetch_issues(conn: &Connection, ids: &[String]) -> Result<Vec<Issue>> {
+    let key = read_key(conn)?;
+    let mut out = Vec::with_capacity(ids.len());
+    for id in ids {
+        if let Some(issue) = fetch_issue_by(conn, &key, "id", id)? { out.push(issue); }
+    }
+    Ok(out)
+}
+
+/// The issue whose `col` (`id` or `number`) equals `val`, with its labels and
+/// its identifiers under workspace key `key`.
+fn fetch_issue_by(conn: &Connection, key: &str, col: &str, val: &dyn ToSql) -> Result<Option<Issue>> {
+    let sql = format!("SELECT i.id,i.number,i.title,i.description,i.status,i.priority,i.assignee,i.parent_id,i.estimate,i.due_date,i.created_at,i.updated_at,i.completed_at,i.started_at,i.canceled_at,p.number FROM issues i LEFT JOIN issues p ON p.id = i.parent_id WHERE i.{col}=?1");
     let mut stmt = conn.prepare(&sql)?;
     let mut rows = stmt.query(params![val])?;
     if let Some(r) = rows.next()? {
-        let issue = row_to_issue(r)?;
+        let issue = row_to_issue(r, key)?;
         // labels
         let mut li = conn.prepare("SELECT label_id FROM issue_labels WHERE issue_id=?1")?;
         let ls: Vec<String> = li.query_map(params![issue.id], |r| r.get(0))?.collect::<std::result::Result<Vec<_>,_>>()?;
@@ -317,7 +408,7 @@ fn fetch_issue_by(conn: &Connection, col: &str, val: &str) -> Result<Option<Issu
     } else { Ok(None) }
 }
 
-fn row_to_issue(r: &rusqlite::Row) -> Result<Issue> {
+fn row_to_issue(r: &rusqlite::Row, key: &str) -> Result<Issue> {
     let number: i64 = r.get(1)?;
     let status_str: String = r.get(4)?;
     // Read leniently ("done" is Done), but never guess: a status parse rejects
@@ -326,15 +417,18 @@ fn row_to_issue(r: &rusqlite::Row) -> Result<Issue> {
     let status = Status::parse(&status_str).ok_or(LclError::UnknownStatus { number, value: status_str })?;
     let prio: i64 = r.get(5)?;
     let priority = Priority::from_stored(prio).ok_or(LclError::UnknownPriority { number, value: prio })?;
+    let parent_number: Option<i64> = r.get(15)?;
     Ok(Issue {
         id: r.get(0)?,
         number,
+        identifier: identifier(key, number),
         title: r.get(2)?,
         description: r.get(3)?,
         status,
         priority,
         assignee: r.get(6)?,
         parent_id: r.get(7)?,
+        parent_identifier: parent_number.map(|n| identifier(key, n)),
         estimate: r.get(8)?,
         due_date: r.get(9)?,
         labels: vec![],
