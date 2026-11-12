@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use chrono::NaiveDate;
+use clap::{CommandFactory, Parser, Subcommand};
 use lcl_core::db::Store;
 use lcl_core::models::*;
 use std::path::PathBuf;
@@ -51,19 +52,22 @@ enum ProjectCmd {
 
 #[derive(Subcommand)]
 enum IssueCmd {
+    // Status and Priority parse through their FromStr impls, and dates,
+    // estimates and colors through the parsers below. A bad value is a clap
+    // error: exit 2, before any database is opened.
     Create {
         #[arg(long)] title: String,
         #[arg(long, default_value = "")] description: String,
-        #[arg(long, default_value = "Backlog")] status: String,
-        #[arg(long, default_value_t = 0)] priority: i64,
+        #[arg(long, default_value = "Backlog")] status: Status,
+        #[arg(long, default_value = "0")] priority: Priority,
         #[arg(long)] assignee: Option<String>,
         #[arg(long)] parent: Option<String>,
         #[arg(long)] label: Vec<String>,
-        #[arg(long)] estimate: Option<i64>,
-        #[arg(long)] due: Option<String>,
+        #[arg(long, allow_negative_numbers = true, value_parser = clap::value_parser!(i64).range(0..))] estimate: Option<i64>,
+        #[arg(long, value_parser = parse_date)] due: Option<NaiveDate>,
     },
     List {
-        #[arg(long)] status: Option<String>,
+        #[arg(long)] status: Option<Status>,
         #[arg(long)] assignee: Option<String>,
         #[arg(long, default_value_t = 50)] limit: i64,
     },
@@ -72,11 +76,11 @@ enum IssueCmd {
         id: String,
         #[arg(long)] title: Option<String>,
         #[arg(long)] description: Option<String>,
-        #[arg(long)] status: Option<String>,
-        #[arg(long)] priority: Option<i64>,
+        #[arg(long)] status: Option<Status>,
+        #[arg(long)] priority: Option<Priority>,
         #[arg(long)] assignee: Option<String>,
-        #[arg(long)] estimate: Option<i64>,
-        #[arg(long)] due: Option<String>,
+        #[arg(long, allow_negative_numbers = true, value_parser = clap::value_parser!(i64).range(0..))] estimate: Option<i64>,
+        #[arg(long, value_parser = parse_date)] due: Option<NaiveDate>,
         #[arg(long)] label: Vec<String>,
     },
     Delete { id: String },
@@ -95,15 +99,48 @@ enum DocCmd {
 
 #[derive(Subcommand)]
 enum LabelCmd {
-    Create { name: String, #[arg(long, default_value = "#888888")] color: String },
+    Create { name: String, #[arg(long, default_value = "#888888", value_parser = parse_color)] color: String },
     List,
     Delete { id: String },
 }
 
 #[derive(Subcommand)]
 enum CycleCmd {
-    Create { name: String, #[arg(long)] start: Option<String>, #[arg(long)] end: Option<String> },
+    Create { name: String, #[arg(long, value_parser = parse_date)] start: Option<NaiveDate>, #[arg(long, value_parser = parse_date)] end: Option<NaiveDate> },
     List,
+}
+
+/// A real calendar date written exactly as YYYY-MM-DD: 2026-02-30 and
+/// 2026-2-3 are both rejected.
+fn parse_date(s: &str) -> std::result::Result<NaiveDate, String> {
+    let b = s.as_bytes();
+    let shaped = b.len() == 10 && b.iter().enumerate().all(|(i, c)| if i == 4 || i == 7 { *c == b'-' } else { c.is_ascii_digit() });
+    shaped
+        .then(|| NaiveDate::parse_from_str(s, "%Y-%m-%d").ok())
+        .flatten()
+        .ok_or_else(|| format!("invalid date \"{s}\"; expected a real calendar date as YYYY-MM-DD"))
+}
+
+/// `#rgb` or `#rrggbb`.
+fn parse_color(s: &str) -> std::result::Result<String, String> {
+    let hex = s.strip_prefix('#').unwrap_or("");
+    if s.starts_with('#') && matches!(hex.len(), 3 | 6) && hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        Ok(s.to_string())
+    } else {
+        Err(format!("invalid color \"{s}\"; expected #rgb or #rrggbb"))
+    }
+}
+
+/// Checks that span more than one argument. clap's value parsers have
+/// already checked each value on its own; this exits 2 the same way.
+fn validate(cli: &Cli) {
+    if let Commands::Cycle { cmd: CycleCmd::Create { start: Some(start), end: Some(end), .. } } = &cli.cmd
+        && end < start
+    {
+        Cli::command()
+            .error(clap::error::ErrorKind::ValueValidation, format!("cycle end {end} is before its start {start}"))
+            .exit();
+    }
 }
 
 fn global_dir() -> PathBuf { dirs_home().join(".lcl") }
@@ -157,6 +194,7 @@ fn print_json<T: serde::Serialize>(v: &T) {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    validate(&cli);
     match cli.cmd {
         Commands::Init { name } => {
             let pname = name.unwrap_or_else(|| {
@@ -221,18 +259,15 @@ fn main() -> Result<()> {
             let mut store = resolve_store(&cli.project)?;
             match cmd {
                 IssueCmd::Create { title, description, status, priority, assignee, parent, label, estimate, due } => {
-                    let st = Status::parse(&status).unwrap_or(Status::Backlog);
-                    let pr = Priority::from_i64(priority);
                     let issue = store.create_issue(Issue {
-                        id: String::new(), number: 0, title, description, status: st, priority: pr,
-                        assignee, parent_id: parent, estimate, due_date: due, labels: label,
-                        created_at: 0, updated_at: 0, completed_at: None,
+                        id: String::new(), number: 0, title, description, status, priority,
+                        assignee, parent_id: parent, estimate, due_date: due.map(|d| d.to_string()), labels: label,
+                        created_at: 0, updated_at: 0, completed_at: None, started_at: None, canceled_at: None,
                     })?;
                     if cli.json { print_json(&issue); } else { println!("Created {}-{}", store.get_meta("key").ok().flatten().unwrap_or_default(), issue.number); }
                 }
                 IssueCmd::List { status, assignee, limit } => {
-                    let st = status.as_ref().and_then(|s| Status::parse(s));
-                    let issues = store.list_issues(st, assignee.as_deref(), limit)?;
+                    let issues = store.list_issues(status, assignee.as_deref(), limit)?;
                     if cli.json { print_json(&issues); }
                     else {
                         let key = store.get_meta("key").ok().flatten().unwrap_or_default();
@@ -258,11 +293,11 @@ fn main() -> Result<()> {
                     let issue = store.update_issue(&id, |i| {
                         if let Some(t) = title { i.title = t; }
                         if let Some(d) = description { i.description = d; }
-                        if let Some(s) = status && let Some(st) = Status::parse(&s) { i.status = st; }
-                        if let Some(p) = priority { i.priority = Priority::from_i64(p); }
+                        if let Some(st) = status { i.status = st; }
+                        if let Some(p) = priority { i.priority = p; }
                         if assignee.is_some() { i.assignee = assignee; }
                         if let Some(e) = estimate { i.estimate = Some(e); }
-                        if let Some(d) = due { i.due_date = Some(d); }
+                        if let Some(d) = due { i.due_date = Some(d.to_string()); }
                         if !label.is_empty() { i.labels = label; }
                     })?;
                     if cli.json { print_json(&issue); } else { println!("Updated {}", id); }
@@ -331,7 +366,7 @@ fn main() -> Result<()> {
             let mut store = resolve_store(&cli.project)?;
             match cmd {
                 CycleCmd::Create { name, start, end } => {
-                    let c = store.create_cycle(Cycle { id: String::new(), name, starts_at: start, ends_at: end, created_at: 0 })?;
+                    let c = store.create_cycle(Cycle { id: String::new(), name, starts_at: start.map(|d| d.to_string()), ends_at: end.map(|d| d.to_string()), created_at: 0 })?;
                     if cli.json { print_json(&c); } else { println!("Created cycle {}", c.id); }
                 }
                 CycleCmd::List => {

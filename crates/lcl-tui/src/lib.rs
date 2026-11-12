@@ -50,7 +50,7 @@ pub fn run(project: Option<String>) -> Result<()> {
             state.select(Some(selected.min(filtered.len().saturating_sub(1))));
             f.render_stateful_widget(list, chunks[1], &mut state);
 
-            let help = Paragraph::new("j/k: move  q: quit  1-6: filter status  0: all").block(Block::default().borders(Borders::ALL));
+            let help = Paragraph::new("j/k: move  q: quit  1-7: filter status  0: all").block(Block::default().borders(Borders::ALL));
             f.render_widget(help, chunks[2]);
         })?;
 
@@ -69,6 +69,7 @@ pub fn run(project: Option<String>) -> Result<()> {
                 KeyCode::Char('4') => status_filter = Some("InReview"),
                 KeyCode::Char('5') => status_filter = Some("Done"),
                 KeyCode::Char('6') => status_filter = Some("Canceled"),
+                KeyCode::Char('7') => status_filter = Some("Duplicate"),
                 _ => {}
             }
         }

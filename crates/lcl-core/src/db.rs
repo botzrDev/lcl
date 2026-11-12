@@ -107,11 +107,12 @@ impl Store {
             let now = crate::models::now();
             if issue.created_at == 0 { issue.created_at = now; }
             if issue.updated_at == 0 { issue.updated_at = now; }
+            issue.apply_lifecycle(None, issue.created_at);
             let status = issue.status.as_str();
             let priority = issue.priority.as_i64();
             tx.execute(
-                "INSERT INTO issues(id,number,title,description,status,priority,assignee,parent_id,estimate,due_date,created_at,updated_at,completed_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
-                params![issue.id, issue.number, issue.title, issue.description, status, priority, issue.assignee, issue.parent_id, issue.estimate, issue.due_date, issue.created_at, issue.updated_at, issue.completed_at],
+                "INSERT INTO issues(id,number,title,description,status,priority,assignee,parent_id,estimate,due_date,created_at,updated_at,completed_at,started_at,canceled_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
+                params![issue.id, issue.number, issue.title, issue.description, status, priority, issue.assignee, issue.parent_id, issue.estimate, issue.due_date, issue.created_at, issue.updated_at, issue.completed_at, issue.started_at, issue.canceled_at],
             )?;
             for lid in &issue.labels {
                 tx.execute("INSERT OR IGNORE INTO issue_labels(issue_id,label_id) VALUES(?1,?2)", params![issue.id, lid])?;
@@ -148,15 +149,15 @@ impl Store {
     pub fn update_issue(&mut self, id_or_number: &str, f: impl FnOnce(&mut Issue)) -> Result<Issue> {
         self.write(|tx| {
             let mut issue = read_issue(tx, id_or_number)?.ok_or_else(|| LclError::NotFound(id_or_number.to_string()))?;
+            let from = issue.status;
             f(&mut issue);
             issue.updated_at = crate::models::now();
-            if issue.status == Status::Done && issue.completed_at.is_none() { issue.completed_at = Some(issue.updated_at); }
-            if issue.status != Status::Done { issue.completed_at = None; }
+            issue.apply_lifecycle(Some(from), issue.updated_at);
             let status = issue.status.as_str();
             let priority = issue.priority.as_i64();
             tx.execute(
-                "UPDATE issues SET title=?1,description=?2,status=?3,priority=?4,assignee=?5,parent_id=?6,estimate=?7,due_date=?8,updated_at=?9,completed_at=?10 WHERE id=?11",
-                params![issue.title, issue.description, status, priority, issue.assignee, issue.parent_id, issue.estimate, issue.due_date, issue.updated_at, issue.completed_at, issue.id],
+                "UPDATE issues SET title=?1,description=?2,status=?3,priority=?4,assignee=?5,parent_id=?6,estimate=?7,due_date=?8,updated_at=?9,completed_at=?10,started_at=?11,canceled_at=?12 WHERE id=?13",
+                params![issue.title, issue.description, status, priority, issue.assignee, issue.parent_id, issue.estimate, issue.due_date, issue.updated_at, issue.completed_at, issue.started_at, issue.canceled_at, issue.id],
             )?;
             // sync labels: replace
             tx.execute("DELETE FROM issue_labels WHERE issue_id=?1", params![issue.id])?;
@@ -302,7 +303,7 @@ fn read_issue(conn: &Connection, id_or_number: &str) -> Result<Option<Issue>> {
 }
 
 fn fetch_issue_by(conn: &Connection, col: &str, val: &str) -> Result<Option<Issue>> {
-    let sql = format!("SELECT id,number,title,description,status,priority,assignee,parent_id,estimate,due_date,created_at,updated_at,completed_at FROM issues WHERE {}=?1", col);
+    let sql = format!("SELECT id,number,title,description,status,priority,assignee,parent_id,estimate,due_date,created_at,updated_at,completed_at,started_at,canceled_at FROM issues WHERE {}=?1", col);
     let mut stmt = conn.prepare(&sql)?;
     let mut rows = stmt.query(params![val])?;
     if let Some(r) = rows.next()? {
@@ -317,15 +318,21 @@ fn fetch_issue_by(conn: &Connection, col: &str, val: &str) -> Result<Option<Issu
 }
 
 fn row_to_issue(r: &rusqlite::Row) -> Result<Issue> {
+    let number: i64 = r.get(1)?;
     let status_str: String = r.get(4)?;
+    // Read leniently ("done" is Done), but never guess: a status parse rejects
+    // (a hand edit, or a newer lcl) must not be read as something else and
+    // then written back.
+    let status = Status::parse(&status_str).ok_or(LclError::UnknownStatus { number, value: status_str })?;
     let prio: i64 = r.get(5)?;
+    let priority = Priority::from_stored(prio).ok_or(LclError::UnknownPriority { number, value: prio })?;
     Ok(Issue {
         id: r.get(0)?,
-        number: r.get(1)?,
+        number,
         title: r.get(2)?,
         description: r.get(3)?,
-        status: Status::parse(&status_str).unwrap_or(Status::Backlog),
-        priority: Priority::from_i64(prio),
+        status,
+        priority,
         assignee: r.get(6)?,
         parent_id: r.get(7)?,
         estimate: r.get(8)?,
@@ -334,6 +341,8 @@ fn row_to_issue(r: &rusqlite::Row) -> Result<Issue> {
         created_at: r.get(10)?,
         updated_at: r.get(11)?,
         completed_at: r.get(12)?,
+        started_at: r.get(13)?,
+        canceled_at: r.get(14)?,
     })
 }
 

@@ -34,7 +34,6 @@ fn upgrade_seeds_the_high_water_mark() {
 
     assert_eq!(env.create("first after upgrade"), 4);
     assert_eq!(user_version(&db), SCHEMA_VERSION);
-    assert_eq!(SCHEMA_VERSION, 2);
     assert_eq!(next_issue_number(&db), "5");
 }
 

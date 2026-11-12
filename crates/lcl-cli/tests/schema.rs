@@ -19,7 +19,7 @@
 
 mod common;
 
-use common::{dump, set_user_version, user_version, Env, Out, V0_FIXTURE};
+use common::{dump, exec, set_user_version, user_version, Env, Out, V0_FIXTURE};
 use lcl_core::SCHEMA_VERSION;
 use rusqlite::types::Value as SqlValue;
 use serde_json::{json, Value};
@@ -36,7 +36,7 @@ fn upgrades_a_0_1_0_database() {
     let env = Env::new();
     let db = env.install_db(V0_FIXTURE);
     assert_eq!(user_version(&db), 0, "the fixture should be an unversioned 0.1.0 database");
-    let before = dump(&db);
+    let mut before = dump(&db);
 
     let list = env.lcl(&["issue", "list", "--json"]).assert_ok().json();
     assert_eq!(list.as_array().map(Vec::len), Some(3), "{list:#}");
@@ -47,6 +47,7 @@ fn upgrades_a_0_1_0_database() {
     let two = issue(&list, 2);
     assert_eq!(two["title"], "Shipped thing");
     assert_eq!(two["status"], "Done");
+    assert_eq!(two["completed_at"], two["updated_at"], "v3 backfills completed_at from updated_at: {two:#}");
     let three = issue(&list, 3);
     assert_eq!(three["title"], "Needs a human");
     assert_eq!(three["labels"], json!(["hitl"]));
@@ -74,17 +75,36 @@ fn upgrades_a_0_1_0_database() {
     assert_eq!(project["key"], "FIXT");
 
     assert_eq!(user_version(&db), SCHEMA_VERSION);
-    // The only change to a 0.1.0 database's data is migration 2's seeded
-    // number mark. Every other object and row, FTS index included, is exactly
-    // as 0.1.0 left it.
+
+    // Each migration's change to a 0.1.0 database, and nothing else. Undo the
+    // expected changes on `after`; what's left must equal `before` exactly.
+    let text = |s: &str| SqlValue::Text(s.into());
     let mut after = dump(&db);
-    let meta = &mut after.tables.iter_mut().find(|(t, _)| t == "meta").expect("meta table").1;
-    let seeded = meta
-        .iter()
-        .position(|row| row[1] == SqlValue::Text("next_issue_number".into()))
-        .expect("next_issue_number seeded");
-    assert_eq!(meta.remove(seeded)[2], SqlValue::Text("4".into()), "seeded one past the highest number");
+    // v2: the number mark, seeded one past the highest number.
+    let meta = after.tables.get_mut("meta").expect("meta table");
+    let seeded = meta.iter().position(|r| r["key"] == text("next_issue_number")).expect("next_issue_number seeded");
+    assert_eq!(meta.remove(seeded)["value"], text("4"), "seeded one past the highest number");
+    // v3: two new columns, unset (the fixture has no Canceled issue), and the
+    // Done issue's completed_at backfilled from its updated_at.
+    for row in after.tables.get_mut("issues").expect("issues table") {
+        assert_eq!(row.remove("started_at"), Some(SqlValue::Null), "{row:?}");
+        assert_eq!(row.remove("canceled_at"), Some(SqlValue::Null), "{row:?}");
+        if row["status"] == text("Done") {
+            assert_eq!(row["completed_at"], row["updated_at"], "Done issue not backfilled: {row:?}");
+            row.insert("completed_at".into(), SqlValue::Null); // as 0.1.0 left it
+        }
+    }
+    // v3's ADD COLUMN rewrote the issues table's CREATE statement, and its
+    // backfill UPDATE fired the FTS trigger, which rewrote that row's index
+    // entries. Check those with FTS5's own integrity-check instead.
+    let issues_sql = after.schema.iter().find(|r| r["name"] == text("issues")).map(|r| format!("{:?}", r["sql"]));
+    assert!(issues_sql.as_deref().is_some_and(|s| s.contains("started_at") && s.contains("canceled_at")), "{issues_sql:?}");
+    for d in [&mut before, &mut after] {
+        d.schema.retain(|r| r["name"] != text("issues"));
+        d.tables.retain(|t, _| !t.starts_with("issues_fts"));
+    }
     assert_eq!(after, before);
+    exec(&db, "INSERT INTO issues_fts(issues_fts) VALUES('integrity-check'); INSERT INTO docs_fts(docs_fts) VALUES('integrity-check');");
 }
 
 #[test]

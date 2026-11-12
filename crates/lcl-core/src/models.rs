@@ -1,4 +1,11 @@
 use serde::{Deserialize, Serialize};
+use std::str::FromStr;
+
+/// A value from the command line that names no known status, priority, etc.
+/// Its message is the whole explanation; clap prints it and exits 2.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{0}")]
+pub struct InvalidValue(pub String);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Status {
@@ -8,8 +15,10 @@ pub enum Status {
     InReview,
     Done,
     Canceled,
+    Duplicate,
 }
 impl Status {
+    /// The canonical spelling: what is stored, and what JSON prints.
     pub fn as_str(&self) -> &'static str {
         match self {
             Status::Backlog => "Backlog",
@@ -18,21 +27,36 @@ impl Status {
             Status::InReview => "InReview",
             Status::Done => "Done",
             Status::Canceled => "Canceled",
+            Status::Duplicate => "Duplicate",
         }
     }
+    /// Lenient parse, for command-line input and stored values alike: ignores
+    /// case and drops spaces, '_' and '-', so "In Progress", "in_progress" and
+    /// "IN-PROGRESS" all work. "cancelled" is accepted for Canceled.
     pub fn parse(s: &str) -> Option<Self> {
-        match s {
-            "Backlog" => Some(Status::Backlog),
-            "Todo" => Some(Status::Todo),
-            "InProgress" => Some(Status::InProgress),
-            "InReview" => Some(Status::InReview),
-            "Done" => Some(Status::Done),
-            "Canceled" => Some(Status::Canceled),
+        let key: String = s.chars().filter(|c| !matches!(c, ' ' | '_' | '-')).collect::<String>().to_lowercase();
+        match key.as_str() {
+            "backlog" => Some(Status::Backlog),
+            "todo" => Some(Status::Todo),
+            "inprogress" => Some(Status::InProgress),
+            "inreview" => Some(Status::InReview),
+            "done" => Some(Status::Done),
+            "canceled" | "cancelled" => Some(Status::Canceled),
+            "duplicate" => Some(Status::Duplicate),
             _ => None,
         }
     }
     pub fn all() -> &'static [Status] {
-        &[Status::Backlog, Status::Todo, Status::InProgress, Status::InReview, Status::Done, Status::Canceled]
+        &[Status::Backlog, Status::Todo, Status::InProgress, Status::InReview, Status::Done, Status::Canceled, Status::Duplicate]
+    }
+}
+impl FromStr for Status {
+    type Err = InvalidValue;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Status::parse(s).ok_or_else(|| {
+            let expected: Vec<&str> = Status::all().iter().map(Status::as_str).collect();
+            InvalidValue(format!("invalid status \"{s}\"; expected one of: {}", expected.join(", ")))
+        })
     }
 }
 impl std::fmt::Display for Status {
@@ -49,11 +73,27 @@ pub enum Priority {
 }
 impl Priority {
     pub fn as_i64(&self) -> i64 { *self as i64 }
-    pub fn from_i64(v: i64) -> Self {
-        match v { 1 => Priority::Urgent, 2 => Priority::High, 3 => Priority::Medium, 4 => Priority::Low, _ => Priority::None }
+    /// The priority stored as `v`, or None for a value outside 0-4. There is
+    /// deliberately no fallback: a value we can't read is not ours to guess.
+    pub fn from_stored(v: i64) -> Option<Self> {
+        match v { 0 => Some(Priority::None), 1 => Some(Priority::Urgent), 2 => Some(Priority::High), 3 => Some(Priority::Medium), 4 => Some(Priority::Low), _ => None }
     }
     pub fn label(&self) -> &'static str {
         match self { Priority::None => "None", Priority::Urgent => "Urgent", Priority::High => "High", Priority::Medium => "Medium", Priority::Low => "Low" }
+    }
+}
+/// Accepts 0-4 or a name (none, urgent, high, medium, low), ignoring case.
+impl FromStr for Priority {
+    type Err = InvalidValue;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "0" | "none" => Ok(Priority::None),
+            "1" | "urgent" => Ok(Priority::Urgent),
+            "2" | "high" => Ok(Priority::High),
+            "3" | "medium" => Ok(Priority::Medium),
+            "4" | "low" => Ok(Priority::Low),
+            _ => Err(InvalidValue(format!("invalid priority \"{s}\"; expected 0-4 or one of: none, urgent, high, medium, low"))),
+        }
     }
 }
 
@@ -76,6 +116,46 @@ pub struct Issue {
     pub created_at: i64,
     pub updated_at: i64,
     pub completed_at: Option<i64>,
+    pub started_at: Option<i64>,
+    pub canceled_at: Option<i64>,
+}
+
+impl Issue {
+    /// The lifecycle timestamp rules, for a move from `from` (None when the
+    /// issue is being created) to `self.status` at time `at`. Create and
+    /// update both call this, inside their write transaction.
+    ///
+    /// - entering InProgress or InReview sets started_at if it is unset;
+    /// - entering Done sets completed_at if unset; leaving Done clears it;
+    /// - entering Canceled or Duplicate sets canceled_at if unset; leaving
+    ///   both clears it;
+    /// - moving to Backlog or Todo clears started_at.
+    ///
+    /// Staying in a status changes nothing, so an unrelated edit never stamps
+    /// a time on an issue whose history predates these columns.
+    pub fn apply_lifecycle(&mut self, from: Option<Status>, at: i64) {
+        use Status::*;
+        let to = self.status;
+        if from == Some(to) {
+            return;
+        }
+        let closed = |s: Status| matches!(s, Canceled | Duplicate);
+        match to {
+            InProgress | InReview => { self.started_at.get_or_insert(at); }
+            Backlog | Todo => self.started_at = None,
+            Done | Canceled | Duplicate => {}
+        }
+        if to == Done {
+            self.completed_at.get_or_insert(at);
+        } else if from == Some(Done) {
+            self.completed_at = None;
+        }
+        if closed(to) {
+            self.canceled_at.get_or_insert(at);
+        } else if from.is_some_and(closed) {
+            self.canceled_at = None;
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -117,4 +197,109 @@ pub struct ProjectMeta {
 pub fn now() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use Status::*;
+
+    /// What a move does to one timestamp column.
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    enum Fx {
+        /// unchanged
+        K,
+        /// set to `at` if unset, else unchanged
+        S,
+        /// cleared
+        C,
+    }
+    use Fx::*;
+
+    /// Every (from, to) pair, written out by hand from the rules rather than
+    /// derived from them. `None` as `from` is create.
+    /// Columns: started_at, completed_at, canceled_at.
+    #[rustfmt::skip]
+    const TABLE: &[(Option<Status>, Status, Fx, Fx, Fx)] = &[
+        (None, Backlog, C, K, K), (None, Todo, C, K, K), (None, InProgress, S, K, K), (None, InReview, S, K, K),
+        (None, Done, K, S, K), (None, Canceled, K, K, S), (None, Duplicate, K, K, S),
+
+        (Some(Backlog), Backlog, K, K, K), (Some(Backlog), Todo, C, K, K), (Some(Backlog), InProgress, S, K, K),
+        (Some(Backlog), InReview, S, K, K), (Some(Backlog), Done, K, S, K), (Some(Backlog), Canceled, K, K, S),
+        (Some(Backlog), Duplicate, K, K, S),
+
+        (Some(Todo), Backlog, C, K, K), (Some(Todo), Todo, K, K, K), (Some(Todo), InProgress, S, K, K),
+        (Some(Todo), InReview, S, K, K), (Some(Todo), Done, K, S, K), (Some(Todo), Canceled, K, K, S),
+        (Some(Todo), Duplicate, K, K, S),
+
+        (Some(InProgress), Backlog, C, K, K), (Some(InProgress), Todo, C, K, K), (Some(InProgress), InProgress, K, K, K),
+        (Some(InProgress), InReview, S, K, K), (Some(InProgress), Done, K, S, K), (Some(InProgress), Canceled, K, K, S),
+        (Some(InProgress), Duplicate, K, K, S),
+
+        (Some(InReview), Backlog, C, K, K), (Some(InReview), Todo, C, K, K), (Some(InReview), InProgress, S, K, K),
+        (Some(InReview), InReview, K, K, K), (Some(InReview), Done, K, S, K), (Some(InReview), Canceled, K, K, S),
+        (Some(InReview), Duplicate, K, K, S),
+
+        (Some(Done), Backlog, C, C, K), (Some(Done), Todo, C, C, K), (Some(Done), InProgress, S, C, K),
+        (Some(Done), InReview, S, C, K), (Some(Done), Done, K, K, K), (Some(Done), Canceled, K, C, S),
+        (Some(Done), Duplicate, K, C, S),
+
+        (Some(Canceled), Backlog, C, K, C), (Some(Canceled), Todo, C, K, C), (Some(Canceled), InProgress, S, K, C),
+        (Some(Canceled), InReview, S, K, C), (Some(Canceled), Done, K, S, C), (Some(Canceled), Canceled, K, K, K),
+        (Some(Canceled), Duplicate, K, K, S),
+
+        (Some(Duplicate), Backlog, C, K, C), (Some(Duplicate), Todo, C, K, C), (Some(Duplicate), InProgress, S, K, C),
+        (Some(Duplicate), InReview, S, K, C), (Some(Duplicate), Done, K, S, C), (Some(Duplicate), Canceled, K, K, S),
+        (Some(Duplicate), Duplicate, K, K, K),
+    ];
+
+    fn issue(status: Status, started: Option<i64>, completed: Option<i64>, canceled: Option<i64>) -> Issue {
+        Issue {
+            id: "id".into(), number: 1, title: "t".into(), description: String::new(), status,
+            priority: Priority::None, assignee: None, parent_id: None, estimate: None, due_date: None,
+            labels: vec![], created_at: 1, updated_at: 1,
+            completed_at: completed, started_at: started, canceled_at: canceled,
+        }
+    }
+
+    fn expect(fx: Fx, before: Option<i64>, at: i64) -> Option<i64> {
+        match fx { K => before, S => before.or(Some(at)), C => None }
+    }
+
+    #[test]
+    fn the_table_covers_every_pair_once() {
+        let mut seen = Vec::new();
+        for &(from, to, ..) in TABLE {
+            assert!(!seen.contains(&(from, to)), "duplicate row {from:?} -> {to:?}");
+            seen.push((from, to));
+        }
+        let all = Status::all();
+        assert_eq!(all.len(), 7);
+        for &to in all {
+            assert!(seen.contains(&(None, to)), "missing create -> {to:?}");
+            for &from in all {
+                assert!(seen.contains(&(Some(from), to)), "missing {from:?} -> {to:?}");
+            }
+        }
+        assert_eq!(seen.len(), 7 + 7 * 7);
+    }
+
+    #[test]
+    fn apply_lifecycle_matches_the_table() {
+        const AT: i64 = 5_000;
+        // Every timestamp unset, then every one planted with a sentinel that
+        // "set if unset" must keep.
+        let starts = [(None, None, None), (Some(111), Some(222), Some(333))];
+        for &(from, to, fs, fc, fx) in TABLE {
+            for (st, co, ca) in starts {
+                let mut i = issue(to, st, co, ca);
+                i.apply_lifecycle(from, AT);
+                let got = (i.started_at, i.completed_at, i.canceled_at);
+                let want = (expect(fs, st, AT), expect(fc, co, AT), expect(fx, ca, AT));
+                assert_eq!(got, want, "{from:?} -> {to:?} starting from {:?}", (st, co, ca));
+                assert_eq!(i.status, to, "apply_lifecycle must not change the status");
+                assert_eq!((i.created_at, i.updated_at), (1, 1), "apply_lifecycle must not touch other timestamps");
+            }
+        }
+    }
 }

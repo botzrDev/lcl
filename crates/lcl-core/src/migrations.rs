@@ -13,7 +13,7 @@
 /// adding a migration bumps it and the two can't drift apart.
 pub const SCHEMA_VERSION: i64 = MIGRATIONS.len() as i64;
 
-pub(crate) const MIGRATIONS: &[&str] = &[V1, V2];
+pub(crate) const MIGRATIONS: &[&str] = &[V1, V2, V3];
 
 /// v0 -> v1: the lcl 0.1.0 schema, verbatim.
 ///
@@ -95,4 +95,21 @@ END;
 /// can't be recovered.
 const V2: &str = r#"
 INSERT OR IGNORE INTO meta(key,value) VALUES('next_issue_number', COALESCE((SELECT MAX(number) FROM issues),0)+1);
+"#;
+
+/// v2 -> v3: lifecycle timestamps.
+///
+/// Adds `started_at` and `canceled_at`, then backfills from `updated_at`:
+/// `canceled_at` for Canceled issues, and `completed_at` for Done issues that
+/// lack one (0.1.0's `create --status Done` left it null). `updated_at` is the
+/// best time available, and only an approximation: any later edit moved it.
+/// `started_at` is not backfilled, because when work started is unknown.
+///
+/// Not idempotent (ADD COLUMN fails the second time), so it relies on
+/// `migrate` re-reading the version under the write lock.
+const V3: &str = r#"
+ALTER TABLE issues ADD COLUMN started_at INTEGER;
+ALTER TABLE issues ADD COLUMN canceled_at INTEGER;
+UPDATE issues SET canceled_at = updated_at WHERE status = 'Canceled';
+UPDATE issues SET completed_at = updated_at WHERE status = 'Done' AND completed_at IS NULL;
 "#;

@@ -4,6 +4,7 @@
 #![allow(dead_code)]
 
 use rusqlite::types::Value;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Barrier;
@@ -139,43 +140,57 @@ pub fn set_user_version(db: &Path, v: i64) {
     conn.pragma_update(None, "user_version", v).expect("write user_version");
 }
 
+/// Runs SQL directly against `db`, bypassing lcl (to fake hand edits or
+/// older binaries).
+pub fn exec(db: &Path, sql: &str) {
+    let conn = rusqlite::Connection::open(db).expect("open db");
+    conn.execute_batch(sql).unwrap_or_else(|e| panic!("{sql}: {e}"));
+}
+
+/// One database row, keyed by column name.
+pub type Row = BTreeMap<String, Value>;
+
+/// Every column of issue `number`, read directly.
+pub fn issue_row(db: &Path, number: i64) -> Row {
+    let conn = rusqlite::Connection::open(db).expect("open db");
+    rows(&conn, &format!("SELECT * FROM issues WHERE number = {number}")).pop().unwrap_or_else(|| panic!("no issue {number}"))
+}
+
+fn rows(conn: &rusqlite::Connection, sql: &str) -> Vec<Row> {
+    let mut stmt = conn.prepare(sql).unwrap_or_else(|e| panic!("{sql}: {e}"));
+    let names: Vec<String> = stmt.column_names().into_iter().map(String::from).collect();
+    stmt.query_map([], |r| (0..names.len()).map(|i| Ok((names[i].clone(), r.get::<_, Value>(i)?))).collect())
+        .and_then(Iterator::collect)
+        .unwrap_or_else(|e| panic!("{sql}: {e}"))
+}
+
 /// The schema plus every row of every table, for before/after comparisons.
 #[derive(Debug, PartialEq)]
 pub struct Dump {
-    pub schema: Vec<Vec<Value>>,
-    pub tables: Vec<(String, Vec<Vec<Value>>)>,
+    pub schema: Vec<Row>,
+    pub tables: BTreeMap<String, Vec<Row>>,
 }
 
 pub fn dump(db: &Path) -> Dump {
     let conn = rusqlite::Connection::open(db).expect("open db");
-    let rows = |sql: &str| -> Vec<Vec<Value>> {
-        let mut stmt = conn.prepare(sql).unwrap_or_else(|e| panic!("{sql}: {e}"));
-        let n = stmt.column_count();
-        stmt.query_map([], |r| (0..n).map(|i| r.get::<_, Value>(i)).collect())
-            .and_then(Iterator::collect)
-            .unwrap_or_else(|e| panic!("{sql}: {e}"))
-    };
-    let schema = rows("SELECT type, name, tbl_name, sql FROM sqlite_master ORDER BY name");
-    let tables = schema
-        .iter()
-        .filter(|r| r[0] == Value::Text("table".into()))
-        .filter_map(|r| match (&r[1], &r[3]) {
-            (Value::Text(name), Value::Text(sql)) if !name.starts_with("sqlite_") => Some((name.clone(), sql)),
-            _ => None,
-        })
-        .map(|(t, sql)| {
-            // Include rowid where there is one: the FTS index maps rowids, so
-            // a changed rowid is a real change. WITHOUT ROWID tables (FTS5's
-            // _config and _idx) are ordered by every column instead.
-            let data = if sql.contains("WITHOUT ROWID") {
-                let n = conn.prepare(&format!("SELECT * FROM \"{t}\"")).expect("prepare").column_count();
-                let order: Vec<String> = (1..=n).map(|i| i.to_string()).collect();
-                rows(&format!("SELECT * FROM \"{t}\" ORDER BY {}", order.join(",")))
-            } else {
-                rows(&format!("SELECT rowid, * FROM \"{t}\" ORDER BY rowid"))
-            };
-            (t, data)
-        })
-        .collect();
+    let schema = rows(&conn, "SELECT type, name, tbl_name, sql FROM sqlite_master ORDER BY name");
+    let mut tables = BTreeMap::new();
+    for entry in &schema {
+        let (Value::Text(kind), Value::Text(name), Value::Text(sql)) = (&entry["type"], &entry["name"], &entry["sql"]) else { continue };
+        if kind != "table" || name.starts_with("sqlite_") {
+            continue;
+        }
+        // Include rowid where there is one: the FTS index maps rowids, so a
+        // changed rowid is a real change. WITHOUT ROWID tables (FTS5's
+        // _config and _idx) are ordered by every column instead.
+        let data = if sql.contains("WITHOUT ROWID") {
+            let n = conn.prepare(&format!("SELECT * FROM \"{name}\"")).expect("prepare").column_count();
+            let order: Vec<String> = (1..=n).map(|i| i.to_string()).collect();
+            rows(&conn, &format!("SELECT * FROM \"{name}\" ORDER BY {}", order.join(",")))
+        } else {
+            rows(&conn, &format!("SELECT rowid AS \"(rowid)\", * FROM \"{name}\" ORDER BY rowid"))
+        };
+        tables.insert(name.clone(), data);
+    }
     Dump { schema, tables }
 }
