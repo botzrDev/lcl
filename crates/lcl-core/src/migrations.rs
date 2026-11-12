@@ -165,13 +165,15 @@ WITH RECURSIVE up(start, cur) AS (
 UPDATE issues SET parent_id = NULL WHERE id IN (SELECT start FROM up WHERE cur = start);
 "#;
 
-/// v4 -> v5: labels become records, and blank assignees become unset.
+/// v4 -> v5: labels become records, and assignees are trimmed (blank ones
+/// become unset).
 ///
 /// 0.1.0 stored whatever followed `--label` in issue_labels.label_id: usually
 /// a name, sometimes a label id, sometimes "". And it allowed two labels with
 /// the same name. This migration:
-/// - merges labels whose names match ignoring case into the one with the
-///   lowest rowid (its id, name and colour survive);
+/// - trims label names, and merges labels whose trimmed names match ignoring
+///   case into the one with the lowest rowid (its id, trimmed name and
+///   colour survive);
 /// - maps every issue_labels value, trimmed of whitespace, to a label: a
 ///   label id (any case) becomes that label or its survivor; else a name
 ///   (ignoring case) becomes that label; else a new label is made with that
@@ -182,7 +184,8 @@ UPDATE issues SET parent_id = NULL WHERE id IN (SELECT start FROM up WHERE cur =
 /// - rebuilds issue_labels with foreign keys to issues and labels, each
 ///   ON DELETE CASCADE, so deleting a label takes it off its issues;
 /// - adds a unique index on labels(name COLLATE NOCASE);
-/// - sets assignee to NULL where it is blank (0.1.0's `--assignee ""`).
+/// - trims assignees, and sets them to NULL where blank (0.1.0's
+///   `--assignee ""`).
 ///
 /// "Whitespace" is Unicode White_Space, the set Rust's `str::trim` uses, so
 /// the CLI's trimming and this one agree. "Ignoring case" is SQLite's
@@ -192,8 +195,11 @@ UPDATE issues SET parent_id = NULL WHERE id IN (SELECT start FROM up WHERE cur =
 const V5: &str = r#"
 CREATE TEMP TABLE v5_label AS
 SELECT l.id AS id,
-    (SELECT s.id FROM labels s WHERE s.name = l.name COLLATE NOCASE ORDER BY s.rowid LIMIT 1) AS survivor
+    (SELECT s.id FROM labels s WHERE trim(s.name, char(9, 10, 11, 12, 13, 32, 133, 160, 5760, 8192, 8193, 8194, 8195, 8196, 8197, 8198, 8199, 8200, 8201, 8202, 8232, 8233, 8239, 8287, 12288)) = trim(l.name, char(9, 10, 11, 12, 13, 32, 133, 160, 5760, 8192, 8193, 8194, 8195, 8196, 8197, 8198, 8199, 8200, 8201, 8202, 8232, 8233, 8239, 8287, 12288)) COLLATE NOCASE
+     ORDER BY s.rowid LIMIT 1) AS survivor
 FROM labels l;
+-- From here on names are trimmed, so a name match's lowest rowid is its survivor.
+UPDATE labels SET name = trim(name, char(9, 10, 11, 12, 13, 32, 133, 160, 5760, 8192, 8193, 8194, 8195, 8196, 8197, 8198, 8199, 8200, 8201, 8202, 8232, 8233, 8239, 8287, 12288)) WHERE name <> trim(name, char(9, 10, 11, 12, 13, 32, 133, 160, 5760, 8192, 8193, 8194, 8195, 8196, 8197, 8198, 8199, 8200, 8201, 8202, 8232, 8233, 8239, 8287, 12288));
 
 CREATE TEMP TABLE v5_raw AS
 SELECT rid, issue_id, raw FROM (
@@ -237,7 +243,8 @@ ALTER TABLE issue_labels_v5 RENAME TO issue_labels;
 DELETE FROM labels WHERE id IN (SELECT id FROM v5_label WHERE survivor <> id);
 CREATE UNIQUE INDEX labels_name ON labels(name COLLATE NOCASE);
 
-UPDATE issues SET assignee = NULL WHERE trim(assignee, char(9, 10, 11, 12, 13, 32, 133, 160, 5760, 8192, 8193, 8194, 8195, 8196, 8197, 8198, 8199, 8200, 8201, 8202, 8232, 8233, 8239, 8287, 12288)) = '';
+UPDATE issues SET assignee = NULLIF(trim(assignee, char(9, 10, 11, 12, 13, 32, 133, 160, 5760, 8192, 8193, 8194, 8195, 8196, 8197, 8198, 8199, 8200, 8201, 8202, 8232, 8233, 8239, 8287, 12288)), '')
+WHERE assignee <> trim(assignee, char(9, 10, 11, 12, 13, 32, 133, 160, 5760, 8192, 8193, 8194, 8195, 8196, 8197, 8198, 8199, 8200, 8201, 8202, 8232, 8233, 8239, 8287, 12288)) OR assignee = '';
 
 DROP TABLE v5_label;
 DROP TABLE v5_raw;

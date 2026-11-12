@@ -345,6 +345,21 @@ fn upgrade_maps_0_1_0_labels() {
          INSERT INTO labels(id, name, color) VALUES('{uuid_named_id}', '{uuid_named}', '#555555');
          INSERT INTO issue_labels(issue_id, label_id) SELECT id, upper('{uuid_named}') FROM issues WHERE number = 11;"
     ));
+    // Also by hand: padded label names. " Hitl " merges into hitl. "  ops "
+    // and a later "OPS" merge into "  ops ", which keeps the trimmed
+    // spelling "ops". Plus a padded assignee on FIXT-9.
+    let (padded_hitl, ops, ops2) = (
+        String::from("5ca1ab1e-0000-4000-8000-000000000006"),
+        String::from("5ca1ab1e-0000-4000-8000-000000000007"),
+        String::from("5ca1ab1e-0000-4000-8000-000000000008"),
+    );
+    exec(&db, &format!(
+        "INSERT INTO labels(id, name, color) VALUES('{padded_hitl}', ' Hitl ', '#666666'), ('{ops}', '  ops ', '#777777'), ('{ops2}', 'OPS', '#7777aa');
+         INSERT INTO issue_labels(issue_id, label_id) SELECT id, '{padded_hitl}' FROM issues WHERE number = 13;
+         INSERT INTO issue_labels(issue_id, label_id) SELECT id, 'Ops' FROM issues WHERE number = 6;
+         INSERT INTO issue_labels(issue_id, label_id) SELECT id, '{ops2}' FROM issues WHERE number = 7;
+         UPDATE issues SET assignee = ' cleetus ' WHERE number = 9;"
+    ));
     let mut before = dump(&db);
 
     env.lcl(&["issue", "list"]).assert_ok();
@@ -360,6 +375,7 @@ fn upgrade_maps_0_1_0_labels() {
         (docs.clone(), "docs".into(), "#888888".into()),
         (new_triage.clone(), "needs-triage".into(), "#888888".into()),
         (uuid_named_id.clone(), uuid_named.clone(), "#555555".into()),
+        (ops.clone(), "ops".into(), "#777777".into()),
     ];
     want.sort();
     let mut got = after.clone();
@@ -375,14 +391,14 @@ fn upgrade_maps_0_1_0_labels() {
         (3, &[b1, h1], &["Bug", "hitl"], "raw mixed case, and \"bug\" merged into \"Bug\""),
         (4, &[&new_triage], &["needs-triage"], "unknown name"),
         (5, &[&new_triage], &["needs-triage"], "unknown name, other case: the same new label"),
-        (6, &[], &[], "\"\" dropped"),
-        (7, &[], &[], "\"  \" dropped"),
+        (6, &[&ops], &["ops"], "\"\" dropped; raw \"Ops\" -> the label \"  ops \", trimmed"),
+        (7, &[&ops], &["ops"], "\"  \" dropped; the merged \"OPS\" label's id -> its survivor"),
         (8, &[h1], &["hitl"], "id of the merged hitl -> its survivor"),
         (9, &[docs], &["docs"], "by id"),
         (10, &[h1], &["hitl"], "three ways, one row"),
         (11, &[&uuid_named_id], &[uuid_named.as_str()], "a UUID that is a label's name: kept"),
         (12, &[h1], &["hitl"], "raw \" Hitl \" trimmed"),
-        (13, &[docs], &["docs"], "raw name"),
+        (13, &[docs, h1], &["docs", "hitl"], "raw name; and the id of \" Hitl \", merged into hitl"),
         (14, &[], &[], "a deleted label's id: dropped"),
     ];
     for (n, ids, names, why) in expect {
@@ -394,8 +410,8 @@ fn upgrade_maps_0_1_0_labels() {
         assert_eq!(labels_of(&env, n), json!(names), "FIXT-{n} shown ({why})");
     }
 
-    // Blank assignees became NULL; a real one stayed.
-    for (n, assignee) in [(11, None), (12, None), (13, Some("cleetus"))] {
+    // Assignees trimmed; blank ones became NULL.
+    for (n, assignee) in [(9, Some("cleetus")), (11, None), (12, None), (13, Some("cleetus"))] {
         assert_eq!(text(&issue_row(&db, n)["assignee"]).as_deref(), assignee, "FIXT-{n}");
     }
     assert_eq!(foreign_key_violations(&db), vec![]);

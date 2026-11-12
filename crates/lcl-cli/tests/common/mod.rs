@@ -5,8 +5,9 @@
 
 use rusqlite::types::Value;
 use std::collections::BTreeMap;
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::Barrier;
 use tempfile::TempDir;
 
@@ -74,17 +75,54 @@ impl Env {
         env
     }
 
-    /// Runs `lcl <args>` with HOME and cwd pointed at this environment.
+    /// Runs `lcl <args>` with HOME and cwd pointed at this environment, and
+    /// stdin empty (not a terminal).
     pub fn lcl(&self, args: &[&str]) -> Out {
-        let output = Command::new(env!("CARGO_BIN_EXE_lcl"))
-            .args(args)
-            .current_dir(self.cwd.path())
+        self.run(args, None, Stdio::null())
+    }
+
+    /// As `lcl`, with `input` piped to stdin.
+    pub fn lcl_stdin(&self, args: &[&str], input: &[u8]) -> Out {
+        self.run(args, Some(input), Stdio::piped())
+    }
+
+    /// As `lcl`, with stdin opened on /dev/null.
+    pub fn lcl_devnull(&self, args: &[&str]) -> Out {
+        self.run(args, None, std::fs::File::open("/dev/null").expect("open /dev/null").into())
+    }
+
+    /// The command `lcl` runs, for wrapping in another program.
+    pub fn command(&self, program: &str) -> Command {
+        let mut cmd = Command::new(program);
+        cmd.current_dir(self.cwd.path())
             .env("HOME", self.home.path())
             // `--project` reads LCL_PROJECT; an exported value must not select
-            // a project behind the test's back.
+            // a project behind the test's back. Likewise LCL_STDIN_WAIT.
             .env_remove("LCL_PROJECT")
-            .output()
+            .env_remove("LCL_STDIN_WAIT");
+        cmd
+    }
+
+    fn run(&self, args: &[&str], input: Option<&[u8]>, stdin: Stdio) -> Out {
+        let mut child = self
+            .command(env!("CARGO_BIN_EXE_lcl"))
+            .args(args)
+            .stdin(stdin)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
             .expect("spawn lcl");
+        // Feed stdin from another thread so a large input can't deadlock
+        // against output. A write error means lcl exited without reading it
+        // all, which the caller sees in the exit code.
+        let output = std::thread::scope(|s| {
+            if let (Some(input), Some(mut pipe)) = (input, child.stdin.take()) {
+                s.spawn(move || {
+                    let _ = pipe.write_all(input);
+                });
+            }
+            child.wait_with_output().expect("wait for lcl")
+        });
         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
         let code = output

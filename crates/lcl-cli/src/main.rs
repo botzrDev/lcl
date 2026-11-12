@@ -1,9 +1,11 @@
 use anyhow::{Context, Result};
 use chrono::NaiveDate;
-use clap::{CommandFactory, Parser, Subcommand};
+use clap::{ArgGroup, CommandFactory, Parser, Subcommand};
 use lcl_core::db::{IssueFilter, Store};
 use lcl_core::error::LclError;
 use lcl_core::models::*;
+use std::io::{IsTerminal, Read};
+use std::time::Duration;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -61,7 +63,10 @@ enum IssueCmd {
     // there, rather than being taken for a flag.
     Create {
         #[arg(long)] title: String,
-        #[arg(long, default_value = "")] description: String,
+        /// The description inline. For long text, use --description-file.
+        #[arg(long, value_parser = inline_description, conflicts_with = "description_file")] description: Option<String>,
+        /// Read the description from PATH, or from stdin if PATH is `-`. Stored byte for byte.
+        #[arg(long, value_name = "PATH", value_parser = read_description)] description_file: Option<String>,
         #[arg(long, default_value = "Backlog")] status: Status,
         #[arg(long, default_value = "0")] priority: Priority,
         #[arg(long, value_parser = parse_assignee)] assignee: Option<String>,
@@ -82,7 +87,10 @@ enum IssueCmd {
     Update {
         #[arg(allow_negative_numbers = true)] id: IssueRef,
         #[arg(long)] title: Option<String>,
-        #[arg(long)] description: Option<String>,
+        /// The description inline; "" clears it. For long text, use --description-file.
+        #[arg(long, value_parser = inline_description, conflicts_with = "description_file")] description: Option<String>,
+        /// Read the description from PATH, or from stdin if PATH is `-`. Stored byte for byte.
+        #[arg(long, value_name = "PATH", value_parser = read_description)] description_file: Option<String>,
         #[arg(long)] status: Option<Status>,
         #[arg(long)] priority: Option<Priority>,
         #[arg(long, value_parser = parse_assignee, conflicts_with = "no_assignee")] assignee: Option<String>,
@@ -108,16 +116,39 @@ enum IssueCmd {
         #[arg(long)] no_parent: bool,
     },
     Delete { #[arg(allow_negative_numbers = true)] id: IssueRef },
-    Comment { #[arg(allow_negative_numbers = true)] id: IssueRef, body: String, #[arg(long)] author: Option<String> },
+    /// Add a comment: BODY inline, or --body-file PATH. Exactly one.
+    #[command(group(ArgGroup::new("body_source").required(true).args(["body", "body_file"])))]
+    Comment {
+        #[arg(allow_negative_numbers = true)] id: IssueRef,
+        /// The comment inline. For long text, use --body-file.
+        #[arg(value_parser = inline_body)] body: Option<String>,
+        /// Read the comment from PATH, or from stdin if PATH is `-`. Stored byte for byte.
+        #[arg(long, value_name = "PATH", value_parser = read_comment)] body_file: Option<String>,
+        #[arg(long)] author: Option<String>,
+    },
     Comments { #[arg(allow_negative_numbers = true)] id: IssueRef },
 }
 
 #[derive(Subcommand)]
 enum DocCmd {
-    Create { #[arg(long)] title: String, #[arg(long, default_value = "")] content: String, #[arg(long)] parent: Option<String> },
+    Create {
+        #[arg(long)] title: String,
+        /// The content inline. For long text, use --content-file.
+        #[arg(long, value_parser = inline_content, conflicts_with = "content_file")] content: Option<String>,
+        /// Read the content from PATH, or from stdin if PATH is `-`. Stored byte for byte.
+        #[arg(long, value_name = "PATH", value_parser = read_content)] content_file: Option<String>,
+        #[arg(long)] parent: Option<String>,
+    },
     List,
     Show { id: String },
-    Update { id: String, #[arg(long)] title: Option<String>, #[arg(long)] content: Option<String> },
+    Update {
+        id: String,
+        #[arg(long)] title: Option<String>,
+        /// The content inline; "" clears it. For long text, use --content-file.
+        #[arg(long, value_parser = inline_content, conflicts_with = "content_file")] content: Option<String>,
+        /// Read the content from PATH, or from stdin if PATH is `-`. Stored byte for byte.
+        #[arg(long, value_name = "PATH", value_parser = read_content)] content_file: Option<String>,
+    },
     Delete { id: String },
 }
 
@@ -153,6 +184,113 @@ fn parse_color(s: &str) -> std::result::Result<String, String> {
         Ok(s.to_string())
     } else {
         Err(format!("invalid color \"{s}\"; expected #rgb or #rrggbb"))
+    }
+}
+
+// Long text. Inline text passes through the shell, which splits, expands and
+// substitutes it, and through argv, which has a size limit. So text can also
+// come from a file or stdin, read here as clap parses: every problem exits 2
+// before any database is opened.
+
+/// Inline text, unless it is a bare `-`: whoever writes that means stdin,
+/// and storing "-" is never what they want.
+fn not_dash(s: &str, file_flag: &str) -> std::result::Result<String, String> {
+    if s == "-" { Err(format!("to read stdin, use {file_flag} -")) } else { Ok(s.to_string()) }
+}
+fn inline_description(s: &str) -> std::result::Result<String, String> { not_dash(s, "--description-file") }
+fn inline_content(s: &str) -> std::result::Result<String, String> { not_dash(s, "--content-file") }
+/// A comment inline: not `-`, and not blank (empty or only whitespace).
+fn inline_body(s: &str) -> std::result::Result<String, String> {
+    if s.trim().is_empty() { Err("a comment can't be blank".into()) } else { not_dash(s, "--body-file") }
+}
+
+fn read_description(path: &str) -> std::result::Result<String, String> { read_text(path, "--description-file") }
+fn read_content(path: &str) -> std::result::Result<String, String> { read_text(path, "--content-file") }
+/// A comment from a file or stdin: as `read_text`, and not blank. A comment
+/// that isn't blank is still stored byte for byte.
+fn read_comment(path: &str) -> std::result::Result<String, String> {
+    let body = read_text(path, "--body-file")?;
+    if body.trim().is_empty() {
+        return Err(format!("{} is blank; a comment can't be blank", if path == "-" { "stdin" } else { path }));
+    }
+    Ok(body)
+}
+
+/// The text in file `path`, or on stdin if `path` is `-`, byte for byte: no
+/// trimming, no size cap. Refuses an unreadable file and bytes that aren't
+/// UTF-8. `flag` names the option, for the stdin hint.
+fn read_text(path: &str, flag: &str) -> std::result::Result<String, String> {
+    let (name, bytes) = if path == "-" {
+        ("stdin", read_stdin(flag)?)
+    } else {
+        (path, std::fs::read(path).map_err(|e| format!("can't read {path}: {e}"))?)
+    };
+    String::from_utf8(bytes).map_err(|e| format!("{name} is not valid UTF-8: invalid byte at offset {}", e.utf8_error().valid_up_to()))
+}
+
+/// How long stdin may stay silent before its first byte or EOF:
+/// LCL_STDIN_WAIT seconds, default 10. `None` (from 0) waits forever.
+fn stdin_wait() -> std::result::Result<Option<Duration>, String> {
+    let Ok(v) = std::env::var("LCL_STDIN_WAIT") else { return Ok(Some(Duration::from_secs(10))) };
+    match v.trim().parse::<u64>() {
+        Ok(0) => Ok(None),
+        Ok(secs) => Ok(Some(Duration::from_secs(secs))),
+        Err(_) => Err(format!("LCL_STDIN_WAIT must be a whole number of seconds (0 waits forever), not {v:?}")),
+    }
+}
+
+/// All of stdin. A terminal is refused at once. A pipe or socket that stays
+/// silent is refused after `stdin_wait()`: an agent's shell can hand lcl a
+/// stdin that never sends EOF, and waiting on it would hang the agent. Once
+/// the first byte or EOF arrives, the rest is read with no limit, so a
+/// producer that pauses mid-stream still works.
+///
+/// The read blocks in a thread of its own; on a timeout, the process exits
+/// (clap's error path) and takes the blocked thread with it.
+fn read_stdin(flag: &str) -> std::result::Result<Vec<u8>, String> {
+    let stdin = std::io::stdin();
+    if stdin.is_terminal() {
+        return Err("nothing is piped to stdin".into());
+    }
+    let wait = stdin_wait()?;
+    enum Msg {
+        Started,
+        Done(std::io::Result<Vec<u8>>),
+    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut stdin = std::io::stdin().lock();
+        let mut chunk = vec![0; 64 * 1024];
+        let first = loop {
+            match stdin.read(&mut chunk) {
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                r => break r,
+            }
+        };
+        let _ = tx.send(Msg::Started);
+        let all = first.and_then(|n| {
+            chunk.truncate(n);
+            if n > 0 {
+                stdin.read_to_end(&mut chunk)?;
+            }
+            Ok(chunk)
+        });
+        let _ = tx.send(Msg::Done(all));
+    });
+    let started = match wait {
+        Some(w) => rx.recv_timeout(w).map_err(|e| match e {
+            std::sync::mpsc::RecvTimeoutError::Timeout => format!(
+                "nothing arrived on stdin within {} s; pipe the text in or use a heredoc: … {flag} - <<'EOF'",
+                w.as_secs()
+            ),
+            std::sync::mpsc::RecvTimeoutError::Disconnected => "can't read stdin".to_string(),
+        })?,
+        None => rx.recv().map_err(|_| "can't read stdin".to_string())?,
+    };
+    debug_assert!(matches!(started, Msg::Started));
+    match rx.recv() {
+        Ok(Msg::Done(all)) => all.map_err(|e| format!("can't read stdin: {e}")),
+        _ => Err("can't read stdin".into()),
     }
 }
 
@@ -313,7 +451,8 @@ fn run(cli: Cli) -> Result<()> {
         Commands::Issue { cmd } => {
             let mut store = resolve_store(&cli.project)?;
             match cmd {
-                IssueCmd::Create { title, description, status, priority, assignee, parent, label, estimate, due } => {
+                IssueCmd::Create { title, description, description_file, status, priority, assignee, parent, label, estimate, due } => {
+                    let description = description.or(description_file).unwrap_or_default();
                     let parent_id = parent.map(|p| store.resolve(&p)).transpose()?.map(|p| p.id);
                     let issue = store.create_issue(Issue {
                         id: String::new(), number: 0, identifier: String::new(), title, description, status, priority,
@@ -355,7 +494,7 @@ fn run(cli: Cli) -> Result<()> {
                     }
                 }
                 IssueCmd::Update {
-                    id, title, description, status, priority, assignee, no_assignee, estimate, no_estimate, due, no_due,
+                    id, title, description, description_file, status, priority, assignee, no_assignee, estimate, no_estimate, due, no_due,
                     label, add_label, remove_label, clear_labels, parent, no_parent,
                 } => {
                     // An unknown name is an error even when removing; a known
@@ -369,7 +508,7 @@ fn run(cli: Cli) -> Result<()> {
                     };
                     let issue = store.update_issue(&id, |i| {
                         if let Some(t) = title { i.title = t; }
-                        if let Some(d) = description { i.description = d; }
+                        if let Some(d) = description.or(description_file) { i.description = d; }
                         if let Some(st) = status { i.status = st; }
                         if let Some(p) = priority { i.priority = p; }
                         if assignee.is_some() { i.assignee = assignee; }
@@ -392,7 +531,8 @@ fn run(cli: Cli) -> Result<()> {
                     let issue = store.delete_issue(&id)?;
                     if cli.json { print_json(&serde_json::json!({"deleted": issue.identifier, "id": issue.id})); } else { println!("Deleted {}", issue.identifier); }
                 }
-                IssueCmd::Comment { id, body, author } => {
+                IssueCmd::Comment { id, body, body_file, author } => {
+                    let Some(body) = body.or(body_file) else { unreachable!("clap requires BODY or --body-file") };
                     let c = store.add_comment(&id, body, author)?;
                     if cli.json { print_json(&c); } else { println!("Comment added"); }
                 }
@@ -407,7 +547,8 @@ fn run(cli: Cli) -> Result<()> {
         Commands::Doc { cmd } => {
             let mut store = resolve_store(&cli.project)?;
             match cmd {
-                DocCmd::Create { title, content, parent } => {
+                DocCmd::Create { title, content, content_file, parent } => {
+                    let content = content.or(content_file).unwrap_or_default();
                     let d = store.create_doc(Doc { id: String::new(), title, content, parent_id: parent, created_at: 0, updated_at: 0 })?;
                     if cli.json { print_json(&d); } else { println!("Created doc {}", d.id); }
                 }
@@ -420,8 +561,8 @@ fn run(cli: Cli) -> Result<()> {
                     let d = store.get_doc(&id)?.ok_or_else(|| anyhow::anyhow!("doc not found"))?;
                     if cli.json { print_json(&d); } else { println!("# {}\n\n{}", d.title, d.content); }
                 }
-                DocCmd::Update { id, title, content } => {
-                    let d = store.update_doc(&id, title, content)?;
+                DocCmd::Update { id, title, content, content_file } => {
+                    let d = store.update_doc(&id, title, content.or(content_file))?;
                     if cli.json { print_json(&d); } else { println!("Updated {}", id); }
                 }
                 DocCmd::Delete { id } => {
