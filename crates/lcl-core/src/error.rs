@@ -8,6 +8,8 @@ pub enum LclError {
     Io(#[from] std::io::Error),
     #[error("not found: {0}")]
     NotFound(String),
+    #[error("database schema v{found} is newer than this lcl supports (v{supported}); upgrade lcl")]
+    SchemaTooNew { found: i64, supported: i64 },
     #[error("{0}")]
     Msg(String),
 }

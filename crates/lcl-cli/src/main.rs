@@ -216,7 +216,8 @@ fn main() -> Result<()> {
                 let key = store.get_meta("key")?.unwrap_or_default();
                 let desc = store.get_meta("description")?.unwrap_or_default();
                 let created = store.get_meta("created_at")?.unwrap_or_default();
-                let v = serde_json::json!({"name": name, "key": key, "description": desc, "created_at": created});
+                let schema_version = store.schema_version()?;
+                let v = serde_json::json!({"name": name, "key": key, "description": desc, "created_at": created, "schema_version": schema_version});
                 if cli.json { print_json(&v); } else { println!("{} [{}] - {}", name, key, desc); }
             }
         },

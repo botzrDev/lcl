@@ -3,8 +3,13 @@
 // Each test binary compiles its own copy of this module and uses a subset of it.
 #![allow(dead_code)]
 
+use rusqlite::types::Value;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use tempfile::TempDir;
+
+/// A database written by lcl 0.1.0. See tests/schema.rs for how it was built.
+pub const V0_FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/v0.sqlite");
 
 /// What one `lcl` invocation produced.
 #[derive(Debug)]
@@ -72,4 +77,72 @@ impl Env {
             .unwrap_or_else(|| panic!("lcl {args:?} killed by a signal\nstdout: {stdout}\nstderr: {stderr}"));
         Out { code, stdout, stderr }
     }
+
+    /// The project database lcl discovers from this env's cwd.
+    pub fn db_path(&self) -> PathBuf {
+        self.cwd.path().join(".lcl").join("data.sqlite")
+    }
+
+    /// Copies `fixture` into place as this env's project database and returns
+    /// its path. Always copy: opening a WAL database creates -wal/-shm files
+    /// beside it, and a fixture must never be modified.
+    pub fn install_db(&self, fixture: &str) -> PathBuf {
+        let dst = self.db_path();
+        std::fs::create_dir_all(dst.parent().unwrap()).expect("create .lcl");
+        std::fs::copy(fixture, &dst).unwrap_or_else(|e| panic!("copy {fixture}: {e}"));
+        dst
+    }
+}
+
+/// Reads `PRAGMA user_version` directly, bypassing lcl.
+pub fn user_version(db: &Path) -> i64 {
+    let conn = rusqlite::Connection::open(db).expect("open db");
+    conn.pragma_query_value(None, "user_version", |r| r.get(0)).expect("read user_version")
+}
+
+/// Writes `PRAGMA user_version` directly, bypassing lcl.
+pub fn set_user_version(db: &Path, v: i64) {
+    let conn = rusqlite::Connection::open(db).expect("open db");
+    conn.pragma_update(None, "user_version", v).expect("write user_version");
+}
+
+/// The schema plus every row of every table, for before/after comparisons.
+#[derive(Debug, PartialEq)]
+pub struct Dump {
+    pub schema: Vec<Vec<Value>>,
+    pub tables: Vec<(String, Vec<Vec<Value>>)>,
+}
+
+pub fn dump(db: &Path) -> Dump {
+    let conn = rusqlite::Connection::open(db).expect("open db");
+    let rows = |sql: &str| -> Vec<Vec<Value>> {
+        let mut stmt = conn.prepare(sql).unwrap_or_else(|e| panic!("{sql}: {e}"));
+        let n = stmt.column_count();
+        stmt.query_map([], |r| (0..n).map(|i| r.get::<_, Value>(i)).collect())
+            .and_then(Iterator::collect)
+            .unwrap_or_else(|e| panic!("{sql}: {e}"))
+    };
+    let schema = rows("SELECT type, name, tbl_name, sql FROM sqlite_master ORDER BY name");
+    let tables = schema
+        .iter()
+        .filter(|r| r[0] == Value::Text("table".into()))
+        .filter_map(|r| match (&r[1], &r[3]) {
+            (Value::Text(name), Value::Text(sql)) if !name.starts_with("sqlite_") => Some((name.clone(), sql)),
+            _ => None,
+        })
+        .map(|(t, sql)| {
+            // Include rowid where there is one: the FTS index maps rowids, so
+            // a changed rowid is a real change. WITHOUT ROWID tables (FTS5's
+            // _config and _idx) are ordered by every column instead.
+            let data = if sql.contains("WITHOUT ROWID") {
+                let n = conn.prepare(&format!("SELECT * FROM \"{t}\"")).expect("prepare").column_count();
+                let order: Vec<String> = (1..=n).map(|i| i.to_string()).collect();
+                rows(&format!("SELECT * FROM \"{t}\" ORDER BY {}", order.join(",")))
+            } else {
+                rows(&format!("SELECT rowid, * FROM \"{t}\" ORDER BY rowid"))
+            };
+            (t, data)
+        })
+        .collect();
+    Dump { schema, tables }
 }

@@ -1,7 +1,13 @@
 use crate::error::{LclError, Result};
+use crate::migrations::{MIGRATIONS, SCHEMA_VERSION};
 use crate::models::*;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, TransactionBehavior};
 use std::path::Path;
+use std::time::Duration;
+
+/// How long a connection waits for a lock held by another lcl process before
+/// failing with SQLITE_BUSY. Concurrent first opens queue on the migration lock.
+const BUSY_TIMEOUT: Duration = Duration::from_millis(5000);
 
 pub struct Store {
     pub conn: Connection,
@@ -12,95 +18,33 @@ impl Store {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let conn = Connection::open(path)?;
-        let s = Store { conn };
-        s.migrate()?;
-        Ok(s)
+        Self::init(Connection::open(path)?)
     }
 
     pub fn open_in_memory() -> Result<Self> {
-        let conn = Connection::open_in_memory()?;
-        let s = Store { conn };
-        s.migrate()?;
-        Ok(s)
+        Self::init(Connection::open_in_memory()?)
     }
 
-    fn migrate(&self) -> Result<()> {
-        self.conn.execute_batch(
-            r#"
-            PRAGMA journal_mode = WAL;
-            PRAGMA foreign_keys = ON;
-            CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-            CREATE TABLE IF NOT EXISTS labels (id TEXT PRIMARY KEY, name TEXT NOT NULL, color TEXT NOT NULL);
-            CREATE TABLE IF NOT EXISTS issues (
-                id TEXT PRIMARY KEY,
-                number INTEGER NOT NULL UNIQUE,
-                title TEXT NOT NULL,
-                description TEXT NOT NULL DEFAULT '',
-                status TEXT NOT NULL DEFAULT 'Backlog',
-                priority INTEGER NOT NULL DEFAULT 0,
-                assignee TEXT,
-                parent_id TEXT,
-                estimate INTEGER,
-                due_date TEXT,
-                created_at INTEGER NOT NULL,
-                updated_at INTEGER NOT NULL,
-                completed_at INTEGER
-            );
-            CREATE TABLE IF NOT EXISTS issue_labels (issue_id TEXT NOT NULL, label_id TEXT NOT NULL, PRIMARY KEY(issue_id,label_id));
-            CREATE TABLE IF NOT EXISTS comments (
-                id TEXT PRIMARY KEY,
-                issue_id TEXT NOT NULL,
-                body TEXT NOT NULL,
-                author TEXT,
-                created_at INTEGER NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS docs (
-                id TEXT PRIMARY KEY,
-                title TEXT NOT NULL,
-                content TEXT NOT NULL DEFAULT '',
-                parent_id TEXT,
-                created_at INTEGER NOT NULL,
-                updated_at INTEGER NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS cycles (
-                id TEXT PRIMARY KEY,
-                name TEXT NOT NULL,
-                starts_at TEXT,
-                ends_at TEXT,
-                created_at INTEGER NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS issue_cycles (issue_id TEXT NOT NULL, cycle_id TEXT NOT NULL, PRIMARY KEY(issue_id,cycle_id));
-            CREATE VIRTUAL TABLE IF NOT EXISTS issues_fts USING fts5(title, description, content='issues', content_rowid='rowid');
-            CREATE VIRTUAL TABLE IF NOT EXISTS docs_fts USING fts5(title, content, content='docs', content_rowid='rowid');
-            "#,
-        )?;
-        // triggers for fts sync
-        self.conn.execute_batch(
-            r#"
-            CREATE TRIGGER IF NOT EXISTS issues_ai AFTER INSERT ON issues BEGIN
-                INSERT INTO issues_fts(rowid,title,description) VALUES (new.rowid,new.title,new.description);
-            END;
-            CREATE TRIGGER IF NOT EXISTS issues_ad AFTER DELETE ON issues BEGIN
-                INSERT INTO issues_fts(issues_fts,rowid,title,description) VALUES ('delete',old.rowid,old.title,old.description);
-            END;
-            CREATE TRIGGER IF NOT EXISTS issues_au AFTER UPDATE ON issues BEGIN
-                INSERT INTO issues_fts(issues_fts,rowid,title,description) VALUES ('delete',old.rowid,old.title,old.description);
-                INSERT INTO issues_fts(rowid,title,description) VALUES (new.rowid,new.title,new.description);
-            END;
-            CREATE TRIGGER IF NOT EXISTS docs_ai AFTER INSERT ON docs BEGIN
-                INSERT INTO docs_fts(rowid,title,content) VALUES (new.rowid,new.title,new.content);
-            END;
-            CREATE TRIGGER IF NOT EXISTS docs_ad AFTER DELETE ON docs BEGIN
-                INSERT INTO docs_fts(docs_fts,rowid,title,content) VALUES ('delete',old.rowid,old.title,old.content);
-            END;
-            CREATE TRIGGER IF NOT EXISTS docs_au AFTER UPDATE ON docs BEGIN
-                INSERT INTO docs_fts(docs_fts,rowid,title,content) VALUES ('delete',old.rowid,old.title,old.content);
-                INSERT INTO docs_fts(rowid,title,content) VALUES (new.rowid,new.title,new.content);
-            END;
-            "#,
-        )?;
-        Ok(())
+    /// Connection setup shared by every open. The order matters: the busy
+    /// timeout must be in place before anything can contend for a lock, and
+    /// the version check must come before anything that can write, so a
+    /// database from a newer lcl is refused untouched.
+    fn init(mut conn: Connection) -> Result<Self> {
+        conn.busy_timeout(BUSY_TIMEOUT)?;
+        // Read-only. Must precede journal_mode: switching a rollback-journal
+        // file to WAL rewrites its header.
+        check_supported(user_version(&conn)?)?;
+        // journal_mode cannot change inside a transaction. It answers with the
+        // resulting mode ("memory" for an in-memory db), which we don't need.
+        conn.pragma_update_and_check(None, "journal_mode", "WAL", |_| Ok(()))?;
+        conn.pragma_update(None, "foreign_keys", true)?;
+        migrate(&mut conn)?;
+        Ok(Store { conn })
+    }
+
+    /// The schema version recorded in the file (`PRAGMA user_version`).
+    pub fn schema_version(&self) -> Result<i64> {
+        user_version(&self.conn)
     }
 
     // ----- meta -----
@@ -317,4 +261,40 @@ impl Store {
         for id in ids { if let Some(d) = self.get_doc(&id)? { out.push(d); } }
         Ok(out)
     }
+}
+
+fn user_version(conn: &Connection) -> Result<i64> {
+    Ok(conn.pragma_query_value(None, "user_version", |r| r.get(0))?)
+}
+
+/// Fails unless this build understands schema `found`. Nothing may write to a
+/// database from a newer lcl: we don't know what its invariants are.
+fn check_supported(found: i64) -> Result<usize> {
+    if found > SCHEMA_VERSION {
+        return Err(LclError::SchemaTooNew { found, supported: SCHEMA_VERSION });
+    }
+    usize::try_from(found).map_err(|_| LclError::Msg(format!("database schema version {found} is invalid")))
+}
+
+/// Brings the database up to `SCHEMA_VERSION`, all or nothing.
+fn migrate(conn: &mut Connection) -> Result<()> {
+    // Unlocked fast path: an up-to-date database takes no write lock.
+    if check_supported(user_version(conn)?)? == MIGRATIONS.len() {
+        return Ok(());
+    }
+    // Take the write lock, then read again: another process may have migrated
+    // between our read and acquiring the lock.
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let from = check_supported(user_version(&tx)?)?;
+    let pending = &MIGRATIONS[from..];
+    if pending.is_empty() {
+        return Ok(()); // someone else migrated while we waited
+    }
+    for sql in pending {
+        tx.execute_batch(sql)?;
+    }
+    tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+    // An early return above drops `tx`, which rolls back every migration.
+    tx.commit()?;
+    Ok(())
 }
