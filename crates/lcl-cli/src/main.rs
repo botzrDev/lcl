@@ -64,9 +64,10 @@ enum IssueCmd {
         #[arg(long, default_value = "")] description: String,
         #[arg(long, default_value = "Backlog")] status: Status,
         #[arg(long, default_value = "0")] priority: Priority,
-        #[arg(long)] assignee: Option<String>,
+        #[arg(long, value_parser = parse_assignee)] assignee: Option<String>,
         #[arg(long, allow_negative_numbers = true)] parent: Option<IssueRef>,
-        #[arg(long)] label: Vec<String>,
+        /// A label name (ignoring case); repeat for more.
+        #[arg(long, value_parser = parse_label_name)] label: Vec<String>,
         #[arg(long, allow_negative_numbers = true, value_parser = clap::value_parser!(i64).range(0..))] estimate: Option<i64>,
         #[arg(long, value_parser = parse_date)] due: Option<NaiveDate>,
     },
@@ -84,10 +85,23 @@ enum IssueCmd {
         #[arg(long)] description: Option<String>,
         #[arg(long)] status: Option<Status>,
         #[arg(long)] priority: Option<Priority>,
-        #[arg(long)] assignee: Option<String>,
-        #[arg(long, allow_negative_numbers = true, value_parser = clap::value_parser!(i64).range(0..))] estimate: Option<i64>,
-        #[arg(long, value_parser = parse_date)] due: Option<NaiveDate>,
-        #[arg(long)] label: Vec<String>,
+        #[arg(long, value_parser = parse_assignee, conflicts_with = "no_assignee")] assignee: Option<String>,
+        /// Unassign the issue.
+        #[arg(long)] no_assignee: bool,
+        #[arg(long, allow_negative_numbers = true, value_parser = clap::value_parser!(i64).range(0..), conflicts_with = "no_estimate")] estimate: Option<i64>,
+        /// Clear the estimate.
+        #[arg(long)] no_estimate: bool,
+        #[arg(long, value_parser = parse_date, conflicts_with = "no_due")] due: Option<NaiveDate>,
+        /// Clear the due date.
+        #[arg(long)] no_due: bool,
+        /// Replace all labels with these (names, ignoring case); repeat for more.
+        #[arg(long, value_parser = parse_label_name, conflicts_with_all = ["add_label", "remove_label", "clear_labels"])] label: Vec<String>,
+        /// Add a label, keeping the others; repeatable.
+        #[arg(long, value_parser = parse_label_name)] add_label: Vec<String>,
+        /// Remove a label (a no-op if the issue doesn't have it); repeatable.
+        #[arg(long, value_parser = parse_label_name)] remove_label: Vec<String>,
+        /// Remove every label.
+        #[arg(long, conflicts_with_all = ["add_label", "remove_label"])] clear_labels: bool,
         /// Move the issue under this one.
         #[arg(long, allow_negative_numbers = true, conflicts_with = "no_parent")] parent: Option<IssueRef>,
         /// Make the issue top-level.
@@ -109,9 +123,10 @@ enum DocCmd {
 
 #[derive(Subcommand)]
 enum LabelCmd {
-    Create { name: String, #[arg(long, default_value = "#888888", value_parser = parse_color)] color: String },
+    Create { #[arg(value_parser = parse_label_name)] name: String, #[arg(long, default_value = "#888888", value_parser = parse_color)] color: String },
     List,
-    Delete { id: String },
+    /// Delete a label by name (ignoring case) or id, removing it from every issue.
+    Delete { #[arg(value_parser = parse_label_name)] name_or_id: String },
 }
 
 #[derive(Subcommand)]
@@ -141,15 +156,32 @@ fn parse_color(s: &str) -> std::result::Result<String, String> {
     }
 }
 
+/// A label name, trimmed; blank is refused.
+fn parse_label_name(s: &str) -> std::result::Result<String, String> {
+    let s = s.trim();
+    if s.is_empty() { Err("a label name can't be empty".into()) } else { Ok(s.to_string()) }
+}
+
+/// An assignee, trimmed; blank is refused. Unassigning is its own flag.
+fn parse_assignee(s: &str) -> std::result::Result<String, String> {
+    let s = s.trim();
+    if s.is_empty() { Err("an assignee can't be empty; to unassign, use `issue update --no-assignee`".into()) } else { Ok(s.to_string()) }
+}
+
 /// Checks that span more than one argument. clap's value parsers have
 /// already checked each value on its own; this exits 2 the same way.
 fn validate(cli: &Cli) {
+    let fail = |msg: String| -> ! { Cli::command().error(clap::error::ErrorKind::ValueValidation, msg).exit() };
     if let Commands::Cycle { cmd: CycleCmd::Create { start: Some(start), end: Some(end), .. } } = &cli.cmd
         && end < start
     {
-        Cli::command()
-            .error(clap::error::ErrorKind::ValueValidation, format!("cycle end {end} is before its start {start}"))
-            .exit();
+        fail(format!("cycle end {end} is before its start {start}"));
+    }
+    // Names match ignoring ASCII case, as label lookups do.
+    if let Commands::Issue { cmd: IssueCmd::Update { add_label, remove_label, .. } } = &cli.cmd
+        && let Some(both) = add_label.iter().find(|a| remove_label.iter().any(|r| r.eq_ignore_ascii_case(a)))
+    {
+        fail(format!("label {both:?} is in both --add-label and --remove-label"));
     }
 }
 
@@ -308,7 +340,8 @@ fn run(cli: Cli) -> Result<()> {
                     }
                     else {
                         println!("{} {}", issue.identifier, issue.title);
-                        println!("Status: {}  Priority: {}  Assignee: {:?}", issue.status, issue.priority.label(), issue.assignee);
+                        println!("Status: {}  Priority: {}  Assignee: {}", issue.status, issue.priority.label(), issue.assignee.as_deref().unwrap_or("Unassigned"));
+                        if !issue.labels.is_empty() { println!("Labels: {}", issue.labels.join(", ")); }
                         if let Some(p) = &issue.parent_identifier { println!("Parent: {p}"); }
                         if !issue.description.is_empty() { println!("\n{}", issue.description); }
                         if !children.is_empty() {
@@ -321,7 +354,13 @@ fn run(cli: Cli) -> Result<()> {
                         }
                     }
                 }
-                IssueCmd::Update { id, title, description, status, priority, assignee, estimate, due, label, parent, no_parent } => {
+                IssueCmd::Update {
+                    id, title, description, status, priority, assignee, no_assignee, estimate, no_estimate, due, no_due,
+                    label, add_label, remove_label, clear_labels, parent, no_parent,
+                } => {
+                    // An unknown name is an error even when removing; a known
+                    // label the issue doesn't have is a no-op.
+                    store.require_labels(&remove_label)?;
                     // Some(new parent UUID or None), or None to leave it alone.
                     let new_parent = match (parent, no_parent) {
                         (_, true) => Some(None),
@@ -334,9 +373,17 @@ fn run(cli: Cli) -> Result<()> {
                         if let Some(st) = status { i.status = st; }
                         if let Some(p) = priority { i.priority = p; }
                         if assignee.is_some() { i.assignee = assignee; }
+                        if no_assignee { i.assignee = None; }
                         if let Some(e) = estimate { i.estimate = Some(e); }
+                        if no_estimate { i.estimate = None; }
                         if let Some(d) = due { i.due_date = Some(d.to_string()); }
+                        if no_due { i.due_date = None; }
+                        // Label edits apply to the set as read inside the write
+                        // transaction, so concurrent edits all land.
                         if !label.is_empty() { i.labels = label; }
+                        if clear_labels { i.labels.clear(); }
+                        i.labels.retain(|n| !remove_label.iter().any(|r| r.eq_ignore_ascii_case(n)));
+                        i.labels.extend(add_label);
                         if let Some(p) = new_parent { i.parent_id = p; }
                     })?;
                     if cli.json { print_json(&issue); } else { println!("Updated {}", issue.identifier); }
@@ -395,9 +442,10 @@ fn run(cli: Cli) -> Result<()> {
                     let ls = store.list_labels()?;
                     if cli.json { print_json(&ls); } else { for l in ls { println!("{} {} ({})", l.id, l.name, l.color); } }
                 }
-                LabelCmd::Delete { id } => {
-                    store.delete_label(&id)?;
-                    if cli.json { print_json(&serde_json::json!({"deleted": id})); } else { println!("Deleted {}", id); }
+                LabelCmd::Delete { name_or_id } => {
+                    let (label, issues) = store.delete_label(&name_or_id)?;
+                    if cli.json { print_json(&serde_json::json!({"deleted": label.name, "id": label.id, "removed_from_issues": issues})); }
+                    else { println!("Deleted label {} (removed from {} issue{})", label.name, issues, if issues == 1 { "" } else { "s" }); }
                 }
             }
         },
@@ -410,7 +458,13 @@ fn run(cli: Cli) -> Result<()> {
                 }
                 CycleCmd::List => {
                     let cs = store.list_cycles()?;
-                    if cli.json { print_json(&cs); } else { for c in cs { println!("{}\t{}\t{:?}..{:?}", c.id, c.name, c.starts_at, c.ends_at); } }
+                    if cli.json { print_json(&cs); }
+                    else {
+                        for c in cs {
+                            let (start, end) = (c.starts_at.as_deref().unwrap_or("?"), c.ends_at.as_deref().unwrap_or("?"));
+                            println!("{}\t{}\t{start}..{end}", c.id, c.name);
+                        }
+                    }
                 }
             }
         },

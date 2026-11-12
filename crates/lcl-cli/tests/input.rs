@@ -205,8 +205,8 @@ fn estimates_cannot_be_negative() {
 fn label_colors_must_be_hex() {
     let env = Env::new();
     env.lcl(&["init"]).assert_ok();
-    for good in ["#abc", "#A1B2C3", "#888888"] {
-        let label = env.lcl(&["label", "create", "l", &format!("--color={good}"), "--json"]).assert_ok().json();
+    for (name, good) in [("a", "#abc"), ("b", "#A1B2C3"), ("c", "#888888")] {
+        let label = env.lcl(&["label", "create", name, &format!("--color={good}"), "--json"]).assert_ok().json();
         assert_eq!(label["color"], good);
     }
     for bad in ["abc", "#abcd", "#ggg", "red", "", "#12345", "#1234567", "##abc", "#abc "] {

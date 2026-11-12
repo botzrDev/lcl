@@ -19,7 +19,7 @@
 
 mod common;
 
-use common::{dump, exec, set_user_version, user_version, Env, Out, V0_FIXTURE};
+use common::{dump, exec, foreign_key_violations, set_user_version, undo_v5_schema, user_version, Env, Out, V0_FIXTURE};
 use lcl_core::SCHEMA_VERSION;
 use rusqlite::types::Value as SqlValue;
 use serde_json::{json, Value};
@@ -94,6 +94,15 @@ fn upgrades_a_0_1_0_database() {
             row.insert("completed_at".into(), SqlValue::Null); // as 0.1.0 left it
         }
     }
+    // v5: issue_labels rebuilt with foreign keys, and 0.1.0's raw name "hitl"
+    // mapped to the hitl label's id. No assignee was blank.
+    let hitl = after.tables["labels"].iter().find(|r| r["name"] == text("hitl")).expect("hitl label")["id"].clone();
+    for row in after.tables.get_mut("issue_labels").expect("issue_labels table") {
+        assert_eq!(row["label_id"], hitl, "{row:?}");
+        row.insert("label_id".into(), text("hitl")); // as 0.1.0 left it
+    }
+    undo_v5_schema(&mut after, &mut before);
+    assert_eq!(foreign_key_violations(&db), vec![]);
     // v3's ADD COLUMN rewrote the issues table's CREATE statement, and its
     // backfill UPDATE fired the FTS trigger, which rewrote that row's index
     // entries. Check those with FTS5's own integrity-check instead.

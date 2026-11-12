@@ -90,21 +90,44 @@ impl Store {
     }
 
     // ----- labels -----
+    /// Adds the label. A name that exists, ignoring case, is refused: names
+    /// are how labels are given on the command line.
     pub fn create_label(&mut self, l: &Label) -> Result<()> {
         self.write(|tx| {
+            if let Some(existing) = label_by_name(tx, &l.name)? {
+                return Err(LclError::LabelExists { name: l.name.clone(), existing: existing.name });
+            }
             tx.execute("INSERT INTO labels(id,name,color) VALUES(?1,?2,?3)", params![l.id, l.name, l.color])?;
             Ok(())
         })
     }
     pub fn list_labels(&self) -> Result<Vec<Label>> {
-        let mut stmt = self.conn.prepare("SELECT id,name,color FROM labels ORDER BY name")?;
+        let mut stmt = self.conn.prepare("SELECT id,name,color FROM labels ORDER BY name COLLATE NOCASE, name")?;
         let rows = stmt.query_map([], |r| Ok(Label { id: r.get(0)?, name: r.get(1)?, color: r.get(2)? }))?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
-    pub fn delete_label(&mut self, id: &str) -> Result<()> {
+    /// Fails with `UnknownLabel` unless every name names a label.
+    pub fn require_labels(&self, names: &[String]) -> Result<()> {
+        for name in names {
+            label_by_name(&self.conn, name)?.ok_or_else(|| LclError::UnknownLabel(name.clone()))?;
+        }
+        Ok(())
+    }
+    /// Deletes the label named (ignoring case) or with id `name_or_id`. The
+    /// foreign key cascades it off every issue. Returns the label and how
+    /// many issues it was removed from.
+    pub fn delete_label(&mut self, name_or_id: &str) -> Result<(Label, i64)> {
         self.write(|tx| {
-            tx.execute("DELETE FROM labels WHERE id=?1", params![id])?;
-            Ok(())
+            let by_id = tx
+                .query_row("SELECT id,name,color FROM labels WHERE id=?1", params![name_or_id], |r| Ok(Label { id: r.get(0)?, name: r.get(1)?, color: r.get(2)? }))
+                .optional()?;
+            let label = match by_id {
+                Some(l) => l,
+                None => label_by_name(tx, name_or_id)?.ok_or_else(|| LclError::LabelNotFound(name_or_id.to_string()))?,
+            };
+            let issues: i64 = tx.query_row("SELECT count(*) FROM issue_labels WHERE label_id=?1", params![label.id], |r| r.get(0))?;
+            tx.execute("DELETE FROM labels WHERE id=?1", params![label.id])?;
+            Ok((label, issues))
         })
     }
 
@@ -129,9 +152,7 @@ impl Store {
                 "INSERT INTO issues(id,number,title,description,status,priority,assignee,parent_id,estimate,due_date,created_at,updated_at,completed_at,started_at,canceled_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
                 params![issue.id, issue.number, issue.title, issue.description, status, priority, issue.assignee, issue.parent_id, issue.estimate, issue.due_date, issue.created_at, issue.updated_at, issue.completed_at, issue.started_at, issue.canceled_at],
             )?;
-            for lid in &issue.labels {
-                tx.execute("INSERT OR IGNORE INTO issue_labels(issue_id,label_id) VALUES(?1,?2)", params![issue.id, lid])?;
-            }
+            set_labels(tx, &issue.id, &issue.labels)?;
             put_meta(tx, NEXT_ISSUE_NUMBER, &next.max(issue.number + 1).to_string())?;
             reread(tx, &key, &issue.id)
         })
@@ -183,11 +204,7 @@ impl Store {
                 "UPDATE issues SET title=?1,description=?2,status=?3,priority=?4,assignee=?5,parent_id=?6,estimate=?7,due_date=?8,updated_at=?9,completed_at=?10,started_at=?11,canceled_at=?12 WHERE id=?13",
                 params![issue.title, issue.description, status, priority, issue.assignee, issue.parent_id, issue.estimate, issue.due_date, issue.updated_at, issue.completed_at, issue.started_at, issue.canceled_at, issue.id],
             )?;
-            // sync labels: replace
-            tx.execute("DELETE FROM issue_labels WHERE issue_id=?1", params![issue.id])?;
-            for lid in &issue.labels {
-                tx.execute("INSERT OR IGNORE INTO issue_labels(issue_id,label_id) VALUES(?1,?2)", params![issue.id, lid])?;
-            }
+            set_labels(tx, &issue.id, &issue.labels)?;
             reread(tx, &key, &issue.id)
         })
     }
@@ -261,7 +278,9 @@ impl Store {
     }
     pub fn delete_doc(&mut self, id: &str) -> Result<()> {
         self.write(|tx| {
-            tx.execute("DELETE FROM docs WHERE id=?1", params![id])?;
+            if tx.execute("DELETE FROM docs WHERE id=?1", params![id])? == 0 {
+                return Err(LclError::DocNotFound(id.to_string()));
+            }
             Ok(())
         })
     }
@@ -322,6 +341,26 @@ fn next_issue_number(conn: &Connection) -> Result<i64> {
     };
     let past_max: i64 = conn.query_row("SELECT COALESCE(MAX(number),0)+1 FROM issues", [], |r| r.get(0))?;
     Ok(mark.max(past_max))
+}
+
+/// The label named `name`, ignoring (ASCII) case: the same rule as the
+/// unique index on labels(name COLLATE NOCASE), so at most one matches.
+fn label_by_name(conn: &Connection, name: &str) -> Result<Option<Label>> {
+    Ok(conn
+        .query_row("SELECT id,name,color FROM labels WHERE name=?1 COLLATE NOCASE", params![name], |r| Ok(Label { id: r.get(0)?, name: r.get(1)?, color: r.get(2)? }))
+        .optional()?)
+}
+
+/// Makes the issue's labels exactly `names` (each matched ignoring case;
+/// repeats collapse). Must run inside the write transaction that reads the
+/// issue, so a concurrent add can't be lost.
+fn set_labels(conn: &Connection, issue_id: &str, names: &[String]) -> Result<()> {
+    conn.execute("DELETE FROM issue_labels WHERE issue_id=?1", params![issue_id])?;
+    for name in names {
+        let label = label_by_name(conn, name)?.ok_or_else(|| LclError::UnknownLabel(name.clone()))?;
+        conn.execute("INSERT OR IGNORE INTO issue_labels(issue_id,label_id) VALUES(?1,?2)", params![issue_id, label.id])?;
+    }
+    Ok(())
 }
 
 /// This workspace's key, as used in `KEY-N` ("" if it has none).
@@ -399,8 +438,8 @@ fn fetch_issue_by(conn: &Connection, key: &str, col: &str, val: &dyn ToSql) -> R
     let mut rows = stmt.query(params![val])?;
     if let Some(r) = rows.next()? {
         let issue = row_to_issue(r, key)?;
-        // labels
-        let mut li = conn.prepare("SELECT label_id FROM issue_labels WHERE issue_id=?1")?;
+        // label names, sorted
+        let mut li = conn.prepare("SELECT l.name FROM issue_labels il JOIN labels l ON l.id = il.label_id WHERE il.issue_id=?1 ORDER BY l.name COLLATE NOCASE, l.name")?;
         let ls: Vec<String> = li.query_map(params![issue.id], |r| r.get(0))?.collect::<std::result::Result<Vec<_>,_>>()?;
         let mut issue = issue;
         issue.labels = ls;

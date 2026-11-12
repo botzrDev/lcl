@@ -13,7 +13,7 @@
 /// adding a migration bumps it and the two can't drift apart.
 pub const SCHEMA_VERSION: i64 = MIGRATIONS.len() as i64;
 
-pub(crate) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4];
+pub(crate) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5];
 
 /// v0 -> v1: the lcl 0.1.0 schema, verbatim.
 ///
@@ -163,4 +163,82 @@ WITH RECURSIVE up(start, cur) AS (
     WHERE i.parent_id IS NOT NULL AND up.cur <> up.start
 )
 UPDATE issues SET parent_id = NULL WHERE id IN (SELECT start FROM up WHERE cur = start);
+"#;
+
+/// v4 -> v5: labels become records, and blank assignees become unset.
+///
+/// 0.1.0 stored whatever followed `--label` in issue_labels.label_id: usually
+/// a name, sometimes a label id, sometimes "". And it allowed two labels with
+/// the same name. This migration:
+/// - merges labels whose names match ignoring case into the one with the
+///   lowest rowid (its id, name and colour survive);
+/// - maps every issue_labels value, trimmed of whitespace, to a label: a
+///   label id (any case) becomes that label or its survivor; else a name
+///   (ignoring case) becomes that label; else a new label is made with that
+///   name and colour #888888, one per name ignoring case, spelled as its first
+///   use. Dropped: blank values, rows whose issue no longer exists, and
+///   UUIDs that name no label (rows 0.1.0's `label delete` left behind; the
+///   user deleted that label);
+/// - rebuilds issue_labels with foreign keys to issues and labels, each
+///   ON DELETE CASCADE, so deleting a label takes it off its issues;
+/// - adds a unique index on labels(name COLLATE NOCASE);
+/// - sets assignee to NULL where it is blank (0.1.0's `--assignee ""`).
+///
+/// "Whitespace" is Unicode White_Space, the set Rust's `str::trim` uses, so
+/// the CLI's trimming and this one agree. "Ignoring case" is SQLite's
+/// NOCASE: ASCII letters only. Not idempotent
+/// (CREATE TABLE/INDEX), so it relies on `migrate` re-reading the version
+/// under the write lock.
+const V5: &str = r#"
+CREATE TEMP TABLE v5_label AS
+SELECT l.id AS id,
+    (SELECT s.id FROM labels s WHERE s.name = l.name COLLATE NOCASE ORDER BY s.rowid LIMIT 1) AS survivor
+FROM labels l;
+
+CREATE TEMP TABLE v5_raw AS
+SELECT rid, issue_id, raw FROM (
+    SELECT il.rowid AS rid, il.issue_id AS issue_id, trim(il.label_id, char(9, 10, 11, 12, 13, 32, 133, 160, 5760, 8192, 8193, 8194, 8195, 8196, 8197, 8198, 8199, 8200, 8201, 8202, 8232, 8233, 8239, 8287, 12288)) AS raw
+    FROM issue_labels il
+    WHERE il.issue_id IN (SELECT id FROM issues)
+)
+WHERE raw <> ''
+  AND NOT (lower(raw) GLOB replace('xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx', 'x', '[0-9a-f]')
+           AND lower(raw) NOT IN (SELECT id FROM labels)
+           AND NOT EXISTS (SELECT 1 FROM labels l WHERE l.name = raw COLLATE NOCASE));
+
+INSERT INTO labels(id, name, color)
+SELECT lower(printf('%s-%s-4%s-%s%s-%s',
+        hex(randomblob(4)), hex(randomblob(2)), substr(hex(randomblob(2)), 2),
+        substr('89ab', 1 + abs(random() % 4), 1), substr(hex(randomblob(2)), 2), hex(randomblob(6)))),
+    r.raw, '#888888'
+FROM v5_raw r
+WHERE lower(r.raw) NOT IN (SELECT id FROM labels)
+  AND NOT EXISTS (SELECT 1 FROM labels l WHERE l.name = r.raw COLLATE NOCASE)
+  AND r.rid = (SELECT min(o.rid) FROM v5_raw o
+               WHERE o.raw = r.raw COLLATE NOCASE AND lower(o.raw) NOT IN (SELECT id FROM labels));
+
+CREATE TABLE issue_labels_v5 (
+    issue_id TEXT NOT NULL REFERENCES issues(id) ON DELETE CASCADE,
+    label_id TEXT NOT NULL REFERENCES labels(id) ON DELETE CASCADE,
+    PRIMARY KEY (issue_id, label_id)
+);
+-- No OR IGNORE: it would also swallow a NULL mapping. GROUP BY dedupes.
+INSERT INTO issue_labels_v5(issue_id, label_id)
+SELECT issue_id, label_id FROM (
+    SELECT r.rid, r.issue_id, COALESCE(
+        (SELECT v.survivor FROM v5_label v WHERE v.id = lower(r.raw)),
+        (SELECT l.id FROM labels l WHERE l.name = r.raw COLLATE NOCASE ORDER BY l.rowid LIMIT 1)
+    ) AS label_id
+    FROM v5_raw r
+) GROUP BY issue_id, label_id ORDER BY min(rid);
+DROP TABLE issue_labels;
+ALTER TABLE issue_labels_v5 RENAME TO issue_labels;
+
+DELETE FROM labels WHERE id IN (SELECT id FROM v5_label WHERE survivor <> id);
+CREATE UNIQUE INDEX labels_name ON labels(name COLLATE NOCASE);
+
+UPDATE issues SET assignee = NULL WHERE trim(assignee, char(9, 10, 11, 12, 13, 32, 133, 160, 5760, 8192, 8193, 8194, 8195, 8196, 8197, 8198, 8199, 8200, 8201, 8202, 8232, 8233, 8239, 8287, 12288)) = '';
+
+DROP TABLE v5_label;
+DROP TABLE v5_raw;
 "#;

@@ -28,6 +28,18 @@ pub enum LclError {
     ParentCycle { issue: String, parent: String, path: String },
     #[error("{issue} has sub-issues {children}; reparent or delete them first")]
     HasChildren { issue: String, children: String },
+    /// A label argument naming no label.
+    #[error("unknown label {0:?}; create it with: lcl label create {word}", word = shell_word(.0))]
+    UnknownLabel(String),
+    /// `label create` with a name that exists, ignoring case. `existing` is
+    /// the stored spelling.
+    #[error("label {name:?} already exists{}", if name == existing { String::new() } else { format!(" (as {existing:?})") })]
+    LabelExists { name: String, existing: String },
+    /// `label delete` of a name or id that names no label.
+    #[error("label {0:?} not found")]
+    LabelNotFound(String),
+    #[error("doc {0} not found")]
+    DocNotFound(String),
     #[error("{0}")]
     Msg(String),
 }
@@ -39,6 +51,15 @@ impl LclError {
     /// these as usage errors (exit 2). Everything else is about the state of
     /// the data or the system.
     pub fn is_usage(&self) -> bool {
-        matches!(self, LclError::WrongWorkspace { .. } | LclError::SelfParent(_) | LclError::ParentCycle { .. })
+        matches!(
+            self,
+            LclError::WrongWorkspace { .. } | LclError::SelfParent(_) | LclError::ParentCycle { .. } | LclError::UnknownLabel(_)
+        )
     }
+}
+
+/// `s` as one shell word: as is when that's safe, else single-quoted.
+fn shell_word(s: &str) -> String {
+    let plain = !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || "._/:@%+=,-".contains(c));
+    if plain { s.to_string() } else { format!("'{}'", s.replace('\'', r"'\''")) }
 }

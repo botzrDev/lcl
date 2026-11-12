@@ -22,6 +22,11 @@ pub const V0_FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixture
 /// accepted. See tests/parents.rs for how it was built.
 pub const V0_PARENTS_FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/v0-parents.sqlite");
 
+/// A 0.1.0 database with duplicate labels, labels attached by raw name in
+/// mixed case and by id, blank labels and blank assignees. See
+/// tests/labels.rs for how it was built.
+pub const V0_LABELS_FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/v0-labels.sqlite");
+
 /// What one `lcl` invocation produced.
 #[derive(Debug)]
 pub struct Out {
@@ -166,6 +171,32 @@ fn rows(conn: &rusqlite::Connection, sql: &str) -> Vec<Row> {
     stmt.query_map([], |r| (0..names.len()).map(|i| Ok((names[i].clone(), r.get::<_, Value>(i)?))).collect())
         .and_then(Iterator::collect)
         .unwrap_or_else(|e| panic!("{sql}: {e}"))
+}
+
+/// Rows of `PRAGMA foreign_key_check`: empty when every foreign key holds.
+pub fn foreign_key_violations(db: &Path) -> Vec<Row> {
+    let conn = rusqlite::Connection::open(db).expect("open db");
+    rows(&conn, "PRAGMA foreign_key_check")
+}
+
+/// Undoes migration 5's schema changes on an upgraded dump, after checking
+/// them: issue_labels rebuilt with cascading foreign keys (its CREATE
+/// statement is dropped from the comparison), and the new unique index on
+/// label names (removed).
+pub fn undo_v5_schema(after: &mut Dump, before: &mut Dump) {
+    let t = |s: &str| Value::Text(s.into());
+    let index = after.schema.iter().position(|r| r["name"] == t("labels_name")).expect("labels_name index");
+    let index = after.schema.remove(index);
+    assert_eq!(index["sql"], t("CREATE UNIQUE INDEX labels_name ON labels(name COLLATE NOCASE)"));
+    let sql = after.schema.iter().find(|r| r["name"] == t("issue_labels")).map(|r| format!("{:?}", r["sql"])).unwrap_or_default();
+    assert!(
+        sql.contains("issue_id TEXT NOT NULL REFERENCES issues(id) ON DELETE CASCADE")
+            && sql.contains("label_id TEXT NOT NULL REFERENCES labels(id) ON DELETE CASCADE"),
+        "{sql}"
+    );
+    for d in [after, before] {
+        d.schema.retain(|r| r["name"] != t("issue_labels"));
+    }
 }
 
 /// The schema plus every row of every table, for before/after comparisons.

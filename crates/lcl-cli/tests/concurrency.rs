@@ -86,3 +86,24 @@ fn concurrent_comments_and_updates_all_land() {
     let title = issue["issue"]["title"].as_str().expect("title");
     assert!(title.starts_with("title "), "title is not one of the written ones: {title:?}");
 }
+
+/// Label edits read the issue's set inside the write transaction, so 20
+/// parallel `--add-label` calls with distinct labels all land.
+#[test]
+fn parallel_add_labels_all_land() {
+    const PROCS: usize = 20;
+    let env = Env::new();
+    env.lcl(&["init"]).assert_ok();
+    let names: Vec<String> = (0..PROCS).map(|i| format!("l{i:02}")).collect();
+    for n in &names {
+        env.lcl(&["label", "create", n]).assert_ok();
+    }
+    assert_eq!(env.create("target"), 1);
+
+    let cmds: Vec<_> = names.iter().map(|n| argv(&["issue", "update", "1", "--add-label", n])).collect();
+    for (i, out) in env.lcl_parallel(&cmds).iter().enumerate() {
+        assert_eq!(out.code, 0, "process {i} failed: {out:#?}");
+    }
+    let issue = env.lcl(&["issue", "show", "1", "--json"]).assert_ok().json()["issue"].clone();
+    assert_eq!(issue["labels"], serde_json::json!(names), "lost a label: {issue:#}");
+}

@@ -36,7 +36,7 @@
 
 mod common;
 
-use common::{dump, exec, issue_row, user_version, Env, V0_PARENTS_FIXTURE};
+use common::{dump, exec, foreign_key_violations, issue_row, undo_v5_schema, user_version, Env, V0_PARENTS_FIXTURE};
 use lcl_core::SCHEMA_VERSION;
 use rusqlite::types::Value as SqlValue;
 use serde_json::{json, Value};
@@ -302,7 +302,7 @@ fn upgrade_repairs_parent_ids() {
     let thirteen = env.lcl(&["issue", "show", "13", "--json"]).assert_ok().json();
     assert_eq!(thirteen["issue"]["parent_identifier"], "FIXT-11");
 
-    // Nothing else changed beyond migrations 2-4. Undo their expected changes
+    // Nothing else changed beyond migrations 2-5. Undo their expected changes
     // on `after`; what's left must equal `before`. (v3's backfills don't
     // apply: no issue here is Done or Canceled.)
     let t = |s: &str| SqlValue::Text(s.into());
@@ -318,6 +318,9 @@ fn upgrade_repairs_parent_ids() {
     for row in before.tables.get_mut("issues").expect("issues table") {
         row.remove("parent_id");
     }
+    // v5: no labels or blank assignees here, so only its schema changes.
+    undo_v5_schema(&mut after, &mut before);
+    assert_eq!(foreign_key_violations(&db), vec![]);
     // v3's ADD COLUMN rewrote the issues CREATE statement, and v4's UPDATE
     // fired the FTS trigger for the rows it changed: check those with FTS5's
     // integrity-check instead of byte for byte.

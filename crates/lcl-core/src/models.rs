@@ -171,6 +171,8 @@ pub struct Issue {
     pub parent_identifier: Option<String>,
     pub estimate: Option<i64>,
     pub due_date: Option<String>,
+    /// Label names. Read sorted (ignoring case); on write each must name a
+    /// label, matched ignoring case.
     pub labels: Vec<String>,
     pub created_at: i64,
     pub updated_at: i64,
