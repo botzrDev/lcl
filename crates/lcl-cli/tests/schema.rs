@@ -21,6 +21,7 @@ mod common;
 
 use common::{dump, set_user_version, user_version, Env, Out, V0_FIXTURE};
 use lcl_core::SCHEMA_VERSION;
+use rusqlite::types::Value as SqlValue;
 use serde_json::{json, Value};
 use std::sync::Barrier;
 
@@ -73,9 +74,17 @@ fn upgrades_a_0_1_0_database() {
     assert_eq!(project["key"], "FIXT");
 
     assert_eq!(user_version(&db), SCHEMA_VERSION);
-    // Migration 1 is a no-op on a 0.1.0 database: every object and every row,
-    // FTS index included, is exactly as 0.1.0 left it.
-    assert_eq!(dump(&db), before);
+    // The only change to a 0.1.0 database's data is migration 2's seeded
+    // number mark. Every other object and row, FTS index included, is exactly
+    // as 0.1.0 left it.
+    let mut after = dump(&db);
+    let meta = &mut after.tables.iter_mut().find(|(t, _)| t == "meta").expect("meta table").1;
+    let seeded = meta
+        .iter()
+        .position(|row| row[1] == SqlValue::Text("next_issue_number".into()))
+        .expect("next_issue_number seeded");
+    assert_eq!(meta.remove(seeded)[2], SqlValue::Text("4".into()), "seeded one past the highest number");
+    assert_eq!(after, before);
 }
 
 #[test]

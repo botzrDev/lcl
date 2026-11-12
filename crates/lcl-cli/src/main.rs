@@ -167,11 +167,9 @@ fn main() -> Result<()> {
             let dir = std::env::current_dir()?.join(".lcl");
             std::fs::create_dir_all(&dir)?;
             let dbpath = dir.join("data.sqlite");
-            let store = Store::open(&dbpath)?;
-            store.set_meta("name", &pname)?;
-            store.set_meta("key", &key)?;
-            store.set_meta("description", "")?;
-            store.set_meta("created_at", &now().to_string())?;
+            let mut store = Store::open(&dbpath)?;
+            let created_at = now().to_string();
+            store.set_meta(&[("name", pname.as_str()), ("key", key.as_str()), ("description", ""), ("created_at", created_at.as_str())])?;
             // register in global index
             let idx = open_index()?;
             idx.conn.execute("INSERT OR REPLACE INTO projects(name,slug,path,created_at) VALUES(?1,?2,?3,?4)", rusqlite::params![pname, slugify(&pname), dbpath.to_string_lossy(), now()])?;
@@ -191,11 +189,9 @@ fn main() -> Result<()> {
                     std::fs::create_dir_all(&dir)?;
                     dir.join(format!("{}.sqlite", slug))
                 };
-                let store = Store::open(&path)?;
-                store.set_meta("name", &name)?;
-                store.set_meta("key", &k)?;
-                store.set_meta("description", "")?;
-                store.set_meta("created_at", &now().to_string())?;
+                let mut store = Store::open(&path)?;
+                let created_at = now().to_string();
+                store.set_meta(&[("name", name.as_str()), ("key", k.as_str()), ("description", ""), ("created_at", created_at.as_str())])?;
                 let idx = open_index()?;
                 idx.conn.execute("INSERT OR REPLACE INTO projects(name,slug,path,created_at) VALUES(?1,?2,?3,?4)", rusqlite::params![name, slug, path.to_string_lossy(), now()])?;
                 if cli.json { print_json(&serde_json::json!({"path": path, "name": name, "key": k})); }
@@ -222,7 +218,7 @@ fn main() -> Result<()> {
             }
         },
         Commands::Issue { cmd } => {
-            let store = resolve_store(&cli.project)?;
+            let mut store = resolve_store(&cli.project)?;
             match cmd {
                 IssueCmd::Create { title, description, status, priority, assignee, parent, label, estimate, due } => {
                     let st = Status::parse(&status).unwrap_or(Status::Backlog);
@@ -276,8 +272,7 @@ fn main() -> Result<()> {
                     if cli.json { print_json(&serde_json::json!({"deleted": id})); } else { println!("Deleted {}", id); }
                 }
                 IssueCmd::Comment { id, body, author } => {
-                    let issue = store.get_issue(&id)?.ok_or_else(|| anyhow::anyhow!("issue not found"))?;
-                    let c = store.add_comment(Comment { id: String::new(), issue_id: issue.id, body, author, created_at: 0 })?;
+                    let c = store.add_comment(&id, body, author)?.ok_or_else(|| anyhow::anyhow!("issue not found"))?;
                     if cli.json { print_json(&c); } else { println!("Comment added"); }
                 }
                 IssueCmd::Comments { id } => {
@@ -289,7 +284,7 @@ fn main() -> Result<()> {
             }
         },
         Commands::Doc { cmd } => {
-            let store = resolve_store(&cli.project)?;
+            let mut store = resolve_store(&cli.project)?;
             match cmd {
                 DocCmd::Create { title, content, parent } => {
                     let d = store.create_doc(Doc { id: String::new(), title, content, parent_id: parent, created_at: 0, updated_at: 0 })?;
@@ -315,7 +310,7 @@ fn main() -> Result<()> {
             }
         },
         Commands::Label { cmd } => {
-            let store = resolve_store(&cli.project)?;
+            let mut store = resolve_store(&cli.project)?;
             match cmd {
                 LabelCmd::Create { name, color } => {
                     let l = Label { id: uuid::Uuid::new_v4().to_string(), name, color };
@@ -333,7 +328,7 @@ fn main() -> Result<()> {
             }
         },
         Commands::Cycle { cmd } => {
-            let store = resolve_store(&cli.project)?;
+            let mut store = resolve_store(&cli.project)?;
             match cmd {
                 CycleCmd::Create { name, start, end } => {
                     let c = store.create_cycle(Cycle { id: String::new(), name, starts_at: start, ends_at: end, created_at: 0 })?;

@@ -13,7 +13,7 @@
 /// adding a migration bumps it and the two can't drift apart.
 pub const SCHEMA_VERSION: i64 = MIGRATIONS.len() as i64;
 
-pub(crate) const MIGRATIONS: &[&str] = &[V1];
+pub(crate) const MIGRATIONS: &[&str] = &[V1, V2];
 
 /// v0 -> v1: the lcl 0.1.0 schema, verbatim.
 ///
@@ -85,4 +85,14 @@ CREATE TRIGGER IF NOT EXISTS docs_au AFTER UPDATE ON docs BEGIN
     INSERT INTO docs_fts(docs_fts,rowid,title,content) VALUES ('delete',old.rowid,old.title,old.content);
     INSERT INTO docs_fts(rowid,title,content) VALUES (new.rowid,new.title,new.content);
 END;
+"#;
+
+/// v1 -> v2: seed the issue-number high-water mark.
+///
+/// `issue create` allocates from `meta.next_issue_number` and deletes never
+/// lower it, so a number is never handed out twice. The seed is one past the
+/// highest existing number. A number deleted under 0.1.0 before the upgrade
+/// can't be recovered.
+const V2: &str = r#"
+INSERT OR IGNORE INTO meta(key,value) VALUES('next_issue_number', COALESCE((SELECT MAX(number) FROM issues),0)+1);
 "#;

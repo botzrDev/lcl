@@ -6,7 +6,13 @@
 use rusqlite::types::Value;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Barrier;
 use tempfile::TempDir;
+
+/// Builds an owned argv for `Env::lcl_parallel`.
+pub fn argv(args: &[&str]) -> Vec<String> {
+    args.iter().map(|a| a.to_string()).collect()
+}
 
 /// A database written by lcl 0.1.0. See tests/schema.rs for how it was built.
 pub const V0_FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/v0.sqlite");
@@ -76,6 +82,33 @@ impl Env {
             .code()
             .unwrap_or_else(|| panic!("lcl {args:?} killed by a signal\nstdout: {stdout}\nstderr: {stderr}"));
         Out { code, stdout, stderr }
+    }
+
+    /// Runs every command at once: one thread per command, all released
+    /// together by a barrier. Outputs come back in the order given.
+    pub fn lcl_parallel(&self, cmds: &[Vec<String>]) -> Vec<Out> {
+        let barrier = Barrier::new(cmds.len());
+        std::thread::scope(|s| {
+            let handles: Vec<_> = cmds
+                .iter()
+                .map(|cmd| {
+                    let barrier = &barrier;
+                    s.spawn(move || {
+                        let args: Vec<&str> = cmd.iter().map(String::as_str).collect();
+                        barrier.wait();
+                        self.lcl(&args)
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().expect("thread panicked")).collect()
+        })
+    }
+
+    /// `issue create --title <title> --json`, returning the new issue's number.
+    #[track_caller]
+    pub fn create(&self, title: &str) -> i64 {
+        let out = self.lcl(&["issue", "create", "--title", title, "--json"]);
+        out.assert_ok().json()["number"].as_i64().unwrap_or_else(|| panic!("no number in {out:#?}"))
     }
 
     /// The project database lcl discovers from this env's cwd.
