@@ -49,8 +49,8 @@ fn status_spellings_through_create_update_and_list() {
         let updated = env.lcl(&["issue", "update", "1", &flag, "--json"]).assert_ok().json();
         assert_eq!(updated["status"], canonical, "update {flag:?}");
 
-        let listed = env.lcl(&["issue", "list", &flag, "--limit", "1000", "--json"]).assert_ok().json();
-        let listed = listed.as_array().expect("array");
+        let listed = env.lcl(&["issue", "list", &flag, "--all", "--json"]).assert_ok().json();
+        let listed = listed["issues"].as_array().expect("array");
         assert!(listed.iter().all(|i| i["status"] == canonical), "list {flag:?} returned other statuses: {listed:#?}");
         assert!(listed.iter().any(|i| i["number"] == created["number"]), "list {flag:?} missed the issue just created");
     }
@@ -198,7 +198,7 @@ fn estimates_cannot_be_negative() {
         assert_eq!(out.code, 2, "{args:?}: {out:#?}");
     }
     let list = env.lcl(&["issue", "list", "--json"]).assert_ok().json();
-    assert_eq!(list.as_array().map(Vec::len), Some(2), "{list:#}");
+    assert_eq!(list["issues"].as_array().map(Vec::len), Some(2), "{list:#}");
 }
 
 #[test]
@@ -259,9 +259,9 @@ fn a_stored_status_reads_leniently() {
         let shown = env.lcl(&["issue", "show", &n.to_string(), "--json"]).assert_ok().json();
         assert_eq!(shown["issue"]["status"], status, "show {n}");
     }
-    for (args, key) in [(vec!["issue", "list", "--limit=-1", "--json"], None), (vec!["search", "writer", "--json"], Some("issues"))] {
+    for args in [vec!["issue", "list", "--all", "--json"], vec!["search", "writer", "--json"]] {
         let out = env.lcl(&args).assert_ok().json();
-        let issues = key.map_or(&out, |k| &out[k]).as_array().unwrap_or_else(|| panic!("{args:?}: {out:#}")).clone();
+        let issues = out["issues"].as_array().unwrap_or_else(|| panic!("{args:?}: {out:#}")).clone();
         assert_eq!(issues.len(), 3, "{args:?}: {out:#}");
         for (n, status) in want {
             let i = issues.iter().find(|i| i["number"] == n).unwrap_or_else(|| panic!("{args:?} missing {n}"));

@@ -2,7 +2,7 @@ use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
 use crossterm::ExecutableCommand;
-use lcl_core::db::{IssueFilter, Store};
+use lcl_core::db::{IssueFilter, IssueSort, Page, Store};
 use ratatui::prelude::*;
 use ratatui::widgets::*;
 use std::io::stdout;
@@ -33,7 +33,7 @@ pub fn run(project: Option<String>) -> Result<()> {
 
     let mut selected: usize = 0;
     let mut status_filter: Option<&str> = None;
-    let issues = store.list_issues(&IssueFilter { status: None, assignee: None, parent_id: None, limit: 200 }).unwrap_or_default();
+    let issues = store.list_issues(&IssueFilter::default(), IssueSort::Number, Page::ALL).map(|list| list.issues).unwrap_or_default();
 
     loop {
         terminal.draw(|f| {

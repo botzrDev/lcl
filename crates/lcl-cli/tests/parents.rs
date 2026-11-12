@@ -212,7 +212,7 @@ fn list_filters_by_parent() {
         let mut cmd = vec!["issue", "list", "--json"];
         cmd.extend(args);
         let list = env.lcl(&cmd).assert_ok().json();
-        list.as_array().expect("array").iter().map(|i| i["number"].as_i64().expect("number")).collect()
+        list["issues"].as_array().expect("array").iter().map(|i| i["number"].as_i64().expect("number")).collect()
     };
     assert_eq!(numbers(&["--parent", "DREA-1"]), [3, 2], "direct sub-issues only, newest first");
     assert_eq!(numbers(&["--parent", "#2"]), [4]);
@@ -249,7 +249,7 @@ fn delete_refuses_an_issue_with_sub_issues() {
     env.lcl(&["issue", "delete", "3"]).assert_ok();
     env.lcl(&["issue", "delete", "2"]).assert_ok();
     let list = env.lcl(&["issue", "list", "--json"]).assert_ok().json();
-    assert_eq!(list, json!([]));
+    assert_eq!(list, json!({"issues": [], "total": 0, "limit": 50, "offset": 0, "truncated": false}));
 }
 
 #[test]

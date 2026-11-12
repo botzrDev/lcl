@@ -26,7 +26,7 @@ use serde_json::{json, Value};
 use std::sync::Barrier;
 
 fn issue(list: &Value, number: i64) -> &Value {
-    list.as_array()
+    list["issues"].as_array()
         .and_then(|a| a.iter().find(|i| i["number"] == number))
         .unwrap_or_else(|| panic!("issue {number} missing from {list:#}"))
 }
@@ -39,7 +39,7 @@ fn upgrades_a_0_1_0_database() {
     let mut before = dump(&db);
 
     let list = env.lcl(&["issue", "list", "--json"]).assert_ok().json();
-    assert_eq!(list.as_array().map(Vec::len), Some(3), "{list:#}");
+    assert_eq!(list["issues"].as_array().map(Vec::len), Some(3), "{list:#}");
     let one = issue(&list, 1);
     assert_eq!(one["title"], "Fish tank");
     assert_eq!(one["description"], "The zebrafish need a bigger tank");
@@ -191,7 +191,7 @@ fn concurrent_first_open_migrates_once() {
 
     for (i, out) in outs.iter().enumerate() {
         assert_eq!(out.code, 0, "process {i} failed: {out:#?}");
-        assert_eq!(out.json().as_array().map(Vec::len), Some(3), "process {i}: {out:#?}");
+        assert_eq!(out.json()["issues"].as_array().map(Vec::len), Some(3), "process {i}: {out:#?}");
     }
     assert_eq!(user_version(&db), SCHEMA_VERSION);
 }

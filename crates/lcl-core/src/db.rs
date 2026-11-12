@@ -2,9 +2,13 @@ use crate::error::{LclError, Result};
 use crate::migrations::{MIGRATIONS, SCHEMA_VERSION};
 use crate::models::*;
 use crate::search::{Field, IssueHit, SearchQuery, SearchResults};
-use rusqlite::{params, Connection, OptionalExtension, ToSql, Transaction, TransactionBehavior};
+use rusqlite::functions::FunctionFlags;
+use rusqlite::types::{Value, ValueRef};
+use rusqlite::{params, params_from_iter, Connection, OptionalExtension, ToSql, Transaction, TransactionBehavior};
+use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::str::FromStr;
 use std::time::Duration;
 
 /// How long a connection waits for a lock held by another lcl process before
@@ -20,15 +24,92 @@ pub struct Store {
     pub conn: Connection,
 }
 
-/// Which issues `Store::list_issues` returns.
-#[derive(Debug, Clone)]
+/// Which issues `Store::list_issues` returns. Each part narrows the list
+/// (they AND); an empty or `None` part doesn't narrow it.
+#[derive(Debug, Clone, Default)]
 pub struct IssueFilter {
-    pub status: Option<Status>,
-    pub assignee: Option<String>,
-    /// Only the direct sub-issues of the issue with this UUID.
-    pub parent_id: Option<String>,
-    /// At most this many, newest first. Negative means no limit.
-    pub limit: i64,
+    /// Any of these statuses (they OR). A stored status is read by the same
+    /// rule as everywhere else (`Status::parse`), so a hand-edited "done" is
+    /// Done here too.
+    pub statuses: Vec<Status>,
+    pub assignee: Option<AssigneeFilter>,
+    /// Every one of these labels (they AND), each named ignoring case. An
+    /// unknown name is an error.
+    pub labels: Vec<String>,
+    /// Only the direct sub-issues of this issue.
+    pub parent: Option<IssueRef>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AssigneeFilter {
+    Unassigned,
+    /// Assigned to this name, ignoring ASCII case.
+    Named(String),
+}
+
+/// The order of `Store::list_issues`. Ties go to the higher number.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum IssueSort {
+    /// Newest number first.
+    #[default]
+    Number,
+    /// Newest first.
+    Created,
+    /// Most recently updated first.
+    Updated,
+    /// Urgent, High, Medium, Low, then None, as Linear sorts.
+    Priority,
+}
+
+impl IssueSort {
+    fn order_by(self) -> &'static str {
+        match self {
+            IssueSort::Number => "i.number DESC",
+            IssueSort::Created => "i.created_at DESC, i.number DESC",
+            IssueSort::Updated => "i.updated_at DESC, i.number DESC",
+            // Stored: None 0, Urgent 1 .. Low 4. None goes after Low.
+            IssueSort::Priority => "CASE i.priority WHEN 0 THEN 5 ELSE i.priority END, i.number DESC",
+        }
+    }
+}
+
+impl FromStr for IssueSort {
+    type Err = InvalidValue;
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s.to_ascii_lowercase().as_str() {
+            "number" => Ok(IssueSort::Number),
+            "created" => Ok(IssueSort::Created),
+            "updated" => Ok(IssueSort::Updated),
+            "priority" => Ok(IssueSort::Priority),
+            _ => Err(InvalidValue(format!("invalid sort \"{s}\"; expected one of: number, created, updated, priority"))),
+        }
+    }
+}
+
+/// Which stretch of the sorted list to return.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Page {
+    /// At most this many; `None` for all of them.
+    pub limit: Option<u32>,
+    /// Skip this many first.
+    pub offset: u32,
+}
+
+impl Page {
+    pub const ALL: Page = Page { limit: None, offset: 0 };
+}
+
+/// One page of `issue list`, and where it sits in the whole list.
+#[derive(Debug, Clone, Serialize)]
+pub struct IssueList {
+    pub issues: Vec<Issue>,
+    /// How many issues match the filter, whatever the page.
+    pub total: usize,
+    /// `None` (null) for all of them.
+    pub limit: Option<u32>,
+    pub offset: u32,
+    /// Whether matching issues come after this page: offset + returned < total.
+    pub truncated: bool,
 }
 
 impl Store {
@@ -56,6 +137,7 @@ impl Store {
         // resulting mode ("memory" for an in-memory db), which we don't need.
         conn.pragma_update_and_check(None, "journal_mode", "WAL", |_| Ok(()))?;
         conn.pragma_update(None, "foreign_keys", true)?;
+        register_lcl_status(&conn)?;
         migrate(&mut conn)?;
         Ok(Store { conn })
     }
@@ -73,6 +155,17 @@ impl Store {
     /// transaction, which rolls all of it back.
     fn write<T>(&mut self, f: impl FnOnce(&Transaction<'_>) -> Result<T>) -> Result<T> {
         let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let out = f(&tx)?;
+        tx.commit()?;
+        Ok(out)
+    }
+
+    /// Runs `f` in one read transaction (`BEGIN DEFERRED` … `COMMIT`). In WAL
+    /// mode every query in it reads the same snapshot, so a count and the
+    /// page it counts agree even while another process writes. Takes no
+    /// write lock.
+    fn read<T>(&self, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
+        let tx = self.conn.unchecked_transaction()?;
         let out = f(&tx)?;
         tx.commit()?;
         Ok(out)
@@ -170,19 +263,52 @@ impl Store {
         let ids = stmt.query_map(params![parent_id], |r| r.get(0))?.collect::<std::result::Result<Vec<String>, _>>()?;
         fetch_issues(&self.conn, &ids)
     }
-    pub fn list_issues(&self, filter: &IssueFilter) -> Result<Vec<Issue>> {
-        let mut conds: Vec<&str> = vec![];
-        let mut args: Vec<String> = vec![];
-        if let Some(st) = filter.status { conds.push("status=?"); args.push(st.as_str().to_string()); }
-        if let Some(p) = &filter.parent_id { conds.push("parent_id=?"); args.push(p.clone()); }
-        let mut sql = String::from("SELECT id FROM issues");
-        if !conds.is_empty() { sql.push_str(" WHERE "); sql.push_str(&conds.join(" AND ")); }
-        sql.push_str(&format!(" ORDER BY number DESC LIMIT {}", filter.limit));
-        let mut stmt = self.conn.prepare(&sql)?;
-        let ids = stmt.query_map(rusqlite::params_from_iter(&args), |r| r.get(0))?.collect::<std::result::Result<Vec<String>, _>>()?;
-        let mut out = fetch_issues(&self.conn, &ids)?;
-        if let Some(a) = &filter.assignee { out.retain(|i| i.assignee.as_ref() == Some(a)); }
-        Ok(out)
+    /// The issues `filter` selects, in `sort` order, cut to `page`. Every
+    /// filter is in SQL, before LIMIT, and the total and the page come from
+    /// one read transaction, so they agree.
+    pub fn list_issues(&self, filter: &IssueFilter, sort: IssueSort, page: Page) -> Result<IssueList> {
+        self.read(|conn| {
+            let key = read_key(conn)?;
+            let mut conds: Vec<String> = vec![];
+            let mut args: Vec<Value> = vec![];
+            if !filter.statuses.is_empty() {
+                conds.push(format!("lcl_status(i.status) IN ({})", vec!["?"; filter.statuses.len()].join(",")));
+                args.extend(filter.statuses.iter().map(|s| Value::Text(s.as_str().to_string())));
+            }
+            match &filter.assignee {
+                Some(AssigneeFilter::Unassigned) => conds.push("i.assignee IS NULL".into()),
+                Some(AssigneeFilter::Named(name)) => {
+                    conds.push("i.assignee = ? COLLATE NOCASE".into());
+                    args.push(Value::Text(name.clone()));
+                }
+                None => {}
+            }
+            for name in &filter.labels {
+                let label = label_by_name(conn, name)?.ok_or_else(|| LclError::UnknownLabel(name.clone()))?;
+                conds.push("EXISTS (SELECT 1 FROM issue_labels il WHERE il.issue_id = i.id AND il.label_id = ?)".into());
+                args.push(Value::Text(label.id));
+            }
+            if let Some(parent) = &filter.parent {
+                conds.push("i.parent_id = ?".into());
+                args.push(Value::Text(resolve_issue(conn, parent)?.id));
+            }
+            let where_sql = if conds.is_empty() { String::new() } else { format!(" WHERE {}", conds.join(" AND ")) };
+
+            let total: i64 = conn.query_row(&format!("SELECT count(*) FROM issues i{where_sql}"), params_from_iter(&args), |r| r.get(0))?;
+            let limit = page.limit.map_or(-1, i64::from);
+            let sql = format!("{ISSUE_SELECT}{where_sql} ORDER BY {} LIMIT {limit} OFFSET {}", sort.order_by(), page.offset);
+            let mut stmt = conn.prepare(&sql)?;
+            let mut rows = stmt.query(params_from_iter(&args))?;
+            let mut issues = vec![];
+            while let Some(r) = rows.next()? {
+                issues.push(row_to_issue(r, &key)?);
+            }
+            attach_labels(conn, &mut issues)?;
+
+            let total = usize::try_from(total).map_err(|_| LclError::Msg(format!("count(*) returned {total}")))?;
+            let truncated = page.offset as usize + issues.len() < total;
+            Ok(IssueList { issues, total, limit: page.limit, offset: page.offset, truncated })
+        })
     }
     /// Reads the issue, applies `f` and writes it back, all under the write
     /// lock, so a concurrent update can't be overwritten with a stale copy.
@@ -310,97 +436,99 @@ impl Store {
     /// query is exactly this workspace's `KEY-N` or `#N` for an issue that
     /// exists, that issue comes first. `matched_in` comes from per-column
     /// MATCHes (`{title} : (any word)`), counted only for issues whose own
-    /// text matched.
+    /// text matched. Every query runs in one read transaction.
     pub fn search(&self, q: &SearchQuery, limit: usize) -> Result<SearchResults> {
-        let conn = &self.conn;
-        struct Hit {
-            rank: f64,
-            number: i64,
-            fields: Vec<Field>,
-        }
-        let mut hits: HashMap<String, Hit> = HashMap::new();
-        let all = q.all_words();
+        self.read(|conn| {
+            struct Hit {
+                rank: f64,
+                number: i64,
+                fields: Vec<Field>,
+            }
+            let mut hits: HashMap<String, Hit> = HashMap::new();
+            let all = q.all_words();
 
-        let mut stmt = conn.prepare(
-            "SELECT i.id, i.number, bm25(issues_fts) FROM issues_fts JOIN issues i ON i.rowid = issues_fts.rowid WHERE issues_fts MATCH ?1",
-        )?;
-        for row in stmt.query_map(params![all], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, f64>(2)?)))? {
-            let (id, number, rank) = row?;
-            hits.insert(id, Hit { rank, number, fields: vec![] });
-        }
-        for (field, col) in [(Field::Title, "title"), (Field::Description, "description")] {
-            let mut stmt = conn.prepare("SELECT i.id FROM issues_fts JOIN issues i ON i.rowid = issues_fts.rowid WHERE issues_fts MATCH ?1")?;
-            for id in stmt.query_map(params![q.any_word_in(col)], |r| r.get::<_, String>(0))? {
-                if let Some(hit) = hits.get_mut(&id?) {
-                    hit.fields.push(field);
+            let mut stmt = conn.prepare(
+                "SELECT i.id, i.number, bm25(issues_fts) FROM issues_fts JOIN issues i ON i.rowid = issues_fts.rowid WHERE issues_fts MATCH ?1",
+            )?;
+            for row in stmt.query_map(params![all], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, f64>(2)?)))? {
+                let (id, number, rank) = row?;
+                hits.insert(id, Hit { rank, number, fields: vec![] });
+            }
+            for (field, col) in [(Field::Title, "title"), (Field::Description, "description")] {
+                let mut stmt = conn.prepare("SELECT i.id FROM issues_fts JOIN issues i ON i.rowid = issues_fts.rowid WHERE issues_fts MATCH ?1")?;
+                for id in stmt.query_map(params![q.any_word_in(col)], |r| r.get::<_, String>(0))? {
+                    if let Some(hit) = hits.get_mut(&id?) {
+                        hit.fields.push(field);
+                    }
                 }
             }
-        }
 
-        let mut stmt = conn.prepare(
-            "SELECT c.issue_id, i.number, bm25(comments_fts) FROM comments_fts
-             JOIN comments c ON c.rowid = comments_fts.rowid JOIN issues i ON i.id = c.issue_id
-             WHERE comments_fts MATCH ?1",
-        )?;
-        for row in stmt.query_map(params![all], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, f64>(2)?)))? {
-            let (id, number, rank) = row?;
-            let hit = hits.entry(id).or_insert(Hit { rank, number, fields: vec![] });
-            hit.rank = hit.rank.min(rank);
-            if !hit.fields.contains(&Field::Comments) {
-                hit.fields.push(Field::Comments);
+            let mut stmt = conn.prepare(
+                "SELECT c.issue_id, i.number, bm25(comments_fts) FROM comments_fts
+                 JOIN comments c ON c.rowid = comments_fts.rowid JOIN issues i ON i.id = c.issue_id
+                 WHERE comments_fts MATCH ?1",
+            )?;
+            for row in stmt.query_map(params![all], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, f64>(2)?)))? {
+                let (id, number, rank) = row?;
+                let hit = hits.entry(id).or_insert(Hit { rank, number, fields: vec![] });
+                hit.rank = hit.rank.min(rank);
+                if !hit.fields.contains(&Field::Comments) {
+                    hit.fields.push(Field::Comments);
+                }
             }
-        }
 
-        // The issue the query names, if it's ours and exists. Another
-        // workspace's key, or a missing number, is just text.
-        let mut named = None;
-        if let Some(IssueRef::Number { key: typed, number }) = q.identifier() {
-            let key = read_key(conn)?;
-            let ours = match typed {
-                Some(typed) => !key.is_empty() && typed.to_lowercase() == key.to_lowercase(),
-                None => true,
-            };
-            if ours && let Some(id) = conn.query_row("SELECT id FROM issues WHERE number=?1", params![number], |r| r.get::<_, String>(0)).optional()? {
-                let hit = hits.entry(id.clone()).or_insert(Hit { rank: 0.0, number: *number, fields: vec![] });
-                hit.fields.insert(0, Field::Identifier);
-                named = Some(id);
+            // The issue the query names, if it's ours and exists. Another
+            // workspace's key, or a missing number, is just text.
+            let mut named = None;
+            if let Some(IssueRef::Number { key: typed, number }) = q.identifier() {
+                let key = read_key(conn)?;
+                let ours = match typed {
+                    Some(typed) => !key.is_empty() && typed.to_lowercase() == key.to_lowercase(),
+                    None => true,
+                };
+                if ours && let Some(id) = conn.query_row("SELECT id FROM issues WHERE number=?1", params![number], |r| r.get::<_, String>(0)).optional()? {
+                    let hit = hits.entry(id.clone()).or_insert(Hit { rank: 0.0, number: *number, fields: vec![] });
+                    hit.fields.insert(0, Field::Identifier);
+                    named = Some(id);
+                }
             }
-        }
 
-        let mut ranked: Vec<(String, Hit)> = hits.into_iter().collect();
-        ranked.sort_by(|(a_id, a), (b_id, b)| {
-            let (a_named, b_named) = (named.as_ref() == Some(a_id), named.as_ref() == Some(b_id));
-            b_named.cmp(&a_named).then(a.rank.total_cmp(&b.rank)).then(b.number.cmp(&a.number))
-        });
-        let issue_total = ranked.len();
-        let key = read_key(conn)?;
-        let mut issues = Vec::with_capacity(limit.min(issue_total));
-        for (id, hit) in ranked.into_iter().take(limit) {
-            if let Some(issue) = fetch_issue_by(conn, &key, "id", &id)? {
-                issues.push(IssueHit { issue, matched_in: hit.fields });
+            let mut ranked: Vec<(String, Hit)> = hits.into_iter().collect();
+            ranked.sort_by(|(a_id, a), (b_id, b)| {
+                let (a_named, b_named) = (named.as_ref() == Some(a_id), named.as_ref() == Some(b_id));
+                b_named.cmp(&a_named).then(a.rank.total_cmp(&b.rank)).then(b.number.cmp(&a.number))
+            });
+            let issue_total = ranked.len();
+            // The page's issues, and all their labels, in one query each.
+            let page: Vec<(String, Hit)> = ranked.into_iter().take(limit).collect();
+            let ids: Vec<String> = page.iter().map(|(id, _)| id.clone()).collect();
+            let mut fields: HashMap<String, Vec<Field>> = page.into_iter().map(|(id, hit)| (id, hit.fields)).collect();
+            let issues: Vec<IssueHit> = fetch_issues(conn, &ids)?
+                .into_iter()
+                .map(|issue| IssueHit { matched_in: fields.remove(&issue.id).unwrap_or_default(), issue })
+                .collect();
+
+            let mut stmt = conn.prepare(
+                "SELECT d.id FROM docs_fts JOIN docs d ON d.rowid = docs_fts.rowid WHERE docs_fts MATCH ?1 ORDER BY bm25(docs_fts), d.updated_at DESC",
+            )?;
+            let doc_ids: Vec<String> = stmt.query_map(params![all], |r| r.get(0))?.collect::<std::result::Result<_, _>>()?;
+            let doc_total = doc_ids.len();
+            let mut docs = Vec::with_capacity(limit.min(doc_total));
+            for id in doc_ids.iter().take(limit) {
+                if let Some(d) = read_doc(conn, id)? {
+                    docs.push(d);
+                }
             }
-        }
 
-        let mut stmt = conn.prepare(
-            "SELECT d.id FROM docs_fts JOIN docs d ON d.rowid = docs_fts.rowid WHERE docs_fts MATCH ?1 ORDER BY bm25(docs_fts), d.updated_at DESC",
-        )?;
-        let doc_ids: Vec<String> = stmt.query_map(params![all], |r| r.get(0))?.collect::<std::result::Result<_, _>>()?;
-        let doc_total = doc_ids.len();
-        let mut docs = Vec::with_capacity(limit.min(doc_total));
-        for id in doc_ids.iter().take(limit) {
-            if let Some(d) = read_doc(conn, id)? {
-                docs.push(d);
-            }
-        }
-
-        Ok(SearchResults {
-            query: q.raw().to_string(),
-            truncated: issue_total > limit || doc_total > limit,
-            issues,
-            docs,
-            issue_total,
-            doc_total,
-            limit,
+            Ok(SearchResults {
+                query: q.raw().to_string(),
+                truncated: issue_total > limit || doc_total > limit,
+                issues,
+                docs,
+                issue_total,
+                doc_total,
+                limit,
+            })
         })
     }
 }
@@ -510,31 +638,82 @@ fn reread(conn: &Connection, key: &str, id: &str) -> Result<Issue> {
     fetch_issue_by(conn, key, "id", &id)?.ok_or_else(|| LclError::Msg(format!("issue {id} vanished inside its own transaction")))
 }
 
-/// The issues with these UUIDs, in this order, skipping any that are gone.
+/// An issue row as `row_to_issue` reads it: `issues i`, with its parent's
+/// number from `issues p`. Callers append WHERE, ORDER BY and LIMIT.
+const ISSUE_SELECT: &str = "SELECT i.id,i.number,i.title,i.description,i.status,i.priority,i.assignee,i.parent_id,i.estimate,i.due_date,i.created_at,i.updated_at,i.completed_at,i.started_at,i.canceled_at,p.number FROM issues i LEFT JOIN issues p ON p.id = i.parent_id";
+
+/// The issues with these UUIDs, in this order, skipping any that are gone:
+/// one query for the rows and one for all their labels.
 fn fetch_issues(conn: &Connection, ids: &[String]) -> Result<Vec<Issue>> {
-    let key = read_key(conn)?;
-    let mut out = Vec::with_capacity(ids.len());
-    for id in ids {
-        if let Some(issue) = fetch_issue_by(conn, &key, "id", id)? { out.push(issue); }
+    if ids.is_empty() {
+        return Ok(vec![]);
     }
+    let key = read_key(conn)?;
+    let mut stmt = conn.prepare(&format!("{ISSUE_SELECT} WHERE i.id IN (SELECT value FROM json_each(?1))"))?;
+    let mut rows = stmt.query(params![json_array(ids)?])?;
+    let mut by_id: HashMap<String, Issue> = HashMap::with_capacity(ids.len());
+    while let Some(r) = rows.next()? {
+        let issue = row_to_issue(r, &key)?;
+        by_id.insert(issue.id.clone(), issue);
+    }
+    let mut out: Vec<Issue> = ids.iter().filter_map(|id| by_id.remove(id)).collect();
+    attach_labels(conn, &mut out)?;
     Ok(out)
 }
 
 /// The issue whose `col` (`id` or `number`) equals `val`, with its labels and
 /// its identifiers under workspace key `key`.
 fn fetch_issue_by(conn: &Connection, key: &str, col: &str, val: &dyn ToSql) -> Result<Option<Issue>> {
-    let sql = format!("SELECT i.id,i.number,i.title,i.description,i.status,i.priority,i.assignee,i.parent_id,i.estimate,i.due_date,i.created_at,i.updated_at,i.completed_at,i.started_at,i.canceled_at,p.number FROM issues i LEFT JOIN issues p ON p.id = i.parent_id WHERE i.{col}=?1");
-    let mut stmt = conn.prepare(&sql)?;
+    let mut stmt = conn.prepare(&format!("{ISSUE_SELECT} WHERE i.{col}=?1"))?;
     let mut rows = stmt.query(params![val])?;
-    if let Some(r) = rows.next()? {
-        let issue = row_to_issue(r, key)?;
-        // label names, sorted
-        let mut li = conn.prepare("SELECT l.name FROM issue_labels il JOIN labels l ON l.id = il.label_id WHERE il.issue_id=?1 ORDER BY l.name COLLATE NOCASE, l.name")?;
-        let ls: Vec<String> = li.query_map(params![issue.id], |r| r.get(0))?.collect::<std::result::Result<Vec<_>,_>>()?;
-        let mut issue = issue;
-        issue.labels = ls;
-        Ok(Some(issue))
-    } else { Ok(None) }
+    let Some(r) = rows.next()? else { return Ok(None) };
+    let mut issue = [row_to_issue(r, key)?];
+    attach_labels(conn, &mut issue)?;
+    let [issue] = issue;
+    Ok(Some(issue))
+}
+
+/// Fills in every issue's label names, sorted ignoring case, with one query
+/// however many issues there are.
+fn attach_labels(conn: &Connection, issues: &mut [Issue]) -> Result<()> {
+    if issues.is_empty() {
+        return Ok(());
+    }
+    let ids: Vec<&str> = issues.iter().map(|i| i.id.as_str()).collect();
+    let mut stmt = conn.prepare(
+        "SELECT il.issue_id, l.name FROM issue_labels il JOIN labels l ON l.id = il.label_id
+         WHERE il.issue_id IN (SELECT value FROM json_each(?1)) ORDER BY l.name COLLATE NOCASE, l.name",
+    )?;
+    let mut by_issue: HashMap<String, Vec<String>> = HashMap::new();
+    for row in stmt.query_map(params![json_array(&ids)?], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))? {
+        let (id, name) = row?;
+        by_issue.entry(id).or_default().push(name);
+    }
+    for issue in issues {
+        issue.labels = by_issue.get(&issue.id).cloned().unwrap_or_default();
+    }
+    Ok(())
+}
+
+/// `items` as a JSON array, for `json_each(?)`: one parameter however many
+/// items, where `IN (?, ?, …)` would hit SQLite's parameter limit.
+fn json_array<T: Serialize>(items: &[T]) -> Result<String> {
+    serde_json::to_string(items).map_err(|e| LclError::Msg(format!("can't encode ids: {e}")))
+}
+
+/// Registers `lcl_status(text)`: the stored status read by `Status::parse`,
+/// the rule every read uses, as its canonical spelling, or NULL for a value
+/// that names no status (that matches no status filter, and reading the
+/// issue reports it). `issue list --status` filters with it in SQL, so a
+/// hand-edited "done" is Done there as it is in `issue show`.
+fn register_lcl_status(conn: &Connection) -> Result<()> {
+    conn.create_scalar_function("lcl_status", 1, FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC, |ctx| {
+        Ok(match ctx.get_raw(0) {
+            ValueRef::Text(t) => std::str::from_utf8(t).ok().and_then(Status::parse).map(|s| s.as_str()),
+            _ => None,
+        })
+    })?;
+    Ok(())
 }
 
 fn row_to_issue(r: &rusqlite::Row, key: &str) -> Result<Issue> {
@@ -611,4 +790,51 @@ fn migrate(conn: &mut Connection) -> Result<()> {
     // An early return above drops `tx`, which rolls back every migration.
     tx.commit()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A write that lands between `list_issues`' count and its page doesn't
+    /// split them: both read the snapshot their read transaction started
+    /// with. The write comes from a second connection, made from inside the
+    /// status filter while the count is running.
+    #[test]
+    fn a_list_reads_one_snapshot() {
+        let path = std::env::temp_dir().join(format!("lcl-snapshot-{}.sqlite", uuid::Uuid::new_v4()));
+        let store = Store::open(&path).expect("open");
+        let insert = |c: &Connection, n: i64| {
+            c.execute(
+                "INSERT INTO issues(id, number, title, description, status, priority, created_at, updated_at) VALUES (?1, ?2, 't', '', 'Done', 0, 1, 1)",
+                params![format!("issue-{n}"), n],
+            )
+        };
+        for n in 1..=3 {
+            insert(&store.conn, n).expect("seed");
+        }
+        let writer = Connection::open(&path).expect("second connection");
+        let mut wrote = false;
+        store
+            .conn
+            .create_scalar_function("lcl_status", 1, FunctionFlags::SQLITE_UTF8, move |ctx| {
+                if !wrote {
+                    wrote = true;
+                    insert(&writer, 4)?;
+                }
+                ctx.get::<String>(0)
+            })
+            .expect("replace lcl_status");
+
+        let filter = IssueFilter { statuses: vec![Status::Done], ..Default::default() };
+        let list = store.list_issues(&filter, IssueSort::Number, Page::ALL).expect("list");
+        assert_eq!((list.total, list.issues.len()), (3, 3), "the count and the page read different snapshots");
+        let after = store.list_issues(&filter, IssueSort::Number, Page::ALL).expect("list again");
+        assert_eq!((after.total, after.issues.len()), (4, 4), "the concurrent write did land");
+
+        drop(store);
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+        }
+    }
 }

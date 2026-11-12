@@ -23,7 +23,7 @@ fn deleted_numbers_are_never_reused() {
         env.lcl(&["issue", "delete", n]).assert_ok();
     }
     let list = env.lcl(&["issue", "list", "--json"]).assert_ok().json();
-    assert_eq!(list.as_array().map(Vec::len), Some(0), "{list:#}");
+    assert_eq!(list["issues"].as_array().map(Vec::len), Some(0), "{list:#}");
     assert_eq!(env.create("e"), 5, "numbering restarted after every issue was deleted");
 }
 

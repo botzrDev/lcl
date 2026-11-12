@@ -26,8 +26,8 @@ fn parallel_creates_all_succeed_with_distinct_numbers() {
     assert_eq!(numbers, (1..=PROCS).collect::<Vec<_>>());
 
     // The database agrees with what the processes reported.
-    let list = env.lcl(&["issue", "list", "--limit", "1000", "--json"]).assert_ok().json();
-    let mut stored: Vec<i64> = list.as_array().expect("array").iter().map(|i| i["number"].as_i64().expect("number")).collect();
+    let list = env.lcl(&["issue", "list", "--all", "--json"]).assert_ok().json();
+    let mut stored: Vec<i64> = list["issues"].as_array().expect("array").iter().map(|i| i["number"].as_i64().expect("number")).collect();
     stored.sort_unstable();
     assert_eq!(stored, (1..=PROCS).collect::<Vec<_>>());
 }

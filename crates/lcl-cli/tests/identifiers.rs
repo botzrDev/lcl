@@ -69,7 +69,7 @@ fn every_accepted_form_names_the_same_issue() {
         let child = env.lcl(&["issue", "create", "--title", "child", &format!("--parent={f}"), "--json"]).assert_ok().json();
         assert_eq!((child["parent_id"].as_str(), child["parent_identifier"].as_str()), (Some(u.as_str()), Some("DREA-1")), "create --parent {f}");
         let listed = env.lcl(&["issue", "list", &format!("--parent={f}"), "--json"]).assert_ok().json();
-        let listed: Vec<_> = listed.as_array().expect("array").iter().map(|i| i["number"].clone()).collect();
+        let listed: Vec<_> = listed["issues"].as_array().expect("array").iter().map(|i| i["number"].clone()).collect();
         assert!(listed.contains(&child["number"]), "list --parent {f}: {listed:?}");
 
         let other = env.create("other");
@@ -181,7 +181,7 @@ fn issues_print_as_key_n() {
     let firsts: Vec<_> = list.lines().map(|l| l.split('\t').next().unwrap_or_default()).collect();
     assert_eq!(firsts, ["DREA-2", "DREA-1"], "{list}");
     let list = env.lcl(&["issue", "list", "--json"]).assert_ok().json();
-    let ids: Vec<_> = list.as_array().expect("array").iter().map(|i| i["identifier"].clone()).collect();
+    let ids: Vec<_> = list["issues"].as_array().expect("array").iter().map(|i| i["identifier"].clone()).collect();
     assert_eq!(ids, ["DREA-2", "DREA-1"]);
 
     let found = env.lcl(&["search", "zebra", "--json"]).assert_ok().json();

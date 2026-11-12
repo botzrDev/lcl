@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use chrono::NaiveDate;
 use clap::{ArgGroup, CommandFactory, Parser, Subcommand};
-use lcl_core::db::{IssueFilter, Store};
+use lcl_core::db::{AssigneeFilter, IssueFilter, IssueSort, Page, Store};
 use lcl_core::error::LclError;
 use lcl_core::models::*;
 use lcl_core::search::SearchQuery;
@@ -100,12 +100,27 @@ enum IssueCmd {
         #[arg(long, allow_negative_numbers = true, value_parser = clap::value_parser!(i64).range(0..))] estimate: Option<i64>,
         #[arg(long, value_parser = parse_date)] due: Option<NaiveDate>,
     },
+    /// List issues: 50 at a time unless told otherwise, newest number first.
+    ///
+    /// Filters narrow the list together. A repeated --status matches any of
+    /// them; a repeated --label requires all of them.
     List {
-        #[arg(long)] status: Option<Status>,
-        #[arg(long)] assignee: Option<String>,
+        /// Only issues with this status; repeat for any of several.
+        #[arg(long, value_name = "STATUS")] status: Vec<Status>,
+        /// Only issues assigned to NAME, ignoring ASCII case; `none` for unassigned issues.
+        #[arg(long, value_name = "NAME", value_parser = parse_assignee_filter)] assignee: Option<AssigneeFilter>,
+        /// Only issues with this label; repeat to require several.
+        #[arg(long, value_name = "LABEL", value_parser = parse_label_name)] label: Vec<String>,
         /// Only the direct sub-issues of this issue.
         #[arg(long, allow_negative_numbers = true)] parent: Option<IssueRef>,
-        #[arg(long, default_value_t = 50)] limit: i64,
+        /// number, created or updated (each newest first), or priority (Urgent first, None last).
+        #[arg(long, value_name = "ORDER", default_value = "number")] sort: IssueSort,
+        /// Show at most N issues.
+        #[arg(long, value_name = "N", default_value_t = 50, value_parser = clap::value_parser!(u32).range(1..))] limit: u32,
+        /// Skip the first N issues.
+        #[arg(long, value_name = "N", default_value_t = 0)] offset: u32,
+        /// Show every matching issue.
+        #[arg(long, conflicts_with_all = ["limit", "offset"])] all: bool,
     },
     Show { #[arg(allow_negative_numbers = true)] id: IssueRef },
     Update {
@@ -343,6 +358,15 @@ fn parse_assignee(s: &str) -> std::result::Result<String, String> {
     if s.is_empty() { Err("an assignee can't be empty; to unassign, use `issue update --no-assignee`".into()) } else { Ok(s.to_string()) }
 }
 
+/// `issue list --assignee`: a name, trimmed, or `none` (any case) for
+/// unassigned issues. Blank is refused.
+fn parse_assignee_filter(s: &str) -> std::result::Result<AssigneeFilter, String> {
+    let s = s.trim();
+    if s.is_empty() { Err("an assignee can't be empty; for unassigned issues, use --assignee none".into()) }
+    else if s.eq_ignore_ascii_case("none") { Ok(AssigneeFilter::Unassigned) }
+    else { Ok(AssigneeFilter::Named(s.to_string())) }
+}
+
 /// Checks that span more than one argument. clap's value parsers have
 /// already checked each value on its own; this exits 2 the same way.
 fn validate(cli: &Cli) {
@@ -498,12 +522,16 @@ fn run(cli: Cli) -> Result<()> {
                     })?;
                     if cli.json { print_json(&issue); } else { println!("Created {}", issue.identifier); }
                 }
-                IssueCmd::List { status, assignee, parent, limit } => {
-                    let parent_id = parent.map(|p| store.resolve(&p)).transpose()?.map(|p| p.id);
-                    let issues = store.list_issues(&IssueFilter { status, assignee, parent_id, limit })?;
-                    if cli.json { print_json(&issues); }
+                IssueCmd::List { status, assignee, label, parent, sort, limit, offset, all } => {
+                    let page = if all { Page::ALL } else { Page { limit: Some(limit), offset } };
+                    let list = store.list_issues(&IssueFilter { statuses: status, assignee, labels: label, parent }, sort, page)?;
+                    if cli.json { print_json(&list); }
                     else {
-                        for i in &issues { println!("{}\t[{}]\t{}\t{}", i.identifier, i.status, i.priority.label(), i.title); }
+                        for i in &list.issues { println!("{}\t[{}]\t{}\t{}", i.identifier, i.status, i.priority.label(), i.title); }
+                        if list.truncated {
+                            let first = list.offset as usize + 1;
+                            println!("showing {first}–{} of {}; use --all, or --limit/--offset", first + list.issues.len() - 1, list.total);
+                        }
                     }
                 }
                 IssueCmd::Show { id } => {

@@ -112,7 +112,7 @@ fn issue_labels_are_names_sorted_ignoring_case() {
     let created = env.lcl(&["issue", "create", "--title", "t", "--label", "gamma", "--label", "beta", "--label", "alpha", "--json"]).assert_ok().json();
     assert_eq!(created["labels"], json!(["Alpha", "beta", "gamma"]));
     let listed = env.lcl(&["issue", "list", "--json"]).assert_ok().json();
-    assert_eq!(listed[0]["labels"], json!(["Alpha", "beta", "gamma"]));
+    assert_eq!(listed["issues"][0]["labels"], json!(["Alpha", "beta", "gamma"]));
 }
 
 #[test]
