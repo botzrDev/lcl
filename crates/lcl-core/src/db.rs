@@ -153,12 +153,11 @@ impl Store {
     }
     pub fn get_issue(&self, id_or_number: &str) -> Result<Option<Issue>> {
         // try number first
-        let row = if let Ok(n) = id_or_number.parse::<i64>() {
+        if let Ok(n) = id_or_number.parse::<i64>() {
             self.fetch_issue_by("number", n.to_string().as_str())
         } else {
             self.fetch_issue_by("id", id_or_number)
-        };
-        row
+        }
     }
     fn fetch_issue_by(&self, col: &str, val: &str) -> Result<Option<Issue>> {
         let sql = format!("SELECT id,number,title,description,status,priority,assignee,parent_id,estimate,due_date,created_at,updated_at,completed_at FROM issues WHERE {}=?1", col);
@@ -182,7 +181,7 @@ impl Store {
             number: r.get(1)?,
             title: r.get(2)?,
             description: r.get(3)?,
-            status: Status::from_str(&status_str).unwrap_or(Status::Backlog),
+            status: Status::parse(&status_str).unwrap_or(Status::Backlog),
             priority: Priority::from_i64(prio),
             assignee: r.get(6)?,
             parent_id: r.get(7)?,
@@ -208,7 +207,7 @@ impl Store {
         let mut out = Vec::new();
         for id in ids {
             if let Some(iss) = self.get_issue(&id)? {
-                if let Some(a) = assignee { if iss.assignee.as_deref() != Some(a) { continue; } }
+                if let Some(a) = assignee && iss.assignee.as_deref() != Some(a) { continue; }
                 out.push(iss);
             }
         }

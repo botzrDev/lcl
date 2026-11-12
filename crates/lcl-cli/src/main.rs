@@ -224,7 +224,7 @@ fn main() -> Result<()> {
             let store = resolve_store(&cli.project)?;
             match cmd {
                 IssueCmd::Create { title, description, status, priority, assignee, parent, label, estimate, due } => {
-                    let st = Status::from_str(&status).unwrap_or(Status::Backlog);
+                    let st = Status::parse(&status).unwrap_or(Status::Backlog);
                     let pr = Priority::from_i64(priority);
                     let issue = store.create_issue(Issue {
                         id: String::new(), number: 0, title, description, status: st, priority: pr,
@@ -234,7 +234,7 @@ fn main() -> Result<()> {
                     if cli.json { print_json(&issue); } else { println!("Created {}-{}", store.get_meta("key").ok().flatten().unwrap_or_default(), issue.number); }
                 }
                 IssueCmd::List { status, assignee, limit } => {
-                    let st = status.as_ref().and_then(|s| Status::from_str(s));
+                    let st = status.as_ref().and_then(|s| Status::parse(s));
                     let issues = store.list_issues(st, assignee.as_deref(), limit)?;
                     if cli.json { print_json(&issues); }
                     else {
@@ -261,7 +261,7 @@ fn main() -> Result<()> {
                     let issue = store.update_issue(&id, |i| {
                         if let Some(t) = title { i.title = t; }
                         if let Some(d) = description { i.description = d; }
-                        if let Some(s) = status { if let Some(st) = Status::from_str(&s) { i.status = st; } }
+                        if let Some(s) = status && let Some(st) = Status::parse(&s) { i.status = st; }
                         if let Some(p) = priority { i.priority = Priority::from_i64(p); }
                         if assignee.is_some() { i.assignee = assignee; }
                         if let Some(e) = estimate { i.estimate = Some(e); }

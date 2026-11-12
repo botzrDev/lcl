@@ -54,23 +54,22 @@ pub fn run(project: Option<String>) -> Result<()> {
             f.render_widget(help, chunks[2]);
         })?;
 
-        if event::poll(Duration::from_millis(250))? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind == KeyEventKind::Press {
-                    match key.code {
-                        KeyCode::Char('q') => break,
-                        KeyCode::Char('j') | KeyCode::Down => { if selected + 1 < issues.len() { selected += 1; } }
-                        KeyCode::Char('k') | KeyCode::Up => { if selected > 0 { selected -= 1; } }
-                        KeyCode::Char('0') => status_filter = None,
-                        KeyCode::Char('1') => status_filter = Some("Backlog"),
-                        KeyCode::Char('2') => status_filter = Some("Todo"),
-                        KeyCode::Char('3') => status_filter = Some("InProgress"),
-                        KeyCode::Char('4') => status_filter = Some("InReview"),
-                        KeyCode::Char('5') => status_filter = Some("Done"),
-                        KeyCode::Char('6') => status_filter = Some("Canceled"),
-                        _ => {}
-                    }
-                }
+        if event::poll(Duration::from_millis(250))?
+            && let Event::Key(key) = event::read()?
+            && key.kind == KeyEventKind::Press
+        {
+            match key.code {
+                KeyCode::Char('q') => break,
+                KeyCode::Char('j') | KeyCode::Down => { if selected + 1 < issues.len() { selected += 1; } }
+                KeyCode::Char('k') | KeyCode::Up => { selected = selected.saturating_sub(1); }
+                KeyCode::Char('0') => status_filter = None,
+                KeyCode::Char('1') => status_filter = Some("Backlog"),
+                KeyCode::Char('2') => status_filter = Some("Todo"),
+                KeyCode::Char('3') => status_filter = Some("InProgress"),
+                KeyCode::Char('4') => status_filter = Some("InReview"),
+                KeyCode::Char('5') => status_filter = Some("Done"),
+                KeyCode::Char('6') => status_filter = Some("Canceled"),
+                _ => {}
             }
         }
     }
