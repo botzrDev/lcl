@@ -1,9 +1,11 @@
 use anyhow::{Context, Result};
 use chrono::NaiveDate;
-use clap::{ArgGroup, CommandFactory, Parser, Subcommand};
+use clap::parser::ValueSource;
+use clap::{ArgGroup, CommandFactory, FromArgMatches, Parser, Subcommand};
 use lcl_core::db::{AssigneeFilter, IssueFilter, IssueSort, Page, Store};
 use lcl_core::error::LclError;
 use lcl_core::models::*;
+use lcl_core::registry::{self, Registry, WorkspaceKey};
 use lcl_core::search::SearchQuery;
 use std::io::{IsTerminal, Read};
 use std::time::Duration;
@@ -11,11 +13,17 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 #[derive(Parser)]
-#[command(name = "lcl", version, about = "Local Linear-like tracker (SQLite per project)")]
+#[command(name = "lcl", version, about = "Local Linear-like tracker (one SQLite database per workspace)")]
 struct Cli {
     #[arg(long, global = true)]
     json: bool,
-    #[arg(long, global = true, env = "LCL_PROJECT")]
+    /// The global workspace NAME (~/.lcl/projects/<slug>.sqlite). Without it,
+    /// the nearest .lcl/data.sqlite at or above the current directory.
+    #[arg(short = 'w', long, global = true, value_name = "NAME", env = "LCL_WORKSPACE")]
+    workspace: Option<String>,
+    /// The old name of --workspace: refused with a hint. Not global, so only
+    /// before the subcommand; a subcommand may have its own --project.
+    #[arg(long, hide = true, value_name = "NAME")]
     project: Option<String>,
     #[command(subcommand)]
     cmd: Commands,
@@ -23,10 +31,18 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Make a workspace in the current directory, at .lcl/data.sqlite.
     Init { name: Option<String> },
-    Project {
+    /// Create, list and show workspaces.
+    Workspace {
         #[command(subcommand)]
-        cmd: ProjectCmd,
+        cmd: WorkspaceCmd,
+    },
+    /// The old name of `workspace`: refused with a hint.
+    #[command(hide = true, disable_help_flag = true)]
+    Project {
+        #[arg(num_args = 0.., trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
     },
     Issue {
         #[command(subcommand)]
@@ -72,9 +88,24 @@ enum Commands {
 }
 
 #[derive(Subcommand)]
-enum ProjectCmd {
-    Create { name: String, #[arg(long)] key: Option<String>, #[arg(long)] global: bool },
+enum WorkspaceCmd {
+    /// Create a global workspace, at ~/.lcl/projects/<slug>.sqlite.
+    ///
+    /// Its slug, which names the file, is NAME with ASCII letters lowercased
+    /// and every character but letters and digits made -. Two names with the
+    /// same slug can't both exist. For a workspace in the current directory,
+    /// use lcl init.
+    Create {
+        #[arg(value_parser = parse_workspace_name)] name: String,
+        /// The prefix of its issue identifiers, as DRM in DRM-12: a letter,
+        /// then up to 9 letters or digits. Uppercased.
+        #[arg(long, value_name = "KEY")] key: WorkspaceKey,
+    },
+    /// List registered workspaces: name, slug and path. One whose file is
+    /// gone is marked missing.
     List,
+    /// Show the current workspace: name, key, path, schema version and
+    /// creation time.
     Show,
 }
 
@@ -393,6 +424,76 @@ fn parse_assignee_filter(s: &str) -> std::result::Result<AssigneeFilter, String>
     else { Ok(AssigneeFilter::Named(s.to_string())) }
 }
 
+/// `workspace create NAME`: trimmed, and with a letter or digit, so that it
+/// has a slug to name its file.
+fn parse_workspace_name(s: &str) -> std::result::Result<String, String> {
+    let s = s.trim();
+    match registry::slug(s) {
+        Some(_) => Ok(s.to_string()),
+        None => Err(format!("workspace name {s:?} has no letters or digits")),
+    }
+}
+
+/// `args` as a shell would need them typed.
+fn shell_line(args: &[String]) -> String {
+    let word = |s: &String| {
+        let plain = !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || "._/:@%+=,-".contains(c));
+        if plain { s.clone() } else { format!("'{}'", s.replace('\'', r"'\''")) }
+    };
+    args.iter().map(word).collect::<Vec<_>>().join(" ")
+}
+
+/// Refuses the commands that were renamed (exit 2, before anything is
+/// opened), with the new form.
+fn refuse_old_forms(cli: &Cli) {
+    let fail = |msg: String| -> ! { Cli::command().error(clap::error::ErrorKind::InvalidSubcommand, msg).exit() };
+    if cli.project.is_some() {
+        // The same command line with the first --project (the one before
+        // the subcommand; clap took no other) renamed.
+        let mut renamed = false;
+        let args: Vec<String> = std::env::args().skip(1).map(|a| {
+            if renamed { return a; }
+            if a == "--project" { renamed = true; "--workspace".to_string() }
+            else if let Some(v) = a.strip_prefix("--project=") { renamed = true; format!("--workspace={v}") }
+            else { a }
+        }).collect();
+        fail(format!("the workspace flag is now --workspace: lcl {}", shell_line(&args)));
+    }
+    if let Commands::Project { .. } = cli.cmd {
+        fail("workspaces are now: lcl workspace create NAME --key KEY / list / show".into());
+    }
+}
+
+/// An environment variable with a non-empty value. Empty counts as unset.
+fn env_set(name: &str) -> Option<std::ffi::OsString> {
+    std::env::var_os(name).filter(|v| !v.is_empty())
+}
+
+/// Parses the command line. An empty LCL_WORKSPACE counts as unset: clap
+/// would pass it through as the name "". An empty `-w ""` typed on the
+/// command line stays, and is refused later (exit 2).
+fn parse() -> Cli {
+    let matches = Cli::command().get_matches();
+    let mut cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
+    if matches.value_source("workspace") == Some(ValueSource::EnvVariable) && cli.workspace.as_deref() == Some("") {
+        cli.workspace = None;
+    }
+    cli
+}
+
+/// LCL_PROJECT, the old name of LCL_WORKSPACE, still selects a workspace
+/// when LCL_WORKSPACE is unset (and --workspace isn't given), with a notice
+/// on every run while it is set. Empty counts as unset for both.
+fn honour_lcl_project(cli: &mut Cli) {
+    if env_set("LCL_WORKSPACE").is_some() {
+        return;
+    }
+    if let Some(old) = env_set("LCL_PROJECT") {
+        eprintln!("lcl: LCL_PROJECT is deprecated; use LCL_WORKSPACE");
+        cli.workspace.get_or_insert_with(|| old.to_string_lossy().into_owned());
+    }
+}
+
 /// Checks that span more than one argument. clap's value parsers have
 /// already checked each value on its own; this exits 2 the same way.
 fn validate(cli: &Cli) {
@@ -410,23 +511,14 @@ fn validate(cli: &Cli) {
     }
 }
 
-fn global_dir() -> PathBuf { dirs_home().join(".lcl") }
-fn dirs_home() -> PathBuf { std::env::var("HOME").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from("/tmp")) }
-fn projects_dir() -> PathBuf { global_dir().join("projects") }
-fn index_db_path() -> PathBuf { global_dir().join("index.sqlite") }
-
-fn open_index() -> Result<Store> {
-    let p = index_db_path();
-    let s = Store::open(&p)?;
-    // ensure projects table exists (index-specific)
-    s.conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS projects (name TEXT PRIMARY KEY, slug TEXT NOT NULL, path TEXT NOT NULL, created_at INTEGER NOT NULL);"
-    )?;
-    Ok(s)
-}
-
-fn slugify(s: &str) -> String {
-    s.chars().map(|c| if c.is_alphanumeric() { c.to_ascii_lowercase() } else { '-' }).collect::<String>().trim_matches('-').to_string()
+/// $HOME, where lcl keeps ~/.lcl. Unset or empty is an error, never a
+/// fallback directory; only what needs ~/.lcl asks for it, so a workspace
+/// in the current directory works without HOME.
+fn home() -> Result<PathBuf, LclError> {
+    match std::env::var_os("HOME") {
+        Some(h) if !h.is_empty() => Ok(PathBuf::from(h)),
+        _ => Err(LclError::NoHome),
+    }
 }
 
 fn find_local_db() -> Option<PathBuf> {
@@ -439,20 +531,27 @@ fn find_local_db() -> Option<PathBuf> {
     None
 }
 
-fn resolve_store(cli_project: &Option<String>) -> Result<Store> {
-    if let Some(name) = cli_project {
-        let slug = slugify(name);
-        let p = projects_dir().join(format!("{}.sqlite", slug));
-        if !p.exists() {
-            return Err(anyhow::anyhow!("project '{}' not found at {}", name, p.display()));
+/// The workspace a command works in: the global one --workspace names, or
+/// else the nearest .lcl/data.sqlite at or above the current directory.
+/// Never creates one, and never opens the registry.
+fn resolve_workspace(workspace: Option<&str>) -> Result<(PathBuf, Store)> {
+    let path = match workspace {
+        Some(name) => {
+            let slug = registry::slug(name).ok_or_else(|| LclError::NoSlug(name.to_string()))?;
+            let path = registry::workspace_path(&home()?, &slug);
+            if !path.exists() {
+                return Err(LclError::WorkspaceNotFound { name: name.to_string(), path: path.display().to_string() }.into());
+            }
+            path
         }
-        return Store::open(&p).context("open project db");
-    }
-    if let Some(p) = find_local_db() {
-        return Store::open(&p).context("open local db");
-    }
-    // global fallback: if index has projects, try default? require explicit
-    Err(anyhow::anyhow!("no project found. Run `lcl init` or pass --project <name>"))
+        None => find_local_db().ok_or(LclError::NoWorkspace)?,
+    };
+    let store = Store::open(&path).with_context(|| format!("open workspace {}", path.display()))?;
+    Ok((path, store))
+}
+
+fn resolve_store(workspace: &Option<String>) -> Result<Store> {
+    resolve_workspace(workspace.as_deref()).map(|(_, store)| store)
 }
 
 fn print_json<T: serde::Serialize>(v: &T) {
@@ -462,7 +561,9 @@ fn print_json<T: serde::Serialize>(v: &T) {
 /// Exit 2 for a usage error, as clap does for a bad argument; 1 for anything
 /// else. Errors print as `fn main() -> Result` would print them.
 fn main() -> ExitCode {
-    let cli = Cli::parse();
+    let mut cli = parse();
+    refuse_old_forms(&cli);
+    honour_lcl_project(&mut cli);
     validate(&cli);
     match run(cli) {
         Ok(()) => ExitCode::SUCCESS,
@@ -477,6 +578,8 @@ fn main() -> ExitCode {
 fn run(cli: Cli) -> Result<()> {
     match cli.cmd {
         Commands::Init { name } => {
+            // Before anything is created: init registers what it makes.
+            let home = home()?;
             let pname = name.unwrap_or_else(|| {
                 std::env::current_dir().ok().and_then(|p| p.file_name().map(|s| s.to_string_lossy().to_string())).unwrap_or_else(|| "project".into())
             });
@@ -488,55 +591,37 @@ fn run(cli: Cli) -> Result<()> {
             let mut store = Store::open(&dbpath)?;
             let created_at = now().to_string();
             store.set_meta(&[("name", pname.as_str()), ("key", key.as_str()), ("description", ""), ("created_at", created_at.as_str())])?;
-            // register in global index
-            let idx = open_index()?;
-            idx.conn.execute("INSERT OR REPLACE INTO projects(name,slug,path,created_at) VALUES(?1,?2,?3,?4)", rusqlite::params![pname, slugify(&pname), dbpath.to_string_lossy(), now()])?;
+            Registry::open(&home)?.register(&pname, &dbpath)?;
             if cli.json { print_json(&serde_json::json!({"path": dbpath, "name": pname, "key": key})); }
-            else { println!("Initialized project '{}' at {}", pname, dbpath.display()); }
+            else { println!("Initialized workspace '{}' at {}", pname, dbpath.display()); }
         }
-        Commands::Project { cmd } => match cmd {
-            ProjectCmd::Create { name, key, global } => {
-                let slug = slugify(&name);
-                let k = key.unwrap_or_else(|| name.chars().filter(|c| c.is_alphanumeric()).collect::<String>().to_uppercase().chars().take(4).collect());
-                let k = if k.is_empty() { "PRJ".to_string() } else { k };
-                let path = if global {
-                    std::fs::create_dir_all(projects_dir())?;
-                    projects_dir().join(format!("{}.sqlite", slug))
-                } else {
-                    let dir = std::env::current_dir()?.join(".lcl");
-                    std::fs::create_dir_all(&dir)?;
-                    dir.join(format!("{}.sqlite", slug))
-                };
-                let mut store = Store::open(&path)?;
-                let created_at = now().to_string();
-                store.set_meta(&[("name", name.as_str()), ("key", k.as_str()), ("description", ""), ("created_at", created_at.as_str())])?;
-                let idx = open_index()?;
-                idx.conn.execute("INSERT OR REPLACE INTO projects(name,slug,path,created_at) VALUES(?1,?2,?3,?4)", rusqlite::params![name, slug, path.to_string_lossy(), now()])?;
-                if cli.json { print_json(&serde_json::json!({"path": path, "name": name, "key": k})); }
-                else { println!("Created project '{}' at {}", name, path.display()); }
+        Commands::Project { .. } => unreachable!("refused by refuse_old_forms"),
+        Commands::Workspace { cmd } => match cmd {
+            WorkspaceCmd::Create { name, key } => {
+                let made = Registry::open(&home()?)?.create_workspace(&name, &key)?;
+                if cli.json { print_json(&made); }
+                else { println!("Created workspace {:?} (key {}) at {}", made.name, made.key, made.path); }
             }
-            ProjectCmd::List => {
-                let idx = open_index()?;
-                let mut stmt = idx.conn.prepare("SELECT name,slug,path,created_at FROM projects ORDER BY name")?;
-                let rows = stmt.query_map([], |r| Ok(serde_json::json!({"name": r.get::<_,String>(0)?, "slug": r.get::<_,String>(1)?, "path": r.get::<_,String>(2)?, "created_at": r.get::<_,i64>(3)?})))?;
-                let mut v = vec![];
-                for r in rows { v.push(r?); }
-                if cli.json { print_json(&v); }
-                else { for e in &v { println!("{} ({})", e["name"], e["slug"]); } }
+            WorkspaceCmd::List => {
+                let all = Registry::open(&home()?)?.list()?;
+                if cli.json { print_json(&all); }
+                else {
+                    for w in &all { println!("{}\t{}\t{}{}", w.name, w.slug, w.path, if w.missing { "\t(missing)" } else { "" }); }
+                }
             }
-            ProjectCmd::Show => {
-                let store = resolve_store(&cli.project)?;
+            WorkspaceCmd::Show => {
+                let (path, store) = resolve_workspace(cli.workspace.as_deref())?;
                 let name = store.get_meta("name")?.unwrap_or_default();
                 let key = store.get_meta("key")?.unwrap_or_default();
-                let desc = store.get_meta("description")?.unwrap_or_default();
-                let created = store.get_meta("created_at")?.unwrap_or_default();
+                // Stored as text; null if absent or not a number.
+                let created_at = store.get_meta("created_at")?.and_then(|t| t.parse::<i64>().ok());
                 let schema_version = store.schema_version()?;
-                let v = serde_json::json!({"name": name, "key": key, "description": desc, "created_at": created, "schema_version": schema_version});
-                if cli.json { print_json(&v); } else { println!("{} [{}] - {}", name, key, desc); }
+                let v = serde_json::json!({"name": name, "key": key, "path": path, "schema_version": schema_version, "created_at": created_at});
+                if cli.json { print_json(&v); } else { println!("{} [{}] {}", name, key, path.display()); }
             }
         },
         Commands::Issue { cmd } => {
-            let mut store = resolve_store(&cli.project)?;
+            let mut store = resolve_store(&cli.workspace)?;
             match cmd {
                 IssueCmd::Create { title, description, description_file, status, priority, assignee, parent, label, estimate, due } => {
                     let description = description.or(description_file).unwrap_or_default();
@@ -661,7 +746,7 @@ fn run(cli: Cli) -> Result<()> {
             }
         },
         Commands::Doc { cmd } => {
-            let mut store = resolve_store(&cli.project)?;
+            let mut store = resolve_store(&cli.workspace)?;
             match cmd {
                 DocCmd::Create { title, content, content_file, parent } => {
                     let content = content.or(content_file).unwrap_or_default();
@@ -688,7 +773,7 @@ fn run(cli: Cli) -> Result<()> {
             }
         },
         Commands::Label { cmd } => {
-            let mut store = resolve_store(&cli.project)?;
+            let mut store = resolve_store(&cli.workspace)?;
             match cmd {
                 LabelCmd::Create { name, color } => {
                     let l = Label { id: uuid::Uuid::new_v4().to_string(), name, color };
@@ -707,7 +792,7 @@ fn run(cli: Cli) -> Result<()> {
             }
         },
         Commands::Cycle { cmd } => {
-            let mut store = resolve_store(&cli.project)?;
+            let mut store = resolve_store(&cli.workspace)?;
             match cmd {
                 CycleCmd::Create { name, start, end } => {
                     let c = store.create_cycle(Cycle { id: String::new(), name, starts_at: start.map(|d| d.to_string()), ends_at: end.map(|d| d.to_string()), created_at: 0 })?;
@@ -727,7 +812,7 @@ fn run(cli: Cli) -> Result<()> {
         },
         Commands::Search { words, limit } => {
             let query = search_query(&words);
-            let store = resolve_store(&cli.project)?;
+            let store = resolve_store(&cli.workspace)?;
             let found = store.search(&query, limit as usize)?;
             if cli.json { print_json(&found); }
             else {
@@ -742,8 +827,7 @@ fn run(cli: Cli) -> Result<()> {
             }
         },
         Commands::Tui => {
-            // launch tui crate
-            lcl_tui::run(cli.project.clone())?;
+            lcl_tui::run(resolve_store(&cli.workspace)?)?;
         }
     }
     Ok(())

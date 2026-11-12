@@ -8,25 +8,8 @@ use ratatui::widgets::*;
 use std::io::stdout;
 use std::time::Duration;
 
-pub fn run(project: Option<String>) -> Result<()> {
-    // resolve store path similar to cli
-    let store = if let Some(name) = project {
-        let slug = name.chars().map(|c| if c.is_alphanumeric(){c.to_ascii_lowercase()}else{'-'}).collect::<String>().trim_matches('-').to_string();
-        let p = dirs_home().join(".lcl").join("projects").join(format!("{}.sqlite", slug));
-        Store::open(&p)?
-    } else {
-        // find local
-        let mut cur = std::env::current_dir().unwrap();
-        let mut found = None;
-        loop {
-            let cand = cur.join(".lcl").join("data.sqlite");
-            if cand.exists() { found = Some(cand); break; }
-            if !cur.pop() { break; }
-        }
-        let p = found.ok_or_else(|| anyhow::anyhow!("no project"))?;
-        Store::open(&p)?
-    };
-
+/// Runs the TUI on an open workspace; the caller resolves which one.
+pub fn run(store: Store) -> Result<()> {
     enable_raw_mode()?;
     stdout().execute(EnterAlternateScreen)?;
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
@@ -78,8 +61,4 @@ pub fn run(project: Option<String>) -> Result<()> {
     disable_raw_mode()?;
     stdout().execute(LeaveAlternateScreen)?;
     Ok(())
-}
-
-fn dirs_home() -> std::path::PathBuf {
-    std::env::var("HOME").map(std::path::PathBuf::from).unwrap_or_else(|_| std::path::PathBuf::from("/tmp"))
 }

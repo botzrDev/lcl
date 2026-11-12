@@ -4,16 +4,36 @@ use crate::models::*;
 use crate::search::{Field, IssueHit, SearchQuery, SearchResults};
 use rusqlite::functions::FunctionFlags;
 use rusqlite::types::{Value, ValueRef};
-use rusqlite::{params, params_from_iter, Connection, OptionalExtension, ToSql, Transaction, TransactionBehavior};
+use rusqlite::{params, params_from_iter, Connection, ErrorCode, OptionalExtension, ToSql, Transaction, TransactionBehavior};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::str::FromStr;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// How long a connection waits for a lock held by another lcl process before
 /// failing with SQLITE_BUSY. Concurrent first opens queue on the migration lock.
-const BUSY_TIMEOUT: Duration = Duration::from_millis(5000);
+pub(crate) const BUSY_TIMEOUT: Duration = Duration::from_millis(5000);
+
+/// Puts a database (a workspace, or the registry's index) in WAL mode. The
+/// switch needs an exclusive lock, and when waiting for it could deadlock
+/// (several processes opening a brand-new file at once, each holding a lock
+/// another needs), SQLite returns BUSY at once instead of calling the busy
+/// handler. A failed attempt releases the locks it held, so retrying makes
+/// progress; give up when the busy timeout would have. The mode it answers
+/// with ("memory" for an in-memory database) isn't needed. Can't run inside
+/// a transaction.
+pub(crate) fn use_wal(conn: &Connection) -> Result<()> {
+    let deadline = Instant::now() + BUSY_TIMEOUT;
+    loop {
+        match conn.pragma_update_and_check(None, "journal_mode", "WAL", |_| Ok(())) {
+            Err(rusqlite::Error::SqliteFailure(e, _)) if e.code == ErrorCode::DatabaseBusy && Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            done => return Ok(done?),
+        }
+    }
+}
 
 /// The `meta` key holding the next issue number to hand out (seeded by
 /// migration 2; the name must match it). It only ever grows: deleting an issue
@@ -137,9 +157,7 @@ impl Store {
         // Read-only. Must precede journal_mode: switching a rollback-journal
         // file to WAL rewrites its header.
         check_supported(user_version(&conn)?)?;
-        // journal_mode cannot change inside a transaction. It answers with the
-        // resulting mode ("memory" for an in-memory db), which we don't need.
-        conn.pragma_update_and_check(None, "journal_mode", "WAL", |_| Ok(()))?;
+        use_wal(&conn)?;
         conn.pragma_update(None, "foreign_keys", true)?;
         register_lcl_status(&conn)?;
         migrate(&mut conn)?;

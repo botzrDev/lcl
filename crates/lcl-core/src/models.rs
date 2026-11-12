@@ -321,7 +321,7 @@ pub struct Cycle {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProjectMeta {
+pub struct WorkspaceMeta {
     pub name: String,
     pub key: String,
     pub description: String,

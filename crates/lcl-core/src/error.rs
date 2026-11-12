@@ -54,6 +54,28 @@ pub enum LclError {
     /// `unrelate` of a relation that isn't there, as typed.
     #[error("there is no relation {0}")]
     RelationNotFound(String),
+    /// The workspace index is from a newer lcl.
+    #[error("the workspace index {path} is v{found}, newer than this lcl supports (v{supported}); upgrade lcl")]
+    RegistryTooNew { path: String, found: i64, supported: i64 },
+    /// `workspace create` of a name that is registered, exactly.
+    #[error("workspace {0:?} already exists")]
+    WorkspaceExists(String),
+    /// `workspace create` of a name whose slug another workspace has.
+    #[error("workspace {name:?} would use the same file ({slug}.sqlite) as the existing workspace {existing:?}; choose another name")]
+    SlugTaken { name: String, existing: String, slug: String },
+    /// A workspace file that is there although nothing registered it.
+    #[error("a workspace file already exists at {0}")]
+    WorkspaceFileExists(String),
+    /// A workspace name with no letters or digits, so no file name.
+    #[error("workspace name {0:?} has no letters or digits")]
+    NoSlug(String),
+    #[error("workspace {name:?} not found: no file at {path}; see lcl workspace list")]
+    WorkspaceNotFound { name: String, path: String },
+    #[error("no workspace found; run lcl init or pass --workspace")]
+    NoWorkspace,
+    /// HOME unset or empty, where lcl needs it.
+    #[error("HOME is not set; lcl keeps its workspace registry in $HOME/.lcl")]
+    NoHome,
     #[error("the search query is empty")]
     EmptyQuery,
     /// Every word lacks token characters (`--`, `*`, a lone `"`).
@@ -80,6 +102,7 @@ impl LclError {
                 | LclError::BlocksCycle { .. }
                 | LclError::AlreadyDuplicate { .. }
                 | LclError::DuplicateCycle { .. }
+                | LclError::NoSlug(_)
                 | LclError::EmptyQuery
                 | LclError::NothingToSearch(_)
         )

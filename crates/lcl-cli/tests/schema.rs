@@ -70,7 +70,7 @@ fn upgrades_a_0_1_0_database() {
     let numbers: Vec<_> = found["issues"].as_array().expect("issues array").iter().map(|i| &i["number"]).collect();
     assert_eq!(numbers, [1], "{found:#}");
 
-    let project = env.lcl(&["project", "show", "--json"]).assert_ok().json();
+    let project = env.lcl(&["workspace", "show", "--json"]).assert_ok().json();
     assert_eq!(project["schema_version"], SCHEMA_VERSION, "{project:#}");
     assert_eq!(project["key"], "FIXT");
 
@@ -124,7 +124,7 @@ fn fresh_database_is_at_latest_version() {
     env.lcl(&["init"]).assert_ok();
 
     assert_eq!(user_version(&env.db_path()), SCHEMA_VERSION);
-    let project = env.lcl(&["project", "show", "--json"]).assert_ok().json();
+    let project = env.lcl(&["workspace", "show", "--json"]).assert_ok().json();
     assert_eq!(project["schema_version"], SCHEMA_VERSION, "{project:#}");
 }
 

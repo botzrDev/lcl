@@ -16,6 +16,15 @@ pub fn argv(args: &[&str]) -> Vec<String> {
     args.iter().map(|a| a.to_string()).collect()
 }
 
+/// lcl 0.1.0's workspace index, and the file of one workspace it lists. See
+/// tests/workspaces.rs for how they were built.
+pub const V0_INDEX_FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/v0-index.sqlite");
+pub const V0_INDEX_ALPHA_FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/v0-index-alpha.sqlite");
+
+/// A workspace index written by a build of 097af5c, which opened it as a
+/// workspace: user_version 7. See tests/workspaces.rs.
+pub const V7_INDEX_FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/v7-index.sqlite");
+
 /// A database written by lcl 0.1.0. See tests/schema.rs for how it was built.
 pub const V0_FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/v0.sqlite");
 
@@ -96,16 +105,35 @@ impl Env {
         let mut cmd = Command::new(program);
         cmd.current_dir(self.cwd.path())
             .env("HOME", self.home.path())
-            // `--project` reads LCL_PROJECT; an exported value must not select
-            // a project behind the test's back. Likewise LCL_STDIN_WAIT.
+            // `--workspace` reads LCL_WORKSPACE, or else the deprecated
+            // LCL_PROJECT; an exported value must not select a workspace
+            // behind the test's back. Likewise LCL_STDIN_WAIT.
+            .env_remove("LCL_WORKSPACE")
             .env_remove("LCL_PROJECT")
             .env_remove("LCL_STDIN_WAIT");
         cmd
     }
 
+    /// As `lcl`, with these environment variables set.
+    pub fn lcl_env(&self, vars: &[(&str, &str)], args: &[&str]) -> Out {
+        self.lcl_with(args, |cmd| {
+            cmd.envs(vars.iter().copied());
+        })
+    }
+
+    /// As `lcl`, after `adjust` has changed the command (to unset HOME, say).
+    pub fn lcl_with(&self, args: &[&str], adjust: impl FnOnce(&mut Command)) -> Out {
+        self.run_with(args, None, Stdio::null(), adjust)
+    }
+
     fn run(&self, args: &[&str], input: Option<&[u8]>, stdin: Stdio) -> Out {
-        let mut child = self
-            .command(env!("CARGO_BIN_EXE_lcl"))
+        self.run_with(args, input, stdin, |_| {})
+    }
+
+    fn run_with(&self, args: &[&str], input: Option<&[u8]>, stdin: Stdio, adjust: impl FnOnce(&mut Command)) -> Out {
+        let mut cmd = self.command(env!("CARGO_BIN_EXE_lcl"));
+        adjust(&mut cmd);
+        let mut child = cmd
             .args(args)
             .stdin(stdin)
             .stdout(Stdio::piped())
