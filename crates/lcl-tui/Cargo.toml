@@ -1,0 +1,14 @@
+[package]
+name = "lcl-tui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+lcl-core = { workspace = true }
+ratatui = { workspace = true }
+crossterm = { workspace = true }
+anyhow = { workspace = true }
+
+[lints]
+workspace = true
