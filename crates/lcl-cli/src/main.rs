@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use chrono::NaiveDate;
 use clap::parser::ValueSource;
 use clap::{ArgGroup, CommandFactory, FromArgMatches, Parser, Subcommand};
-use lcl_core::db::{AssigneeFilter, IssueFilter, IssueSort, Page, Store};
+use lcl_core::db::{AssigneeFilter, Change, IssueFilter, IssueSort, MilestoneUpdate, Page, Placement, ProjectFilter, ProjectUpdate, Store};
 use lcl_core::error::LclError;
 use lcl_core::models::*;
 use lcl_core::registry::{self, Registry, WorkspaceKey};
@@ -15,6 +15,7 @@ use std::process::ExitCode;
 #[derive(Parser)]
 #[command(name = "lcl", version, about = "Local Linear-like tracker (one SQLite database per workspace)")]
 struct Cli {
+    /// Print JSON instead of text.
     #[arg(long, global = true)]
     json: bool,
     /// The global workspace NAME (~/.lcl/projects/<slug>.sqlite). Without it,
@@ -38,11 +39,15 @@ enum Commands {
         #[command(subcommand)]
         cmd: WorkspaceCmd,
     },
-    /// The old name of `workspace`: refused with a hint.
-    #[command(hide = true, disable_help_flag = true)]
+    /// Projects in this workspace: create, list, show, update, delete.
     Project {
-        #[arg(num_args = 0.., trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
+        #[command(subcommand)]
+        cmd: ProjectCmd,
+    },
+    /// Milestones, each in one project for good: create, list, show, update, delete.
+    Milestone {
+        #[command(subcommand)]
+        cmd: MilestoneCmd,
     },
     Issue {
         #[command(subcommand)]
@@ -130,6 +135,14 @@ enum IssueCmd {
         #[arg(long, value_parser = parse_label_name)] label: Vec<String>,
         #[arg(long, allow_negative_numbers = true, value_parser = clap::value_parser!(i64).range(0..))] estimate: Option<i64>,
         #[arg(long, value_parser = parse_date)] due: Option<NaiveDate>,
+        /// The project to put it in, by name (ignoring case) or id.
+        #[arg(long, value_name = "PROJECT", value_parser = parse_project_name, conflicts_with = "no_project")] project: Option<String>,
+        /// Put it in no project (the default).
+        #[arg(long, conflicts_with = "milestone")] no_project: bool,
+        /// Its milestone, by name (ignoring case) or id: one in the --project project.
+        #[arg(long, value_name = "MILESTONE", value_parser = parse_milestone_name, conflicts_with = "no_milestone")] milestone: Option<String>,
+        /// Give it no milestone (the default).
+        #[arg(long)] no_milestone: bool,
     },
     /// List issues: 50 at a time unless told otherwise, newest number first.
     ///
@@ -148,6 +161,13 @@ enum IssueCmd {
         #[arg(long, conflicts_with = "unblocked")] blocked: bool,
         /// Only issues with no such blocker.
         #[arg(long)] unblocked: bool,
+        /// Only issues in this project, by name (ignoring case) or id; `none`
+        /// (any case) for issues in no project. A project named "none" is
+        /// selected by its id.
+        #[arg(long, value_name = "PROJECT", value_parser = parse_project_filter)] project: Option<ProjectFilter>,
+        /// Only issues with this milestone, by name (ignoring case) or id: in
+        /// the --project project if given, else in any project.
+        #[arg(long, value_name = "MILESTONE", value_parser = parse_milestone_name)] milestone: Option<String>,
         /// number, created or updated (each newest first), or priority (Urgent first, None last).
         #[arg(long, value_name = "ORDER", default_value = "number")] sort: IssueSort,
         /// Show at most N issues.
@@ -188,6 +208,16 @@ enum IssueCmd {
         #[arg(long, allow_negative_numbers = true, conflicts_with = "no_parent")] parent: Option<IssueRef>,
         /// Make the issue top-level.
         #[arg(long)] no_parent: bool,
+        /// Move it to this project, by name (ignoring case) or id. A milestone
+        /// it has in another project is cleared, unless --milestone is given.
+        #[arg(long, value_name = "PROJECT", value_parser = parse_project_name, conflicts_with = "no_project")] project: Option<String>,
+        /// Take it out of its project, and so off its milestone.
+        #[arg(long, conflicts_with = "milestone")] no_project: bool,
+        /// Its milestone, by name (ignoring case) or id: one in the issue's
+        /// project (the --project one, or the one it is in).
+        #[arg(long, value_name = "MILESTONE", value_parser = parse_milestone_name, conflicts_with = "no_milestone")] milestone: Option<String>,
+        /// Take it off its milestone, leaving its project.
+        #[arg(long)] no_milestone: bool,
     },
     Delete { #[arg(allow_negative_numbers = true)] id: IssueRef },
     /// Relate two issues: A blocks B, A blocked-by B, A related B, or A duplicate-of B.
@@ -223,6 +253,120 @@ enum IssueCmd {
         #[arg(long)] author: Option<String>,
     },
     Comments { #[arg(allow_negative_numbers = true)] id: IssueRef },
+}
+
+#[derive(Subcommand)]
+enum ProjectCmd {
+    /// Create a project in this workspace.
+    ///
+    /// (lcl 0.1.0's project create --global made a workspace; that is now
+    /// lcl workspace create.)
+    Create {
+        /// The project's name: unique in this workspace, ignoring case.
+        #[arg(value_name = "NAME", value_parser = parse_project_name)] name: String,
+        /// The description inline. For long text, use --description-file.
+        #[arg(long, value_parser = inline_description, conflicts_with = "description_file")] description: Option<String>,
+        /// Read the description from PATH, or from stdin if PATH is `-`. Stored byte for byte.
+        #[arg(long, value_name = "PATH", value_parser = read_description)] description_file: Option<String>,
+        /// Backlog, Planned, Started (or In Progress), Paused, Completed or Canceled; case and spaces are ignored.
+        #[arg(long, default_value = "Backlog")] status: ProjectStatus,
+        /// When it should be done, as YYYY-MM-DD.
+        #[arg(long, value_name = "DATE", value_parser = parse_date)] target_date: Option<NaiveDate>,
+        /// lcl 0.1.0's flag for a global workspace: refused with a hint.
+        #[arg(long, hide = true)] global: bool,
+        /// lcl 0.1.0's workspace key: refused with a hint.
+        #[arg(long, hide = true, num_args = 0..=1, default_missing_value = "", allow_hyphen_values = true)] key: Option<String>,
+    },
+    /// List projects, by name.
+    List {
+        /// Only projects with this status; repeat for any of several.
+        #[arg(long, value_name = "STATUS")] status: Vec<ProjectStatus>,
+    },
+    /// Show a project: its fields, its issues counted by status, and its
+    /// milestones by sort order, then name.
+    Show {
+        /// The project's name (ignoring case) or id.
+        #[arg(value_name = "PROJECT", value_parser = parse_project_name)] project: String,
+    },
+    /// Change a project's name, description, status or target date.
+    Update {
+        /// The project's name (ignoring case) or id.
+        #[arg(value_name = "PROJECT", value_parser = parse_project_name)] project: String,
+        /// Its new name: unique in this workspace, ignoring case (its own name in another case is fine).
+        #[arg(long, value_name = "NAME", value_parser = parse_project_name)] name: Option<String>,
+        /// The description inline; "" clears it. For long text, use --description-file.
+        #[arg(long, value_parser = inline_description, conflicts_with = "description_file")] description: Option<String>,
+        /// Read the description from PATH, or from stdin if PATH is `-`. Stored byte for byte.
+        #[arg(long, value_name = "PATH", value_parser = read_description)] description_file: Option<String>,
+        /// Backlog, Planned, Started (or In Progress), Paused, Completed or Canceled; case and spaces are ignored.
+        #[arg(long)] status: Option<ProjectStatus>,
+        /// When it should be done, as YYYY-MM-DD.
+        #[arg(long, value_name = "DATE", value_parser = parse_date, conflicts_with = "no_target_date")] target_date: Option<NaiveDate>,
+        /// Clear the target date.
+        #[arg(long)] no_target_date: bool,
+    },
+    /// Delete a project. Refused while it has issues or milestones.
+    Delete {
+        /// The project's name (ignoring case) or id.
+        #[arg(value_name = "PROJECT", value_parser = parse_project_name)] project: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum MilestoneCmd {
+    /// Create a milestone in a project. It stays in that project.
+    Create {
+        /// The milestone's name: unique in its project, ignoring case.
+        #[arg(value_name = "NAME", value_parser = parse_milestone_name)] name: String,
+        /// Its project, by name (ignoring case) or id.
+        #[arg(long, value_name = "PROJECT", value_parser = parse_project_name)] project: String,
+        /// The description inline. For long text, use --description-file.
+        #[arg(long, value_parser = inline_description, conflicts_with = "description_file")] description: Option<String>,
+        /// Read the description from PATH, or from stdin if PATH is `-`. Stored byte for byte.
+        #[arg(long, value_name = "PATH", value_parser = read_description)] description_file: Option<String>,
+        /// When it should be reached, as YYYY-MM-DD.
+        #[arg(long, value_name = "DATE", value_parser = parse_date)] target_date: Option<NaiveDate>,
+        /// Its place among its project's milestones: lower first, ties by name. May be negative.
+        #[arg(long, value_name = "N", default_value_t = 0, allow_negative_numbers = true)] sort_order: i64,
+    },
+    /// List milestones, by project name, then sort order, then name.
+    List {
+        /// Only this project's milestones, by name (ignoring case) or id.
+        #[arg(long, value_name = "PROJECT", value_parser = parse_project_name)] project: Option<String>,
+    },
+    /// Show a milestone and its issues counted by status.
+    Show {
+        /// The milestone's name (ignoring case) or id. A name several projects have needs --project.
+        #[arg(value_name = "MILESTONE", value_parser = parse_milestone_name)] milestone: String,
+        /// The project to look in, by name (ignoring case) or id.
+        #[arg(long, value_name = "PROJECT", value_parser = parse_project_name)] project: Option<String>,
+    },
+    /// Change a milestone's name, description, target date or sort order. It can't move to another project.
+    Update {
+        /// The milestone's name (ignoring case) or id. A name several projects have needs --project.
+        #[arg(value_name = "MILESTONE", value_parser = parse_milestone_name)] milestone: String,
+        /// The project to look in, by name (ignoring case) or id.
+        #[arg(long, value_name = "PROJECT", value_parser = parse_project_name)] project: Option<String>,
+        /// Its new name: unique in its project, ignoring case (its own name in another case is fine).
+        #[arg(long, value_name = "NAME", value_parser = parse_milestone_name)] name: Option<String>,
+        /// The description inline; "" clears it. For long text, use --description-file.
+        #[arg(long, value_parser = inline_description, conflicts_with = "description_file")] description: Option<String>,
+        /// Read the description from PATH, or from stdin if PATH is `-`. Stored byte for byte.
+        #[arg(long, value_name = "PATH", value_parser = read_description)] description_file: Option<String>,
+        /// When it should be reached, as YYYY-MM-DD.
+        #[arg(long, value_name = "DATE", value_parser = parse_date, conflicts_with = "no_target_date")] target_date: Option<NaiveDate>,
+        /// Clear the target date.
+        #[arg(long)] no_target_date: bool,
+        /// Its place among its project's milestones: lower first, ties by name. May be negative.
+        #[arg(long, value_name = "N", allow_negative_numbers = true)] sort_order: Option<i64>,
+    },
+    /// Delete a milestone. Refused while issues have it.
+    Delete {
+        /// The milestone's name (ignoring case) or id. A name several projects have needs --project.
+        #[arg(value_name = "MILESTONE", value_parser = parse_milestone_name)] milestone: String,
+        /// The project to look in, by name (ignoring case) or id.
+        #[arg(long, value_name = "PROJECT", value_parser = parse_project_name)] project: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -424,6 +568,25 @@ fn parse_assignee_filter(s: &str) -> std::result::Result<AssigneeFilter, String>
     else { Ok(AssigneeFilter::Named(s.to_string())) }
 }
 
+/// A project name or reference, trimmed; blank is refused.
+fn parse_project_name(s: &str) -> std::result::Result<String, String> {
+    let s = s.trim();
+    if s.is_empty() { Err("a project name can't be empty".into()) } else { Ok(s.to_string()) }
+}
+
+/// A milestone name or reference, trimmed; blank is refused.
+fn parse_milestone_name(s: &str) -> std::result::Result<String, String> {
+    let s = s.trim();
+    if s.is_empty() { Err("a milestone name can't be empty".into()) } else { Ok(s.to_string()) }
+}
+
+/// `issue list --project`: a project, or `none` (any case) for issues in no
+/// project.
+fn parse_project_filter(s: &str) -> std::result::Result<ProjectFilter, String> {
+    let s = parse_project_name(s)?;
+    if s.eq_ignore_ascii_case("none") { Ok(ProjectFilter::NoProject) } else { Ok(ProjectFilter::Is(s)) }
+}
+
 /// `workspace create NAME`: trimmed, and with a letter or digit, so that it
 /// has a slug to name its file.
 fn parse_workspace_name(s: &str) -> std::result::Result<String, String> {
@@ -459,7 +622,10 @@ fn refuse_old_forms(cli: &Cli) {
         }).collect();
         fail(format!("the workspace flag is now --workspace: lcl {}", shell_line(&args)));
     }
-    if let Commands::Project { .. } = cli.cmd {
+    // lcl 0.1.0's project create made a workspace when given either flag.
+    if let Commands::Project { cmd: ProjectCmd::Create { global, key, .. } } = &cli.cmd
+        && (*global || key.is_some())
+    {
         fail("workspaces are now: lcl workspace create NAME --key KEY / list / show".into());
     }
 }
@@ -509,6 +675,43 @@ fn validate(cli: &Cli) {
     {
         fail(format!("label {both:?} is in both --add-label and --remove-label"));
     }
+    if let Commands::Issue { cmd: IssueCmd::List { project: Some(ProjectFilter::NoProject), milestone: Some(m), .. } } = &cli.cmd {
+        fail(LclError::MilestoneInNoProject(m.clone()).to_string());
+    }
+}
+
+/// `r`, except that a --project value (`flag`) naming no project gets a
+/// hint when it is a registered workspace's name: lcl 0.1.0's --project
+/// selected a workspace. The registry is read only here, read-only; with
+/// HOME unset there is no hint.
+fn project_hint<T>(r: lcl_core::error::Result<T>, flag: Option<&str>) -> Result<T> {
+    match r {
+        Err(LclError::ProjectNotFound { name, .. }) if flag == Some(name.as_str()) => {
+            let workspace = match (home(), registry::slug(&name)) {
+                (Ok(home), Some(slug)) => registry::is_registered(&home, &slug),
+                _ => false,
+            };
+            Err(LclError::ProjectNotFound { name, workspace }.into())
+        }
+        r => Ok(r?),
+    }
+}
+
+/// Placement from an issue command's four flags (clap keeps each pair apart).
+fn placement(project: Option<String>, no_project: bool, milestone: Option<String>, no_milestone: bool) -> Placement {
+    let change = |set: Option<String>, clear: bool| match (set, clear) {
+        (Some(v), _) => Change::Set(v),
+        (None, true) => Change::Clear,
+        (None, false) => Change::Keep,
+    };
+    Placement { project: change(project, no_project), milestone: change(milestone, no_milestone) }
+}
+
+/// "12 (Backlog 3, Done 9)": the total, then each non-zero status, in
+/// Status order.
+fn counts_line(c: &IssueCounts) -> String {
+    let parts: Vec<String> = c.by_status.entries().iter().filter(|(_, n)| *n != 0).map(|(k, n)| format!("{k} {n}")).collect();
+    if parts.is_empty() { c.total.to_string() } else { format!("{} ({})", c.total, parts.join(", ")) }
 }
 
 /// $HOME, where lcl keeps ~/.lcl. Unset or empty is an error, never a
@@ -595,7 +798,100 @@ fn run(cli: Cli) -> Result<()> {
             if cli.json { print_json(&serde_json::json!({"path": dbpath, "name": pname, "key": key})); }
             else { println!("Initialized workspace '{}' at {}", pname, dbpath.display()); }
         }
-        Commands::Project { .. } => unreachable!("refused by refuse_old_forms"),
+        Commands::Project { cmd } => {
+            let mut store = resolve_store(&cli.workspace)?;
+            match cmd {
+                ProjectCmd::Create { name, description, description_file, status, target_date, global: _, key: _ } => {
+                    let description = description.or(description_file).unwrap_or_default();
+                    let p = store.create_project(&name, &description, status, target_date.map(|d| d.to_string()).as_deref())?;
+                    if cli.json { print_json(&p); } else { println!("Created project {:?}", p.name); }
+                }
+                ProjectCmd::List { status } => {
+                    let all = store.list_projects(&status)?;
+                    if cli.json { print_json(&all); }
+                    else { for p in &all { println!("{}\t[{}]\t{}", p.name, p.status, p.target_date.as_deref().unwrap_or("")); } }
+                }
+                ProjectCmd::Show { project } => {
+                    let d = store.project_detail(&project)?;
+                    if cli.json { print_json(&d); }
+                    else {
+                        let p = &d.project;
+                        println!("{} [{}]{}", p.name, p.status, p.target_date.as_ref().map(|t| format!("  target {t}")).unwrap_or_default());
+                        if !p.description.is_empty() { println!("\n{}\n", p.description); }
+                        println!("Issues: {}", counts_line(&d.issues));
+                        if !d.milestones.is_empty() {
+                            println!("Milestones:");
+                            for m in &d.milestones {
+                                println!("  {}\t{}\t{} issue{}", m.name, m.target_date.as_deref().unwrap_or(""), m.issues, if m.issues == 1 { "" } else { "s" });
+                            }
+                        }
+                    }
+                }
+                ProjectCmd::Update { project, name, description, description_file, status, target_date, no_target_date } => {
+                    let u = ProjectUpdate {
+                        name,
+                        description: description.or(description_file),
+                        status,
+                        target_date: match (target_date, no_target_date) {
+                            (Some(d), _) => Change::Set(d.to_string()),
+                            (None, true) => Change::Clear,
+                            (None, false) => Change::Keep,
+                        },
+                    };
+                    let p = store.update_project(&project, &u)?;
+                    if cli.json { print_json(&p); } else { println!("Updated project {:?}", p.name); }
+                }
+                ProjectCmd::Delete { project } => {
+                    let p = store.delete_project(&project)?;
+                    if cli.json { print_json(&serde_json::json!({"deleted": p.name, "id": p.id})); } else { println!("Deleted project {:?}", p.name); }
+                }
+            }
+        }
+        Commands::Milestone { cmd } => {
+            let mut store = resolve_store(&cli.workspace)?;
+            match cmd {
+                MilestoneCmd::Create { name, project, description, description_file, target_date, sort_order } => {
+                    let description = description.or(description_file).unwrap_or_default();
+                    let target = target_date.map(|d| d.to_string());
+                    let m = project_hint(store.create_milestone(&name, &project, &description, target.as_deref(), sort_order), Some(&project))?;
+                    if cli.json { print_json(&m); } else { println!("Created milestone {:?} in project {:?}", m.name, m.project); }
+                }
+                MilestoneCmd::List { project } => {
+                    let all = project_hint(store.list_milestones(project.as_deref()), project.as_deref())?;
+                    if cli.json { print_json(&all); }
+                    else { for m in &all { println!("{}\t{}\t{}\t{}", m.project, m.sort_order, m.name, m.target_date.as_deref().unwrap_or("")); } }
+                }
+                MilestoneCmd::Show { milestone, project } => {
+                    let d = project_hint(store.milestone_detail(&milestone, project.as_deref()), project.as_deref())?;
+                    if cli.json { print_json(&d); }
+                    else {
+                        let m = &d.milestone;
+                        println!("{} (project {:?}){}", m.name, m.project, m.target_date.as_ref().map(|t| format!("  target {t}")).unwrap_or_default());
+                        if !m.description.is_empty() { println!("\n{}\n", m.description); }
+                        println!("Issues: {}", counts_line(&d.issues));
+                    }
+                }
+                MilestoneCmd::Update { milestone, project, name, description, description_file, target_date, no_target_date, sort_order } => {
+                    let u = MilestoneUpdate {
+                        name,
+                        description: description.or(description_file),
+                        target_date: match (target_date, no_target_date) {
+                            (Some(d), _) => Change::Set(d.to_string()),
+                            (None, true) => Change::Clear,
+                            (None, false) => Change::Keep,
+                        },
+                        sort_order,
+                    };
+                    let m = project_hint(store.update_milestone(&milestone, project.as_deref(), &u), project.as_deref())?;
+                    if cli.json { print_json(&m); } else { println!("Updated milestone {:?} in project {:?}", m.name, m.project); }
+                }
+                MilestoneCmd::Delete { milestone, project } => {
+                    let m = project_hint(store.delete_milestone(&milestone, project.as_deref()), project.as_deref())?;
+                    if cli.json { print_json(&serde_json::json!({"deleted": m.name, "id": m.id, "project": m.project})); }
+                    else { println!("Deleted milestone {:?} from project {:?}", m.name, m.project); }
+                }
+            }
+        }
         Commands::Workspace { cmd } => match cmd {
             WorkspaceCmd::Create { name, key } => {
                 let made = Registry::open(&home()?)?.create_workspace(&name, &key)?;
@@ -623,20 +919,28 @@ fn run(cli: Cli) -> Result<()> {
         Commands::Issue { cmd } => {
             let mut store = resolve_store(&cli.workspace)?;
             match cmd {
-                IssueCmd::Create { title, description, description_file, status, priority, assignee, parent, label, estimate, due } => {
+                IssueCmd::Create {
+                    title, description, description_file, status, priority, assignee, parent, label, estimate, due,
+                    project, no_project, milestone, no_milestone,
+                } => {
                     let description = description.or(description_file).unwrap_or_default();
                     let parent_id = parent.map(|p| store.resolve(&p)).transpose()?.map(|p| p.id);
-                    let issue = store.create_issue(Issue {
+                    let flag = project.clone();
+                    let place = placement(project, no_project, milestone, no_milestone);
+                    let issue = project_hint(store.create_issue(Issue {
                         id: String::new(), number: 0, identifier: String::new(), title, description, status, priority,
-                        assignee, parent_id, parent_identifier: None, estimate, due_date: due.map(|d| d.to_string()), labels: label,
+                        assignee, parent_id, parent_identifier: None, project_id: None, project: None, milestone_id: None, milestone: None,
+                        estimate, due_date: due.map(|d| d.to_string()), labels: label,
                         created_at: 0, updated_at: 0, completed_at: None, started_at: None, canceled_at: None,
-                    })?;
+                    }, &place), flag.as_deref())?;
                     if cli.json { print_json(&issue); } else { println!("Created {}", issue.identifier); }
                 }
-                IssueCmd::List { status, assignee, label, parent, blocked, unblocked, sort, limit, offset, all } => {
+                IssueCmd::List { status, assignee, label, parent, blocked, unblocked, project, milestone, sort, limit, offset, all } => {
                     let page = if all { Page::ALL } else { Page { limit: Some(limit), offset } };
                     let blocked = if blocked { Some(true) } else if unblocked { Some(false) } else { None };
-                    let list = store.list_issues(&IssueFilter { statuses: status, assignee, labels: label, parent, blocked }, sort, page)?;
+                    let flag = match &project { Some(ProjectFilter::Is(p)) => Some(p.clone()), _ => None };
+                    let filter = IssueFilter { statuses: status, assignee, labels: label, parent, blocked, project, milestone };
+                    let list = project_hint(store.list_issues(&filter, sort, page), flag.as_deref())?;
                     if cli.json { print_json(&list); }
                     else {
                         for i in &list.issues { println!("{}\t[{}]\t{}\t{}", i.identifier, i.status, i.priority.label(), i.title); }
@@ -660,6 +964,8 @@ fn run(cli: Cli) -> Result<()> {
                         println!("Status: {}  Priority: {}  Assignee: {}", issue.status, issue.priority.label(), issue.assignee.as_deref().unwrap_or("Unassigned"));
                         if !issue.labels.is_empty() { println!("Labels: {}", issue.labels.join(", ")); }
                         if let Some(p) = &issue.parent_identifier { println!("Parent: {p}"); }
+                        if let Some(p) = &issue.project { println!("Project: {p}"); }
+                        if let Some(m) = &issue.milestone { println!("Milestone: {m}"); }
                         let line = |name: &str, others: &[RelatedIssue]| {
                             if !others.is_empty() {
                                 let others: Vec<String> = others.iter().map(|o| format!("{} [{}]", o.identifier, o.status)).collect();
@@ -684,7 +990,7 @@ fn run(cli: Cli) -> Result<()> {
                 }
                 IssueCmd::Update {
                     id, title, description, description_file, status, priority, assignee, no_assignee, estimate, no_estimate, due, no_due,
-                    label, add_label, remove_label, clear_labels, parent, no_parent,
+                    label, add_label, remove_label, clear_labels, parent, no_parent, project, no_project, milestone, no_milestone,
                 } => {
                     // An unknown name is an error even when removing; a known
                     // label the issue doesn't have is a no-op.
@@ -695,7 +1001,9 @@ fn run(cli: Cli) -> Result<()> {
                         (Some(p), false) => Some(Some(store.resolve(&p)?.id)),
                         (None, false) => None,
                     };
-                    let issue = store.update_issue(&id, |i| {
+                    let flag = project.clone();
+                    let place = placement(project, no_project, milestone, no_milestone);
+                    let (issue, cleared) = project_hint(store.update_issue(&id, &place, |i| {
                         if let Some(t) = title { i.title = t; }
                         if let Some(d) = description.or(description_file) { i.description = d; }
                         if let Some(st) = status { i.status = st; }
@@ -713,7 +1021,10 @@ fn run(cli: Cli) -> Result<()> {
                         i.labels.retain(|n| !remove_label.iter().any(|r| r.eq_ignore_ascii_case(n)));
                         i.labels.extend(add_label);
                         if let Some(p) = new_parent { i.parent_id = p; }
-                    })?;
+                    }), flag.as_deref())?;
+                    if let Some(c) = cleared {
+                        eprintln!("lcl: milestone {:?} cleared: it belongs to project {:?}", c.milestone, c.project);
+                    }
                     if cli.json { print_json(&issue); } else { println!("Updated {}", issue.identifier); }
                 }
                 IssueCmd::Delete { id } => {

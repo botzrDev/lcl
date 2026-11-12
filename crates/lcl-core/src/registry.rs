@@ -244,6 +244,41 @@ fn remove_db_files(path: &Path) {
     }
 }
 
+/// Whether a workspace with slug `slug` is registered, found without
+/// writing anything: the index is never created or migrated, and is opened
+/// immutable. A plain read-only open would leave `-wal` and `-shm` files
+/// behind (a read-only connection creates them for a WAL database and can't
+/// remove them). Immutable reads only the main file, so a row still in
+/// another process's WAL is missed: for a hint, that is only a missing hint.
+/// An index lcl 0.1.0 (or a build before the registry) left keeps its
+/// workspaces in `projects`. No index, one from a newer lcl, or any error
+/// reads as false. For hints only.
+pub fn is_registered(home: &Path, slug: &str) -> bool {
+    let lookup = || -> Result<bool> {
+        let path = index_path(home);
+        if !path.is_file() {
+            return Ok(false);
+        }
+        let uri = format!("file:{}?immutable=1", uri_path(&path).ok_or_else(|| LclError::Msg("not UTF-8".into()))?);
+        let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX;
+        let conn = Connection::open_with_flags(&uri, flags)?;
+        let table = match registry_version(&conn)? {
+            0 if table_exists(&conn, "projects")? => "projects",
+            1 => "workspaces",
+            _ => return Ok(false),
+        };
+        Ok(conn.query_row(&format!("SELECT 1 FROM {table} WHERE slug = ?1"), params![slug], |_| Ok(())).optional()?.is_some())
+    };
+    lookup().unwrap_or(false)
+}
+
+/// `path` for a `file:` URI: every byte but unreserved ones and `/`
+/// percent-encoded, so `?`, `#`, `%` and spaces in it stay part of the path.
+fn uri_path(path: &Path) -> Option<String> {
+    let s = path.to_str()?;
+    Some(s.bytes().map(|b| if b.is_ascii_alphanumeric() || b"-._~/".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") }).collect())
+}
+
 fn table_exists(conn: &Connection, name: &str) -> Result<bool> {
     Ok(conn.query_row("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1", params![name], |_| Ok(())).optional()?.is_some())
 }

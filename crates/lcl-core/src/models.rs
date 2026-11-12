@@ -169,6 +169,17 @@ pub struct Issue {
     pub parent_id: Option<String>,
     /// The parent's `KEY-N`. Derived when the issue is read; ignored on write.
     pub parent_identifier: Option<String>,
+    /// The project's UUID. Set through `db::Placement`, not directly.
+    #[serde(skip)]
+    pub project_id: Option<String>,
+    /// The project's name. Derived when the issue is read; ignored on write.
+    pub project: Option<String>,
+    /// The milestone's UUID; the milestone is always in the issue's project.
+    /// Set through `db::Placement`, not directly.
+    #[serde(skip)]
+    pub milestone_id: Option<String>,
+    /// The milestone's name. Derived when the issue is read; ignored on write.
+    pub milestone: Option<String>,
     pub estimate: Option<i64>,
     pub due_date: Option<String>,
     /// Label names. Read sorted (ignoring case); on write each must name a
@@ -292,6 +303,168 @@ pub struct Relations {
     pub duplicates: Vec<RelatedIssue>,
 }
 
+/// A Linear project's status. Stored and printed canonically.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum ProjectStatus {
+    Backlog,
+    Planned,
+    Started,
+    Paused,
+    Completed,
+    Canceled,
+}
+impl ProjectStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ProjectStatus::Backlog => "Backlog",
+            ProjectStatus::Planned => "Planned",
+            ProjectStatus::Started => "Started",
+            ProjectStatus::Paused => "Paused",
+            ProjectStatus::Completed => "Completed",
+            ProjectStatus::Canceled => "Canceled",
+        }
+    }
+    /// Ignores ASCII case and spaces. "In Progress", Linear's name for
+    /// Started in its UI, is Started.
+    pub fn parse(s: &str) -> Option<Self> {
+        let key: String = s.chars().filter(|c| *c != ' ').collect::<String>().to_ascii_lowercase();
+        match key.as_str() {
+            "backlog" => Some(ProjectStatus::Backlog),
+            "planned" => Some(ProjectStatus::Planned),
+            "started" | "inprogress" => Some(ProjectStatus::Started),
+            "paused" => Some(ProjectStatus::Paused),
+            "completed" => Some(ProjectStatus::Completed),
+            "canceled" => Some(ProjectStatus::Canceled),
+            _ => None,
+        }
+    }
+    pub fn all() -> &'static [ProjectStatus] {
+        use ProjectStatus::*;
+        &[Backlog, Planned, Started, Paused, Completed, Canceled]
+    }
+}
+impl FromStr for ProjectStatus {
+    type Err = InvalidValue;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        ProjectStatus::parse(s).ok_or_else(|| {
+            let expected: Vec<&str> = ProjectStatus::all().iter().map(|s| s.as_str()).collect();
+            InvalidValue(format!("invalid project status \"{s}\"; expected one of: {}", expected.join(", ")))
+        })
+    }
+}
+impl std::fmt::Display for ProjectStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str(self.as_str()) }
+}
+
+/// A Linear project inside a workspace.
+#[derive(Debug, Clone, Serialize)]
+pub struct Project {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub status: ProjectStatus,
+    /// YYYY-MM-DD.
+    pub target_date: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+/// A milestone, always inside one project for good.
+#[derive(Debug, Clone, Serialize)]
+pub struct Milestone {
+    pub id: String,
+    pub name: String,
+    /// The project's name.
+    pub project: String,
+    #[serde(skip)]
+    pub project_id: String,
+    pub description: String,
+    /// YYYY-MM-DD.
+    pub target_date: Option<String>,
+    pub sort_order: i64,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+/// How many issues there are in each status, in Status order. A stored
+/// status is read by the rule every read uses, so a hand-edited "done" is
+/// Done; one that names no status is `unreadable`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct ByStatus {
+    #[serde(rename = "Backlog")] pub backlog: i64,
+    #[serde(rename = "Todo")] pub todo: i64,
+    #[serde(rename = "InProgress")] pub in_progress: i64,
+    #[serde(rename = "InReview")] pub in_review: i64,
+    #[serde(rename = "Done")] pub done: i64,
+    #[serde(rename = "Canceled")] pub canceled: i64,
+    #[serde(rename = "Duplicate")] pub duplicate: i64,
+    pub unreadable: i64,
+}
+impl ByStatus {
+    /// Adds `n` issues whose status reads as `status` (None: unreadable).
+    pub fn add(&mut self, status: Option<Status>, n: i64) {
+        let slot = match status {
+            Some(Status::Backlog) => &mut self.backlog,
+            Some(Status::Todo) => &mut self.todo,
+            Some(Status::InProgress) => &mut self.in_progress,
+            Some(Status::InReview) => &mut self.in_review,
+            Some(Status::Done) => &mut self.done,
+            Some(Status::Canceled) => &mut self.canceled,
+            Some(Status::Duplicate) => &mut self.duplicate,
+            None => &mut self.unreadable,
+        };
+        *slot += n;
+    }
+    /// Each count with its JSON name, in Status order, unreadable last.
+    pub fn entries(&self) -> [(&'static str, i64); 8] {
+        [
+            ("Backlog", self.backlog),
+            ("Todo", self.todo),
+            ("InProgress", self.in_progress),
+            ("InReview", self.in_review),
+            ("Done", self.done),
+            ("Canceled", self.canceled),
+            ("Duplicate", self.duplicate),
+            ("unreadable", self.unreadable),
+        ]
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct IssueCounts {
+    pub total: i64,
+    pub by_status: ByStatus,
+}
+
+/// A milestone as `project show` lists it.
+#[derive(Debug, Clone, Serialize)]
+pub struct MilestoneSummary {
+    pub id: String,
+    pub name: String,
+    pub target_date: Option<String>,
+    pub sort_order: i64,
+    /// How many issues it has.
+    pub issues: i64,
+}
+
+/// `project show`: the project, its issue counts, and its milestones by
+/// sort_order then name.
+#[derive(Debug, Clone, Serialize)]
+pub struct ProjectDetail {
+    #[serde(flatten)]
+    pub project: Project,
+    pub issues: IssueCounts,
+    pub milestones: Vec<MilestoneSummary>,
+}
+
+/// `milestone show`: the milestone and its issue counts.
+#[derive(Debug, Clone, Serialize)]
+pub struct MilestoneDetail {
+    #[serde(flatten)]
+    pub milestone: Milestone,
+    pub issues: IssueCounts,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Comment {
     pub id: String,
@@ -390,7 +563,8 @@ mod tests {
     fn issue(status: Status, started: Option<i64>, completed: Option<i64>, canceled: Option<i64>) -> Issue {
         Issue {
             id: "id".into(), number: 1, identifier: String::new(), title: "t".into(), description: String::new(), status,
-            priority: Priority::None, assignee: None, parent_id: None, parent_identifier: None, estimate: None, due_date: None,
+            priority: Priority::None, assignee: None, parent_id: None, parent_identifier: None,
+            project_id: None, project: None, milestone_id: None, milestone: None, estimate: None, due_date: None,
             labels: vec![], created_at: 1, updated_at: 1,
             completed_at: completed, started_at: started, canceled_at: canceled,
         }

@@ -13,7 +13,7 @@
 /// adding a migration bumps it and the two can't drift apart.
 pub const SCHEMA_VERSION: i64 = MIGRATIONS.len() as i64;
 
-pub(crate) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7];
+pub(crate) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8];
 
 /// v0 -> v1: the lcl 0.1.0 schema, verbatim.
 ///
@@ -304,4 +304,59 @@ CREATE TABLE issue_relations (
 );
 CREATE INDEX issue_relations_related ON issue_relations(related_id, kind);
 CREATE UNIQUE INDEX issue_relations_one_duplicate ON issue_relations(issue_id) WHERE kind = 'duplicate';
+"#;
+
+/// v7 -> v8: Linear projects and milestones inside a workspace, and an
+/// issue's place in them. Existing issues are in no project.
+///
+/// - A project's name is unique ignoring case; so is a milestone's within
+///   its project.
+/// - The foreign keys have no ON DELETE action: a project with milestones
+///   or issues, or a milestone with issues, can't be deleted out from under
+///   them (lcl refuses first, with counts).
+/// - The triggers hold every writer to the rules lcl checks itself (an
+///   import that inserts rows directly included): an issue's milestone is
+///   in the issue's project (so no milestone without a project), and a
+///   milestone never moves to another project.
+const V8: &str = r#"
+CREATE TABLE projects (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'Backlog' CHECK (status IN ('Backlog', 'Planned', 'Started', 'Paused', 'Completed', 'Canceled')),
+    target_date TEXT,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+CREATE UNIQUE INDEX projects_name ON projects(name COLLATE NOCASE);
+CREATE TABLE milestones (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id),
+    name TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    target_date TEXT,
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    UNIQUE (project_id, name COLLATE NOCASE)
+);
+ALTER TABLE issues ADD COLUMN project_id TEXT REFERENCES projects(id);
+ALTER TABLE issues ADD COLUMN milestone_id TEXT REFERENCES milestones(id);
+CREATE INDEX issues_project ON issues(project_id);
+CREATE INDEX issues_milestone ON issues(milestone_id);
+CREATE TRIGGER issues_milestone_in_project_insert BEFORE INSERT ON issues
+WHEN NEW.milestone_id IS NOT NULL AND (SELECT project_id FROM milestones WHERE id = NEW.milestone_id) IS NOT NEW.project_id
+BEGIN
+    SELECT RAISE(ABORT, 'milestone is not in the issue''s project');
+END;
+CREATE TRIGGER issues_milestone_in_project_update BEFORE UPDATE OF project_id, milestone_id ON issues
+WHEN NEW.milestone_id IS NOT NULL AND (SELECT project_id FROM milestones WHERE id = NEW.milestone_id) IS NOT NEW.project_id
+BEGIN
+    SELECT RAISE(ABORT, 'milestone is not in the issue''s project');
+END;
+CREATE TRIGGER milestones_stay_in_project BEFORE UPDATE OF project_id ON milestones
+WHEN NEW.project_id IS NOT OLD.project_id
+BEGIN
+    SELECT RAISE(ABORT, 'a milestone cannot move to another project');
+END;
 "#;

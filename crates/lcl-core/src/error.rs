@@ -76,6 +76,38 @@ pub enum LclError {
     /// HOME unset or empty, where lcl needs it.
     #[error("HOME is not set; lcl keeps its workspace registry in $HOME/.lcl")]
     NoHome,
+    /// A --project, or a project argument, naming no project. `workspace`:
+    /// the name is a registered workspace's, so whoever typed it may mean
+    /// lcl 0.1.0's --project (the CLI sets this; the store never does).
+    #[error("project {name:?} not found in this workspace{}", if *workspace { format!("; {name:?} is a workspace: the workspace flag is now --workspace (-w)") } else { String::new() })]
+    ProjectNotFound { name: String, workspace: bool },
+    /// A project name taken, ignoring case. `existing` is its spelling.
+    #[error("project {name:?} already exists{}", if name == existing { String::new() } else { format!(" (as {existing:?})") })]
+    ProjectExists { name: String, existing: String },
+    /// `project delete` of a project that issues or milestones reference.
+    #[error("project {name:?} has {}; move or delete {} first", counted(&[(*issues, "issue"), (*milestones, "milestone")]), them(issues + milestones))]
+    ProjectInUse { name: String, issues: i64, milestones: i64 },
+    /// No milestone with this name or id (`project`: where it was looked for).
+    #[error("milestone {name:?} not found{}", project.as_ref().map(|p| format!(" in project {p:?}")).unwrap_or_default())]
+    MilestoneNotFound { name: String, project: Option<String> },
+    /// An issue's milestone that exists, but only in other projects.
+    #[error("milestone {name:?} is not in project {project:?} (it is in {})", projects_named(elsewhere))]
+    MilestoneElsewhere { name: String, project: String, elsewhere: Vec<String> },
+    /// A milestone name that several projects have, given without --project.
+    #[error("milestone {name:?} is in {}; pass --project to choose", projects_named(projects))]
+    MilestoneAmbiguous { name: String, projects: Vec<String> },
+    /// A milestone name taken in its project, ignoring case.
+    #[error("milestone {name:?} already exists in project {project:?}{}", if name == existing { String::new() } else { format!(" (as {existing:?})") })]
+    MilestoneExists { name: String, existing: String, project: String },
+    /// `milestone delete` of a milestone that issues reference.
+    #[error("milestone {name:?} has {}; move or delete {} first", counted(&[(*issues, "issue")]), them(*issues))]
+    MilestoneInUse { name: String, issues: i64 },
+    /// A milestone for an issue that would have no project.
+    #[error("milestone {0:?} needs a project: the issue has none; pass --project too")]
+    MilestoneWithoutProject(String),
+    /// `issue list --project none --milestone M`: nothing can match.
+    #[error("--milestone {0:?} can't be used with --project none: issues in no project have no milestone")]
+    MilestoneInNoProject(String),
     #[error("the search query is empty")]
     EmptyQuery,
     /// Every word lacks token characters (`--`, `*`, a lone `"`).
@@ -103,9 +135,34 @@ impl LclError {
                 | LclError::AlreadyDuplicate { .. }
                 | LclError::DuplicateCycle { .. }
                 | LclError::NoSlug(_)
+                | LclError::MilestoneElsewhere { .. }
+                | LclError::MilestoneAmbiguous { .. }
+                | LclError::MilestoneWithoutProject(_)
+                | LclError::MilestoneInNoProject(_)
                 | LclError::EmptyQuery
                 | LclError::NothingToSearch(_)
         )
+    }
+}
+
+/// "3 issues and 1 milestone": each non-zero count with its noun.
+fn counted(parts: &[(i64, &str)]) -> String {
+    let parts: Vec<String> = parts.iter().filter(|(n, _)| *n != 0).map(|(n, noun)| format!("{n} {noun}{}", if *n == 1 { "" } else { "s" })).collect();
+    parts.join(" and ")
+}
+
+/// "it" for one thing, "them" for more.
+fn them(n: i64) -> &'static str {
+    if n == 1 { "it" } else { "them" }
+}
+
+/// `project "Q"`, or `projects "Q" and "R"`, or `projects "Q", "R" and "S"`.
+fn projects_named(names: &[String]) -> String {
+    let quoted: Vec<String> = names.iter().map(|n| format!("{n:?}")).collect();
+    match quoted.as_slice() {
+        [one] => format!("project {one}"),
+        [rest @ .., last] => format!("projects {} and {last}", rest.join(", ")),
+        [] => "no project".to_string(),
     }
 }
 

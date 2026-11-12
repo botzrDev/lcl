@@ -62,6 +62,66 @@ pub struct IssueFilter {
     /// that isn't Done, Canceled or Duplicate. `Some(false)`: only issues
     /// with no such blocker.
     pub blocked: Option<bool>,
+    /// Only issues in this project, or in none. An unknown project is an
+    /// error, not an empty list.
+    pub project: Option<ProjectFilter>,
+    /// Only issues with this milestone (name or id), looked up in the
+    /// `project` filter's project when there is one, else in the workspace.
+    pub milestone: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProjectFilter {
+    /// Issues in no project.
+    NoProject,
+    /// Issues in the project with this name (ignoring ASCII case) or id.
+    Is(String),
+}
+
+/// What `update_issue` does to one field: leave it, clear it, or set it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum Change<T> {
+    #[default]
+    Keep,
+    Clear,
+    Set(T),
+}
+
+/// Where `create_issue` and `update_issue` put an issue. The project and the
+/// milestone are given by name (ignoring ASCII case) or id, and resolved
+/// inside the write transaction. A milestone is looked up in the issue's
+/// resulting project: the one given, or the one it has.
+#[derive(Debug, Clone, Default)]
+pub struct Placement {
+    pub project: Change<String>,
+    pub milestone: Change<String>,
+}
+
+/// A milestone `update_issue` took off an issue because the issue left the
+/// milestone's project.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClearedMilestone {
+    pub milestone: String,
+    pub project: String,
+}
+
+/// `update_project`'s changes; None leaves a field alone.
+#[derive(Debug, Clone, Default)]
+pub struct ProjectUpdate {
+    pub name: Option<String>,
+    pub description: Option<String>,
+    pub status: Option<ProjectStatus>,
+    pub target_date: Change<String>,
+}
+
+/// `update_milestone`'s changes; None leaves a field alone. There is no way
+/// to move a milestone to another project.
+#[derive(Debug, Clone, Default)]
+pub struct MilestoneUpdate {
+    pub name: Option<String>,
+    pub description: Option<String>,
+    pub target_date: Change<String>,
+    pub sort_order: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -251,10 +311,12 @@ impl Store {
     /// Inserts `issue` and returns it as stored. A zero `number` is allocated
     /// from the high-water mark; either way the mark ends up past the number
     /// used. A `parent_id` must be the UUID of an existing issue.
-    pub fn create_issue(&mut self, mut issue: Issue) -> Result<Issue> {
+    pub fn create_issue(&mut self, mut issue: Issue, placement: &Placement) -> Result<Issue> {
         self.write(|tx| {
             let key = read_key(tx)?;
             if let Some(parent) = &issue.parent_id { check_parent(tx, &key, None, parent)?; }
+            (issue.project_id, issue.milestone_id) = (None, None);
+            place(tx, &mut issue, placement)?;
             if issue.id.is_empty() { issue.id = uuid::Uuid::new_v4().to_string(); }
             let next = next_issue_number(tx)?;
             if issue.number == 0 { issue.number = next; }
@@ -265,8 +327,8 @@ impl Store {
             let status = issue.status.as_str();
             let priority = issue.priority.as_i64();
             tx.execute(
-                "INSERT INTO issues(id,number,title,description,status,priority,assignee,parent_id,estimate,due_date,created_at,updated_at,completed_at,started_at,canceled_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
-                params![issue.id, issue.number, issue.title, issue.description, status, priority, issue.assignee, issue.parent_id, issue.estimate, issue.due_date, issue.created_at, issue.updated_at, issue.completed_at, issue.started_at, issue.canceled_at],
+                "INSERT INTO issues(id,number,title,description,status,priority,assignee,parent_id,estimate,due_date,created_at,updated_at,completed_at,started_at,canceled_at,project_id,milestone_id) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
+                params![issue.id, issue.number, issue.title, issue.description, status, priority, issue.assignee, issue.parent_id, issue.estimate, issue.due_date, issue.created_at, issue.updated_at, issue.completed_at, issue.started_at, issue.canceled_at, issue.project_id, issue.milestone_id],
             )?;
             set_labels(tx, &issue.id, &issue.labels)?;
             put_meta(tx, NEXT_ISSUE_NUMBER, &next.max(issue.number + 1).to_string())?;
@@ -321,6 +383,27 @@ impl Store {
                     WHERE r.related_id = i.id AND r.kind = 'blocks' AND coalesce(lcl_status(b.status), '') NOT IN ('Done', 'Canceled', 'Duplicate'))";
                 conds.push(if blocked { open_blocker.to_string() } else { format!("NOT {open_blocker}") });
             }
+            let project = match &filter.project {
+                Some(ProjectFilter::NoProject) => {
+                    conds.push("i.project_id IS NULL".into());
+                    None
+                }
+                Some(ProjectFilter::Is(r)) => {
+                    let project = resolve_project(conn, r)?;
+                    conds.push("i.project_id = ?".into());
+                    args.push(Value::Text(project.id.clone()));
+                    Some(project)
+                }
+                None => None,
+            };
+            if let Some(m) = &filter.milestone {
+                if filter.project == Some(ProjectFilter::NoProject) {
+                    return Err(LclError::MilestoneInNoProject(m.clone()));
+                }
+                let milestone = resolve_milestone(conn, m, project.as_ref())?;
+                conds.push("i.milestone_id = ?".into());
+                args.push(Value::Text(milestone.id));
+            }
             let where_sql = if conds.is_empty() { String::new() } else { format!(" WHERE {}", conds.join(" AND ")) };
 
             let total: i64 = conn.query_row(&format!("SELECT count(*) FROM issues i{where_sql}"), params_from_iter(&args), |r| r.get(0))?;
@@ -342,8 +425,10 @@ impl Store {
     /// Reads the issue, applies `f` and writes it back, all under the write
     /// lock, so a concurrent update can't be overwritten with a stale copy.
     /// A changed `parent_id` must be the UUID of an existing issue that is
-    /// neither this one nor below it.
-    pub fn update_issue(&mut self, r: &IssueRef, f: impl FnOnce(&mut Issue)) -> Result<Issue> {
+    /// neither this one nor below it. `placement` moves it between projects
+    /// and milestones (see `place`); a milestone it loses because it left the
+    /// milestone's project is returned, for the caller to report.
+    pub fn update_issue(&mut self, r: &IssueRef, placement: &Placement, f: impl FnOnce(&mut Issue)) -> Result<(Issue, Option<ClearedMilestone>)> {
         self.write(|tx| {
             let key = read_key(tx)?;
             let mut issue = resolve_issue(tx, r)?;
@@ -352,16 +437,17 @@ impl Store {
             if issue.parent_id != old_parent && let Some(parent) = &issue.parent_id {
                 check_parent(tx, &key, Some(&issue), parent)?;
             }
+            let cleared = place(tx, &mut issue, placement)?;
             issue.updated_at = crate::models::now();
             issue.apply_lifecycle(Some(from), issue.updated_at);
             let status = issue.status.as_str();
             let priority = issue.priority.as_i64();
             tx.execute(
-                "UPDATE issues SET title=?1,description=?2,status=?3,priority=?4,assignee=?5,parent_id=?6,estimate=?7,due_date=?8,updated_at=?9,completed_at=?10,started_at=?11,canceled_at=?12 WHERE id=?13",
-                params![issue.title, issue.description, status, priority, issue.assignee, issue.parent_id, issue.estimate, issue.due_date, issue.updated_at, issue.completed_at, issue.started_at, issue.canceled_at, issue.id],
+                "UPDATE issues SET title=?1,description=?2,status=?3,priority=?4,assignee=?5,parent_id=?6,estimate=?7,due_date=?8,updated_at=?9,completed_at=?10,started_at=?11,canceled_at=?12,project_id=?13,milestone_id=?14 WHERE id=?15",
+                params![issue.title, issue.description, status, priority, issue.assignee, issue.parent_id, issue.estimate, issue.due_date, issue.updated_at, issue.completed_at, issue.started_at, issue.canceled_at, issue.project_id, issue.milestone_id, issue.id],
             )?;
             set_labels(tx, &issue.id, &issue.labels)?;
-            reread(tx, &key, &issue.id)
+            Ok((reread(tx, &key, &issue.id)?, cleared))
         })
     }
     /// Deletes the issue and its comments, labels and cycle links, and returns
@@ -466,6 +552,174 @@ impl Store {
                 }
             }
             Ok(out)
+        })
+    }
+
+    // ----- projects -----
+    /// Creates a project. Its name must be free, ignoring ASCII case.
+    pub fn create_project(&mut self, name: &str, description: &str, status: ProjectStatus, target_date: Option<&str>) -> Result<Project> {
+        self.write(|tx| {
+            if let Some(existing) = project_named(tx, name, None)? {
+                return Err(LclError::ProjectExists { name: name.to_string(), existing: existing.name });
+            }
+            let id = uuid::Uuid::new_v4().to_string();
+            let now = crate::models::now();
+            tx.execute(
+                "INSERT INTO projects(id, name, description, status, target_date, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
+                params![id, name, description, status.as_str(), target_date, now],
+            )?;
+            project_by_id(tx, &id)
+        })
+    }
+    /// Projects with any of these statuses (all when empty), by name
+    /// ignoring case.
+    pub fn list_projects(&self, statuses: &[ProjectStatus]) -> Result<Vec<Project>> {
+        self.read(|conn| {
+            let wanted: Vec<&str> = statuses.iter().map(|s| s.as_str()).collect();
+            let mut stmt = conn.prepare(&format!(
+                "{PROJECT_SELECT} WHERE ?1 = '[]' OR status IN (SELECT value FROM json_each(?1)) ORDER BY name COLLATE NOCASE, name"
+            ))?;
+            let rows = stmt.query_and_then(params![json_array(&wanted)?], row_to_project)?;
+            rows.collect()
+        })
+    }
+    /// The project `r` names (name ignoring ASCII case, or id), with its
+    /// issue counts and its milestones, from one snapshot.
+    pub fn project_detail(&self, r: &str) -> Result<ProjectDetail> {
+        self.read(|conn| {
+            let project = resolve_project(conn, r)?;
+            let issues = issue_counts(conn, "project_id", &project.id)?;
+            let mut stmt = conn.prepare(
+                "SELECT m.id, m.name, m.target_date, m.sort_order, (SELECT count(*) FROM issues i WHERE i.milestone_id = m.id)
+                 FROM milestones m WHERE m.project_id = ?1 ORDER BY m.sort_order, m.name COLLATE NOCASE, m.name",
+            )?;
+            let milestones = stmt
+                .query_map(params![project.id], |r| {
+                    Ok(MilestoneSummary { id: r.get(0)?, name: r.get(1)?, target_date: r.get(2)?, sort_order: r.get(3)?, issues: r.get(4)? })
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            Ok(ProjectDetail { project, issues, milestones })
+        })
+    }
+    /// Applies `u` to the project `r` names. A new name must be free,
+    /// ignoring ASCII case, except for this project's own.
+    pub fn update_project(&mut self, r: &str, u: &ProjectUpdate) -> Result<Project> {
+        self.write(|tx| {
+            let mut project = resolve_project(tx, r)?;
+            if let Some(name) = &u.name {
+                if let Some(existing) = project_named(tx, name, Some(&project.id))? {
+                    return Err(LclError::ProjectExists { name: name.clone(), existing: existing.name });
+                }
+                project.name = name.clone();
+            }
+            if let Some(d) = &u.description { project.description = d.clone(); }
+            if let Some(st) = u.status { project.status = st; }
+            match &u.target_date {
+                Change::Keep => {}
+                Change::Clear => project.target_date = None,
+                Change::Set(d) => project.target_date = Some(d.clone()),
+            }
+            project.updated_at = crate::models::now();
+            tx.execute(
+                "UPDATE projects SET name=?1, description=?2, status=?3, target_date=?4, updated_at=?5 WHERE id=?6",
+                params![project.name, project.description, project.status.as_str(), project.target_date, project.updated_at, project.id],
+            )?;
+            Ok(project)
+        })
+    }
+    /// Deletes the project `r` names. Refused while issues or milestones
+    /// reference it; nothing changes then.
+    pub fn delete_project(&mut self, r: &str) -> Result<Project> {
+        self.write(|tx| {
+            let project = resolve_project(tx, r)?;
+            let issues: i64 = tx.query_row("SELECT count(*) FROM issues WHERE project_id = ?1", params![project.id], |r| r.get(0))?;
+            let milestones: i64 = tx.query_row("SELECT count(*) FROM milestones WHERE project_id = ?1", params![project.id], |r| r.get(0))?;
+            if issues + milestones > 0 {
+                return Err(LclError::ProjectInUse { name: project.name, issues, milestones });
+            }
+            tx.execute("DELETE FROM projects WHERE id = ?1", params![project.id])?;
+            Ok(project)
+        })
+    }
+
+    // ----- milestones -----
+    /// Creates a milestone in the project `project` names. Its name must be
+    /// free in that project, ignoring ASCII case.
+    pub fn create_milestone(&mut self, name: &str, project: &str, description: &str, target_date: Option<&str>, sort_order: i64) -> Result<Milestone> {
+        self.write(|tx| {
+            let project = resolve_project(tx, project)?;
+            if let Some(existing) = milestone_named(tx, &project, name, None)? {
+                return Err(LclError::MilestoneExists { name: name.to_string(), existing: existing.name, project: project.name });
+            }
+            let id = uuid::Uuid::new_v4().to_string();
+            let now = crate::models::now();
+            tx.execute(
+                "INSERT INTO milestones(id, project_id, name, description, target_date, sort_order, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)",
+                params![id, project.id, name, description, target_date, sort_order, now],
+            )?;
+            milestone_by_id(tx, &id)
+        })
+    }
+    /// Milestones, of one project or all, by project name, sort_order, then
+    /// name (names ignoring case).
+    pub fn list_milestones(&self, project: Option<&str>) -> Result<Vec<Milestone>> {
+        self.read(|conn| {
+            let project_id = project.map(|p| resolve_project(conn, p)).transpose()?.map(|p| p.id);
+            let mut stmt = conn.prepare(&format!(
+                "{MILESTONE_SELECT} WHERE ?1 IS NULL OR m.project_id = ?1 ORDER BY p.name COLLATE NOCASE, p.name, m.sort_order, m.name COLLATE NOCASE, m.name"
+            ))?;
+            let rows = stmt.query_and_then(params![project_id], row_to_milestone)?;
+            rows.collect()
+        })
+    }
+    /// The milestone `r` names (see `resolve_milestone`), with its issue counts.
+    pub fn milestone_detail(&self, r: &str, project: Option<&str>) -> Result<MilestoneDetail> {
+        self.read(|conn| {
+            let project = project.map(|p| resolve_project(conn, p)).transpose()?;
+            let milestone = resolve_milestone(conn, r, project.as_ref())?;
+            let issues = issue_counts(conn, "milestone_id", &milestone.id)?;
+            Ok(MilestoneDetail { milestone, issues })
+        })
+    }
+    /// Applies `u` to the milestone `r` names. A new name must be free in its
+    /// project, ignoring ASCII case, except for its own.
+    pub fn update_milestone(&mut self, r: &str, project: Option<&str>, u: &MilestoneUpdate) -> Result<Milestone> {
+        self.write(|tx| {
+            let project = project.map(|p| resolve_project(tx, p)).transpose()?;
+            let mut m = resolve_milestone(tx, r, project.as_ref())?;
+            if let Some(name) = &u.name {
+                let own = project_by_id(tx, &m.project_id)?;
+                if let Some(existing) = milestone_named(tx, &own, name, Some(&m.id))? {
+                    return Err(LclError::MilestoneExists { name: name.clone(), existing: existing.name, project: own.name });
+                }
+                m.name = name.clone();
+            }
+            if let Some(d) = &u.description { m.description = d.clone(); }
+            match &u.target_date {
+                Change::Keep => {}
+                Change::Clear => m.target_date = None,
+                Change::Set(d) => m.target_date = Some(d.clone()),
+            }
+            if let Some(o) = u.sort_order { m.sort_order = o; }
+            m.updated_at = crate::models::now();
+            tx.execute(
+                "UPDATE milestones SET name=?1, description=?2, target_date=?3, sort_order=?4, updated_at=?5 WHERE id=?6",
+                params![m.name, m.description, m.target_date, m.sort_order, m.updated_at, m.id],
+            )?;
+            Ok(m)
+        })
+    }
+    /// Deletes the milestone `r` names. Refused while issues reference it.
+    pub fn delete_milestone(&mut self, r: &str, project: Option<&str>) -> Result<Milestone> {
+        self.write(|tx| {
+            let project = project.map(|p| resolve_project(tx, p)).transpose()?;
+            let m = resolve_milestone(tx, r, project.as_ref())?;
+            let issues: i64 = tx.query_row("SELECT count(*) FROM issues WHERE milestone_id = ?1", params![m.id], |r| r.get(0))?;
+            if issues > 0 {
+                return Err(LclError::MilestoneInUse { name: m.name, issues });
+            }
+            tx.execute("DELETE FROM milestones WHERE id = ?1", params![m.id])?;
+            Ok(m)
         })
     }
 
@@ -860,6 +1114,175 @@ fn blocks_path(conn: &Connection, start: &Issue, goal: &str) -> Result<Option<Ve
     Ok(None)
 }
 
+const PROJECT_SELECT: &str = "SELECT id, name, description, status, target_date, created_at, updated_at FROM projects";
+
+fn row_to_project(r: &rusqlite::Row) -> Result<Project> {
+    let status: String = r.get(3)?;
+    // The schema's CHECK admits only the canonical six.
+    let status = ProjectStatus::parse(&status).ok_or_else(|| LclError::Msg(format!("project status {status:?} is unknown")))?;
+    Ok(Project { id: r.get(0)?, name: r.get(1)?, description: r.get(2)?, status, target_date: r.get(4)?, created_at: r.get(5)?, updated_at: r.get(6)? })
+}
+
+/// A milestone with its project's name: `milestones m` joined to `projects p`.
+const MILESTONE_SELECT: &str = "SELECT m.id, m.name, p.name, m.project_id, m.description, m.target_date, m.sort_order, m.created_at, m.updated_at FROM milestones m JOIN projects p ON p.id = m.project_id";
+
+fn row_to_milestone(r: &rusqlite::Row) -> Result<Milestone> {
+    Ok(Milestone {
+        id: r.get(0)?,
+        name: r.get(1)?,
+        project: r.get(2)?,
+        project_id: r.get(3)?,
+        description: r.get(4)?,
+        target_date: r.get(5)?,
+        sort_order: r.get(6)?,
+        created_at: r.get(7)?,
+        updated_at: r.get(8)?,
+    })
+}
+
+fn project_by_id(conn: &Connection, id: &str) -> Result<Project> {
+    conn.query_row(&format!("{PROJECT_SELECT} WHERE id = ?1"), params![id], |r| Ok(row_to_project(r)))
+        .optional()?
+        .ok_or_else(|| LclError::Msg(format!("project {id} vanished inside its own transaction")))?
+}
+
+fn milestone_by_id(conn: &Connection, id: &str) -> Result<Milestone> {
+    conn.query_row(&format!("{MILESTONE_SELECT} WHERE m.id = ?1"), params![id], |r| Ok(row_to_milestone(r)))
+        .optional()?
+        .ok_or_else(|| LclError::Msg(format!("milestone {id} vanished inside its own transaction")))?
+}
+
+/// The project named `name` ignoring ASCII case, other than `except`.
+fn project_named(conn: &Connection, name: &str, except: Option<&str>) -> Result<Option<Project>> {
+    conn.query_row(&format!("{PROJECT_SELECT} WHERE name = ?1 COLLATE NOCASE AND id IS NOT ?2"), params![name, except], |r| Ok(row_to_project(r)))
+        .optional()?
+        .transpose()
+}
+
+/// The milestone of `project` named `name` ignoring ASCII case, other than
+/// `except`.
+fn milestone_named(conn: &Connection, project: &Project, name: &str, except: Option<&str>) -> Result<Option<Milestone>> {
+    conn.query_row(
+        &format!("{MILESTONE_SELECT} WHERE m.project_id = ?1 AND m.name = ?2 COLLATE NOCASE AND m.id IS NOT ?3"),
+        params![project.id, name, except],
+        |r| Ok(row_to_milestone(r)),
+    )
+    .optional()?
+    .transpose()
+}
+
+/// The project `r` names: its id, or its name ignoring ASCII case.
+fn resolve_project(conn: &Connection, r: &str) -> Result<Project> {
+    conn.query_row(
+        &format!("{PROJECT_SELECT} WHERE id = ?1 OR name = ?1 COLLATE NOCASE ORDER BY id = ?1 DESC LIMIT 1"),
+        params![r],
+        |row| Ok(row_to_project(row)),
+    )
+    .optional()?
+    .transpose()?
+    .ok_or_else(|| LclError::ProjectNotFound { name: r.to_string(), workspace: false })
+}
+
+/// Every milestone `r` could name (its id, or its name ignoring ASCII
+/// case), in any project, by project name.
+fn milestones_matching(conn: &Connection, r: &str) -> Result<Vec<Milestone>> {
+    let mut stmt = conn.prepare(&format!(
+        "{MILESTONE_SELECT} WHERE m.id = ?1 OR m.name = ?1 COLLATE NOCASE ORDER BY m.id = ?1 DESC, p.name COLLATE NOCASE, p.name"
+    ))?;
+    let rows = stmt.query_and_then(params![r], row_to_milestone)?;
+    rows.collect()
+}
+
+/// The milestone `r` names, for milestone commands and `issue list
+/// --milestone`: in `project` when given; else in the whole workspace,
+/// where an id wins and a name more than one project has is ambiguous.
+fn resolve_milestone(conn: &Connection, r: &str, project: Option<&Project>) -> Result<Milestone> {
+    let all = milestones_matching(conn, r)?;
+    if let Some(project) = project {
+        return all
+            .into_iter()
+            .find(|m| m.project_id == project.id)
+            .ok_or_else(|| LclError::MilestoneNotFound { name: r.to_string(), project: Some(project.name.clone()) });
+    }
+    if let Some(m) = all.iter().find(|m| m.id == r) {
+        return Ok(m.clone());
+    }
+    match all.as_slice() {
+        [] => Err(LclError::MilestoneNotFound { name: r.to_string(), project: None }),
+        [one] => Ok(one.clone()),
+        several => Err(LclError::MilestoneAmbiguous { name: r.to_string(), projects: several.iter().map(|m| m.project.clone()).collect() }),
+    }
+}
+
+/// The milestone `r` names for an issue in `project`. One that exists only
+/// in other projects is a usage error naming them; one that exists nowhere
+/// is not found.
+fn milestone_for_issue(conn: &Connection, r: &str, project: &Project) -> Result<Milestone> {
+    let all = milestones_matching(conn, r)?;
+    if let Some(m) = all.iter().find(|m| m.project_id == project.id) {
+        return Ok(m.clone());
+    }
+    if all.is_empty() {
+        return Err(LclError::MilestoneNotFound { name: r.to_string(), project: Some(project.name.clone()) });
+    }
+    let mut elsewhere: Vec<String> = all.into_iter().map(|m| m.project).collect();
+    elsewhere.dedup();
+    Err(LclError::MilestoneElsewhere { name: r.to_string(), project: project.name.clone(), elsewhere })
+}
+
+/// Sets `issue`'s project and milestone from `p`, inside the caller's write
+/// transaction:
+/// - the project is the one given, none, or (Keep) the one it has;
+/// - a milestone given must be in that project;
+/// - a milestone kept that isn't in it (the issue changed project, or left
+///   all projects) is cleared and returned.
+fn place(conn: &Connection, issue: &mut Issue, p: &Placement) -> Result<Option<ClearedMilestone>> {
+    let project = match &p.project {
+        Change::Keep => issue.project_id.as_deref().map(|id| project_by_id(conn, id)).transpose()?,
+        Change::Clear => None,
+        Change::Set(r) => Some(resolve_project(conn, r)?),
+    };
+    let mut cleared = None;
+    let milestone_id = match &p.milestone {
+        Change::Clear => None,
+        Change::Set(r) => {
+            let Some(project) = &project else { return Err(LclError::MilestoneWithoutProject(r.clone())) };
+            Some(milestone_for_issue(conn, r, project)?.id)
+        }
+        Change::Keep => match issue.milestone_id.as_deref() {
+            None => None,
+            Some(id) => {
+                let m = milestone_by_id(conn, id)?;
+                if project.as_ref().is_some_and(|p| p.id == m.project_id) {
+                    Some(m.id)
+                } else {
+                    cleared = Some(ClearedMilestone { milestone: m.name, project: m.project });
+                    None
+                }
+            }
+        },
+    };
+    issue.project_id = project.map(|p| p.id);
+    issue.milestone_id = milestone_id;
+    Ok(cleared)
+}
+
+/// How many issues have `col` (project_id or milestone_id) = `id`, by
+/// status. lcl_status() reads each stored status as every read does; what
+/// it can't read is counted as unreadable.
+fn issue_counts(conn: &Connection, col: &str, id: &str) -> Result<IssueCounts> {
+    let mut stmt = conn.prepare(&format!("SELECT lcl_status(status), count(*) FROM issues WHERE {col} = ?1 GROUP BY 1"))?;
+    let mut counts = IssueCounts::default();
+    for row in stmt.query_map(params![id], |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, i64>(1)?)))? {
+        let (status, n) = row?;
+        // lcl_status answers with a canonical spelling, or NULL.
+        let status = status.and_then(|s| Status::all().iter().copied().find(|st| st.as_str() == s));
+        counts.by_status.add(status, n);
+        counts.total += n;
+    }
+    Ok(counts)
+}
+
 /// The issue as just written, read back inside the same transaction so the
 /// caller gets the derived fields (identifiers) too.
 fn reread(conn: &Connection, key: &str, id: &str) -> Result<Issue> {
@@ -867,8 +1290,8 @@ fn reread(conn: &Connection, key: &str, id: &str) -> Result<Issue> {
 }
 
 /// An issue row as `row_to_issue` reads it: `issues i`, with its parent's
-/// number from `issues p`. Callers append WHERE, ORDER BY and LIMIT.
-const ISSUE_SELECT: &str = "SELECT i.id,i.number,i.title,i.description,i.status,i.priority,i.assignee,i.parent_id,i.estimate,i.due_date,i.created_at,i.updated_at,i.completed_at,i.started_at,i.canceled_at,p.number FROM issues i LEFT JOIN issues p ON p.id = i.parent_id";
+/// number from `issues p` and its project's and milestone's names. Callers append WHERE, ORDER BY and LIMIT.
+const ISSUE_SELECT: &str = "SELECT i.id,i.number,i.title,i.description,i.status,i.priority,i.assignee,i.parent_id,i.estimate,i.due_date,i.created_at,i.updated_at,i.completed_at,i.started_at,i.canceled_at,p.number,i.project_id,pr.name,i.milestone_id,ms.name FROM issues i LEFT JOIN issues p ON p.id = i.parent_id LEFT JOIN projects pr ON pr.id = i.project_id LEFT JOIN milestones ms ON ms.id = i.milestone_id";
 
 /// The issues with these UUIDs, in this order, skipping any that are gone:
 /// one query for the rows and one for all their labels.
@@ -965,6 +1388,10 @@ fn row_to_issue(r: &rusqlite::Row, key: &str) -> Result<Issue> {
         assignee: r.get(6)?,
         parent_id: r.get(7)?,
         parent_identifier: parent_number.map(|n| identifier(key, n)),
+        project_id: r.get(16)?,
+        project: r.get(17)?,
+        milestone_id: r.get(18)?,
+        milestone: r.get(19)?,
         estimate: r.get(8)?,
         due_date: r.get(9)?,
         labels: vec![],

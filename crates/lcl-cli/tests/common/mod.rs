@@ -25,6 +25,11 @@ pub const V0_INDEX_ALPHA_FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/t
 /// workspace: user_version 7. See tests/workspaces.rs.
 pub const V7_INDEX_FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/v7-index.sqlite");
 
+/// A workspace written by a build of 097af5c (schema v7) with a label, a
+/// parent, a blocks and a duplicate relation, a comment and a doc. See
+/// tests/projects.rs for how it was built.
+pub const V7_FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/v7.sqlite");
+
 /// A database written by lcl 0.1.0. See tests/schema.rs for how it was built.
 pub const V0_FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/v0.sqlite");
 
@@ -203,6 +208,25 @@ impl Env {
     }
 }
 
+/// Every file under this env's HOME and cwd, with its bytes.
+pub fn files(env: &Env) -> BTreeMap<PathBuf, Vec<u8>> {
+    fn walk(dir: &Path, out: &mut BTreeMap<PathBuf, Vec<u8>>) {
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        for entry in entries {
+            let path = entry.expect("dir entry").path();
+            if path.is_dir() {
+                walk(&path, out);
+            } else {
+                out.insert(path.clone(), std::fs::read(&path).expect("read file"));
+            }
+        }
+    }
+    let mut out = BTreeMap::new();
+    walk(env.home.path(), &mut out);
+    walk(env.cwd.path(), &mut out);
+    out
+}
+
 /// Reads `PRAGMA user_version` directly, bypassing lcl.
 pub fn user_version(db: &Path) -> i64 {
     let conn = rusqlite::Connection::open(db).expect("open db");
@@ -319,6 +343,86 @@ pub fn undo_v7_schema(after: &mut Dump) {
     let ours = |name: &Value| matches!(name, Value::Text(n) if n.starts_with("issue_relations") || n.starts_with("sqlite_autoindex_issue_relations"));
     after.schema.retain(|r| !ours(&r["name"]));
     after.tables.remove("issue_relations");
+}
+
+/// Migration 8's SQL, as sqlite_master keeps it: (name, CREATE statement).
+/// Written out here, not taken from the migration, so that a change to
+/// either fails the upgrade tests.
+pub const V8_SCHEMA: [(&str, &str); 8] = [
+    ("projects", "CREATE TABLE projects (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'Backlog' CHECK (status IN ('Backlog', 'Planned', 'Started', 'Paused', 'Completed', 'Canceled')),
+    target_date TEXT,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+)"),
+    ("projects_name", "CREATE UNIQUE INDEX projects_name ON projects(name COLLATE NOCASE)"),
+    ("milestones", "CREATE TABLE milestones (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id),
+    name TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    target_date TEXT,
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    UNIQUE (project_id, name COLLATE NOCASE)
+)"),
+    ("issues_project", "CREATE INDEX issues_project ON issues(project_id)"),
+    ("issues_milestone", "CREATE INDEX issues_milestone ON issues(milestone_id)"),
+    ("issues_milestone_in_project_insert", "CREATE TRIGGER issues_milestone_in_project_insert BEFORE INSERT ON issues
+WHEN NEW.milestone_id IS NOT NULL AND (SELECT project_id FROM milestones WHERE id = NEW.milestone_id) IS NOT NEW.project_id
+BEGIN
+    SELECT RAISE(ABORT, 'milestone is not in the issue''s project');
+END"),
+    ("issues_milestone_in_project_update", "CREATE TRIGGER issues_milestone_in_project_update BEFORE UPDATE OF project_id, milestone_id ON issues
+WHEN NEW.milestone_id IS NOT NULL AND (SELECT project_id FROM milestones WHERE id = NEW.milestone_id) IS NOT NEW.project_id
+BEGIN
+    SELECT RAISE(ABORT, 'milestone is not in the issue''s project');
+END"),
+    ("milestones_stay_in_project", "CREATE TRIGGER milestones_stay_in_project BEFORE UPDATE OF project_id ON milestones
+WHEN NEW.project_id IS NOT OLD.project_id
+BEGIN
+    SELECT RAISE(ABORT, 'a milestone cannot move to another project');
+END"),
+];
+
+/// What migration 8's two ADD COLUMNs append to the issues table's CREATE
+/// statement, before its closing parenthesis.
+pub const V8_ISSUE_COLUMNS: &str = ", project_id TEXT REFERENCES projects(id), milestone_id TEXT REFERENCES milestones(id))";
+
+/// Undoes migration 8's schema changes on an upgraded dump, after checking
+/// them: the exact SQL of every table, index and trigger it adds (and the
+/// autoindexes behind their keys), both new tables empty, the two new issue
+/// columns null on every issue and appended to the issues CREATE statement,
+/// which gets its v7 text back.
+pub fn undo_v8_schema(after: &mut Dump) {
+    let t = |s: &str| Value::Text(s.into());
+    for (name, sql) in V8_SCHEMA {
+        let row = after.schema.iter().find(|r| r["name"] == t(name)).unwrap_or_else(|| panic!("{name} missing"));
+        assert_eq!(row["sql"], t(sql), "{name}");
+    }
+    for (name, table) in [("sqlite_autoindex_projects_1", "projects"), ("sqlite_autoindex_milestones_1", "milestones"), ("sqlite_autoindex_milestones_2", "milestones")] {
+        let row = after.schema.iter().find(|r| r["name"] == t(name)).unwrap_or_else(|| panic!("{name} missing"));
+        assert_eq!((&row["type"], &row["tbl_name"], &row["sql"]), (&t("index"), &t(table), &Value::Null), "{name}");
+    }
+    let ours = |name: &Value| {
+        matches!(name, Value::Text(n) if V8_SCHEMA.iter().any(|(v8, _)| v8 == n) || n.starts_with("sqlite_autoindex_projects") || n.starts_with("sqlite_autoindex_milestones"))
+    };
+    after.schema.retain(|r| !ours(&r["name"]));
+    for table in ["projects", "milestones"] {
+        assert_eq!(after.tables.remove(table).map(|rows| rows.len()), Some(0), "an upgrade adds no {table}");
+    }
+    for row in after.tables.get_mut("issues").expect("issues table") {
+        assert_eq!(row.remove("project_id"), Some(Value::Null), "{row:?}");
+        assert_eq!(row.remove("milestone_id"), Some(Value::Null), "{row:?}");
+    }
+    let issues = after.schema.iter_mut().find(|r| r["name"] == t("issues")).expect("issues");
+    let Value::Text(sql) = &issues["sql"] else { panic!("{issues:?}") };
+    let v7 = sql.strip_suffix(V8_ISSUE_COLUMNS).unwrap_or_else(|| panic!("the v8 columns aren't at the end of {sql}"));
+    issues.insert("sql".into(), Value::Text(format!("{v7})")));
 }
 
 /// The schema plus every row of every table, for before/after comparisons.

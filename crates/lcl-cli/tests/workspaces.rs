@@ -24,11 +24,10 @@
 
 mod common;
 
-use common::{argv, dump, user_version, Dump, Env, V0_INDEX_ALPHA_FIXTURE, V0_INDEX_FIXTURE, V7_INDEX_FIXTURE};
+use common::{argv, dump, files, user_version, Dump, Env, V0_INDEX_ALPHA_FIXTURE, V0_INDEX_FIXTURE, V7_INDEX_FIXTURE};
 use lcl_core::SCHEMA_VERSION;
 use rusqlite::types::Value as SqlValue;
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 /// When 0.1.0 made the v0-index fixture's two workspaces.
@@ -60,24 +59,6 @@ fn install(env: &Env, fixture: &str, rel: &str) -> PathBuf {
     dst
 }
 
-/// Every file under this env's HOME and cwd, with its bytes.
-fn files(env: &Env) -> BTreeMap<PathBuf, Vec<u8>> {
-    fn walk(dir: &Path, out: &mut BTreeMap<PathBuf, Vec<u8>>) {
-        let Ok(entries) = std::fs::read_dir(dir) else { return };
-        for entry in entries {
-            let path = entry.expect("dir entry").path();
-            if path.is_dir() {
-                walk(&path, out);
-            } else {
-                out.insert(path.clone(), std::fs::read(&path).expect("read file"));
-            }
-        }
-    }
-    let mut out = BTreeMap::new();
-    walk(env.home.path(), &mut out);
-    walk(env.cwd.path(), &mut out);
-    out
-}
 
 /// The registry's rows, (slug, name, path), read directly.
 fn registry_rows(env: &Env) -> Vec<(String, String, String)> {
@@ -214,10 +195,7 @@ fn old_forms_exit_2_with_a_hint_and_touch_nothing() {
         (vec!["project", "create", "foo", "--global"], sub.to_string()),
         (vec!["project", "create", "foo", "--key", "FOO"], sub.to_string()),
         (vec!["project", "create", "foo", "--global", "--key", "FOO"], sub.to_string()),
-        (vec!["project", "list"], sub.to_string()),
-        (vec!["--json", "project", "show"], sub.to_string()),
-        (vec!["project"], sub.to_string()),
-        (vec!["project", "--help"], sub.to_string()),
+        (vec!["--json", "project", "create", "foo", "--key"], sub.to_string()),
     ] {
         let out = env.lcl(&args);
         assert_eq!(out.code, 2, "{args:?}: {out:#?}");
@@ -225,15 +203,18 @@ fn old_forms_exit_2_with_a_hint_and_touch_nothing() {
         assert_eq!(out.stdout, "", "{args:?}");
         assert!(files(&env) == before, "{args:?} changed a file");
     }
-    // After the subcommand, --project isn't the old global flag; clap
-    // refuses it as unknown (step 10b may give a subcommand its own).
+    // After the subcommand, --project is that command's own: a project in
+    // the workspace. One named like a workspace gets the --workspace hint
+    // (tests/projects.rs has the rest).
     let out = env.lcl(&["issue", "list", "--project", "alpha"]);
-    assert_eq!(out.code, 2, "{out:#?}");
+    let hint = "Error: project \"alpha\" not found in this workspace; \"alpha\" is a workspace: the workspace flag is now --workspace (-w)\n";
+    assert_eq!((out.code, out.stdout.as_str(), out.stderr.as_str()), (1, "", hint), "{out:#?}");
     assert!(files(&env) == before);
 
     let help = env.lcl(&["--help"]).assert_ok().stdout.clone();
     assert!(help.contains("-w, --workspace <NAME>") && help.contains("[env: LCL_WORKSPACE=]"), "{help}");
-    assert!(!help.contains("--project") && !help.contains("  project "), "{help}");
+    assert!(!help.contains("--project"), "{help}");
+    assert!(help.lines().any(|l| l.trim_start().starts_with("project ") && l.contains("Projects in this workspace")), "{help}");
 }
 
 #[test]
