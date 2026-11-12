@@ -13,7 +13,7 @@
 /// adding a migration bumps it and the two can't drift apart.
 pub const SCHEMA_VERSION: i64 = MIGRATIONS.len() as i64;
 
-pub(crate) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6];
+pub(crate) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7];
 
 /// v0 -> v1: the lcl 0.1.0 schema, verbatim.
 ///
@@ -278,4 +278,30 @@ CREATE TRIGGER comments_au AFTER UPDATE ON comments BEGIN
     INSERT INTO comments_fts(rowid, body) VALUES (new.rowid, new.body);
 END;
 INSERT INTO comments_fts(comments_fts) VALUES ('rebuild');
+"#;
+
+/// v6 -> v7: relations between issues.
+///
+/// One row per relation, in one stored form:
+/// - `blocks`: issue_id blocks related_id (`A blocked-by B` is stored as
+///   `B blocks A`);
+/// - `duplicate`: issue_id is a duplicate of related_id;
+/// - `related`: symmetric, so the smaller id is stored first.
+///
+/// Deleting an issue removes its relations in both directions. The first
+/// index serves the reverse direction: what blocks an issue, and its
+/// duplicates. The second holds an issue to at most one duplicate-of target
+/// for every writer, `lcl issue relate` (which checks first and names the
+/// current target) and rows inserted directly alike.
+const V7: &str = r#"
+CREATE TABLE issue_relations (
+    issue_id TEXT NOT NULL REFERENCES issues(id) ON DELETE CASCADE,
+    related_id TEXT NOT NULL REFERENCES issues(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL CHECK (kind IN ('blocks', 'related', 'duplicate')),
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (issue_id, related_id, kind),
+    CHECK (issue_id <> related_id)
+);
+CREATE INDEX issue_relations_related ON issue_relations(related_id, kind);
+CREATE UNIQUE INDEX issue_relations_one_duplicate ON issue_relations(issue_id) WHERE kind = 'duplicate';
 "#;

@@ -267,6 +267,32 @@ pub fn undo_v6_schema(after: &mut Dump) {
     after.tables.retain(|name, _| !name.starts_with("comments_fts"));
 }
 
+/// Undoes migration 7's schema changes on an upgraded dump, after checking
+/// them: the issue_relations table (empty after an upgrade), its primary-key
+/// index, its reverse index, and the one-duplicate-target index.
+pub fn undo_v7_schema(after: &mut Dump) {
+    let t = |s: &str| Value::Text(s.into());
+    let table = after.schema.iter().find(|r| r["name"] == t("issue_relations")).expect("issue_relations");
+    let Value::Text(sql) = &table["sql"] else { panic!("{table:?}") };
+    for part in [
+        "issue_id TEXT NOT NULL REFERENCES issues(id) ON DELETE CASCADE",
+        "related_id TEXT NOT NULL REFERENCES issues(id) ON DELETE CASCADE",
+        "kind TEXT NOT NULL CHECK (kind IN ('blocks', 'related', 'duplicate'))",
+        "PRIMARY KEY (issue_id, related_id, kind)",
+        "CHECK (issue_id <> related_id)",
+    ] {
+        assert!(sql.contains(part), "{part} missing from {sql}");
+    }
+    let index = after.schema.iter().find(|r| r["name"] == t("issue_relations_related")).expect("issue_relations_related");
+    assert_eq!(index["sql"], t("CREATE INDEX issue_relations_related ON issue_relations(related_id, kind)"));
+    let one = after.schema.iter().find(|r| r["name"] == t("issue_relations_one_duplicate")).expect("issue_relations_one_duplicate");
+    assert_eq!(one["sql"], t("CREATE UNIQUE INDEX issue_relations_one_duplicate ON issue_relations(issue_id) WHERE kind = 'duplicate'"));
+    assert_eq!(after.tables.get("issue_relations").map(Vec::len), Some(0), "an upgrade adds no relations");
+    let ours = |name: &Value| matches!(name, Value::Text(n) if n.starts_with("issue_relations") || n.starts_with("sqlite_autoindex_issue_relations"));
+    after.schema.retain(|r| !ours(&r["name"]));
+    after.tables.remove("issue_relations");
+}
+
 /// The schema plus every row of every table, for before/after comparisons.
 #[derive(Debug, PartialEq)]
 pub struct Dump {

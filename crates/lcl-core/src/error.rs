@@ -40,6 +40,20 @@ pub enum LclError {
     LabelNotFound(String),
     #[error("doc {0} not found")]
     DocNotFound(String),
+    #[error("{0} can't be related to itself")]
+    SelfRelation(String),
+    /// `path` is the cycle the new row would close, as `A blocks B blocks A`.
+    #[error("{blocker} blocking {blocked} would make a cycle: {path}")]
+    BlocksCycle { blocker: String, blocked: String, path: String },
+    /// A second duplicate-of target. `current` is the one it has.
+    #[error("{issue} is already a duplicate of {current}; unrelate it first: lcl issue unrelate {issue} duplicate-of {current}")]
+    AlreadyDuplicate { issue: String, current: String },
+    /// `path` runs from the issue through each duplicate-of target back to it.
+    #[error("making {issue} a duplicate of {target} would make a cycle: {path}")]
+    DuplicateCycle { issue: String, target: String, path: String },
+    /// `unrelate` of a relation that isn't there, as typed.
+    #[error("there is no relation {0}")]
+    RelationNotFound(String),
     #[error("the search query is empty")]
     EmptyQuery,
     /// Every word lacks token characters (`--`, `*`, a lone `"`).
@@ -62,6 +76,10 @@ impl LclError {
                 | LclError::SelfParent(_)
                 | LclError::ParentCycle { .. }
                 | LclError::UnknownLabel(_)
+                | LclError::SelfRelation(_)
+                | LclError::BlocksCycle { .. }
+                | LclError::AlreadyDuplicate { .. }
+                | LclError::DuplicateCycle { .. }
                 | LclError::EmptyQuery
                 | LclError::NothingToSearch(_)
         )

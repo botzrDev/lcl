@@ -219,6 +219,79 @@ impl Issue {
     }
 }
 
+/// A relation as typed: `A <kind> B`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RelationKind {
+    /// A blocks B.
+    Blocks,
+    /// A is blocked by B: stored as B blocks A.
+    BlockedBy,
+    /// A and B are related; it goes both ways.
+    Related,
+    /// A is a duplicate of B. An issue is a duplicate of at most one issue.
+    DuplicateOf,
+}
+impl RelationKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RelationKind::Blocks => "blocks",
+            RelationKind::BlockedBy => "blocked-by",
+            RelationKind::Related => "related",
+            RelationKind::DuplicateOf => "duplicate-of",
+        }
+    }
+}
+/// Ignores case and drops spaces, '_' and '-', as status names do.
+impl FromStr for RelationKind {
+    type Err = InvalidValue;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let key: String = s.chars().filter(|c| !matches!(c, ' ' | '_' | '-')).collect::<String>().to_lowercase();
+        match key.as_str() {
+            "blocks" => Ok(RelationKind::Blocks),
+            "blockedby" => Ok(RelationKind::BlockedBy),
+            "related" => Ok(RelationKind::Related),
+            "duplicateof" => Ok(RelationKind::DuplicateOf),
+            _ => Err(InvalidValue(format!("invalid relation \"{s}\"; expected one of: blocks, blocked-by, related, duplicate-of"))),
+        }
+    }
+}
+
+/// One relation, as typed: `DREA-1 blocked-by DREA-2`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Relation {
+    pub issue: String,
+    pub kind: RelationKind,
+    pub related: String,
+}
+impl std::fmt::Display for Relation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} {} {}", self.issue, self.kind.as_str(), self.related)
+    }
+}
+
+/// The other end of a relation, as `issue show` lists it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RelatedIssue {
+    pub identifier: String,
+    pub title: String,
+    pub status: Status,
+}
+
+/// Every relation of one issue, seen from that issue. Lists are by number.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct Relations {
+    /// Issues this one blocks.
+    pub blocks: Vec<RelatedIssue>,
+    /// Issues that block this one.
+    pub blocked_by: Vec<RelatedIssue>,
+    pub related: Vec<RelatedIssue>,
+    /// The issue this one is a duplicate of.
+    pub duplicate_of: Option<RelatedIssue>,
+    /// Issues that are duplicates of this one.
+    pub duplicates: Vec<RelatedIssue>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Comment {
     pub id: String,

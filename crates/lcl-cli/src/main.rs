@@ -113,6 +113,10 @@ enum IssueCmd {
         #[arg(long, value_name = "LABEL", value_parser = parse_label_name)] label: Vec<String>,
         /// Only the direct sub-issues of this issue.
         #[arg(long, allow_negative_numbers = true)] parent: Option<IssueRef>,
+        /// Only issues with a blocker that isn't Done, Canceled or Duplicate.
+        #[arg(long, conflicts_with = "unblocked")] blocked: bool,
+        /// Only issues with no such blocker.
+        #[arg(long)] unblocked: bool,
         /// number, created or updated (each newest first), or priority (Urgent first, None last).
         #[arg(long, value_name = "ORDER", default_value = "number")] sort: IssueSort,
         /// Show at most N issues.
@@ -155,6 +159,28 @@ enum IssueCmd {
         #[arg(long)] no_parent: bool,
     },
     Delete { #[arg(allow_negative_numbers = true)] id: IssueRef },
+    /// Relate two issues: A blocks B, A blocked-by B, A related B, or A duplicate-of B.
+    ///
+    /// A blocked-by B is the same relation as B blocks A, and related goes
+    /// both ways; making a relation that exists, in either form, does nothing.
+    /// An issue is a duplicate of at most one issue, and duplicate-of sets its
+    /// status to Duplicate. A relation that would make a cycle of blocks, or
+    /// of duplicates, is refused.
+    Relate {
+        #[arg(allow_negative_numbers = true)] a: IssueRef,
+        /// blocks, blocked-by, related or duplicate-of.
+        kind: RelationKind,
+        #[arg(allow_negative_numbers = true)] b: IssueRef,
+    },
+    /// Remove a relation, given in either form (B blocks A removes A blocked-by B).
+    ///
+    /// Statuses stay as they are: unrelating duplicate-of leaves A Duplicate.
+    Unrelate {
+        #[arg(allow_negative_numbers = true)] a: IssueRef,
+        /// blocks, blocked-by, related or duplicate-of.
+        kind: RelationKind,
+        #[arg(allow_negative_numbers = true)] b: IssueRef,
+    },
     /// Add a comment: BODY inline, or --body-file PATH. Exactly one.
     #[command(group(ArgGroup::new("body_source").required(true).args(["body", "body_file"])))]
     Comment {
@@ -522,9 +548,10 @@ fn run(cli: Cli) -> Result<()> {
                     })?;
                     if cli.json { print_json(&issue); } else { println!("Created {}", issue.identifier); }
                 }
-                IssueCmd::List { status, assignee, label, parent, sort, limit, offset, all } => {
+                IssueCmd::List { status, assignee, label, parent, blocked, unblocked, sort, limit, offset, all } => {
                     let page = if all { Page::ALL } else { Page { limit: Some(limit), offset } };
-                    let list = store.list_issues(&IssueFilter { statuses: status, assignee, labels: label, parent }, sort, page)?;
+                    let blocked = if blocked { Some(true) } else if unblocked { Some(false) } else { None };
+                    let list = store.list_issues(&IssueFilter { statuses: status, assignee, labels: label, parent, blocked }, sort, page)?;
                     if cli.json { print_json(&list); }
                     else {
                         for i in &list.issues { println!("{}\t[{}]\t{}\t{}", i.identifier, i.status, i.priority.label(), i.title); }
@@ -538,15 +565,27 @@ fn run(cli: Cli) -> Result<()> {
                     let issue = store.resolve(&id)?;
                     let comments = store.list_comments(&issue.id)?;
                     let children = store.children(&issue.id)?;
+                    let relations = store.relations(&issue.id)?;
                     if cli.json {
                         let children: Vec<&str> = children.iter().map(|c| c.identifier.as_str()).collect();
-                        print_json(&serde_json::json!({"issue": issue, "comments": comments, "children": children}));
+                        print_json(&serde_json::json!({"issue": issue, "comments": comments, "children": children, "relations": relations}));
                     }
                     else {
                         println!("{} {}", issue.identifier, issue.title);
                         println!("Status: {}  Priority: {}  Assignee: {}", issue.status, issue.priority.label(), issue.assignee.as_deref().unwrap_or("Unassigned"));
                         if !issue.labels.is_empty() { println!("Labels: {}", issue.labels.join(", ")); }
                         if let Some(p) = &issue.parent_identifier { println!("Parent: {p}"); }
+                        let line = |name: &str, others: &[RelatedIssue]| {
+                            if !others.is_empty() {
+                                let others: Vec<String> = others.iter().map(|o| format!("{} [{}]", o.identifier, o.status)).collect();
+                                println!("{name}: {}", others.join(", "));
+                            }
+                        };
+                        line("Blocks", &relations.blocks);
+                        line("Blocked by", &relations.blocked_by);
+                        line("Related", &relations.related);
+                        line("Duplicate of", relations.duplicate_of.as_slice());
+                        line("Duplicates", &relations.duplicates);
                         if !issue.description.is_empty() { println!("\n{}", issue.description); }
                         if !children.is_empty() {
                             println!("\nSub-issues:");
@@ -595,6 +634,18 @@ fn run(cli: Cli) -> Result<()> {
                 IssueCmd::Delete { id } => {
                     let issue = store.delete_issue(&id)?;
                     if cli.json { print_json(&serde_json::json!({"deleted": issue.identifier, "id": issue.id})); } else { println!("Deleted {}", issue.identifier); }
+                }
+                IssueCmd::Relate { a, kind, b } => {
+                    let (relation, created) = store.relate(&a, kind, &b)?;
+                    if cli.json { print_json(&serde_json::json!({"issue": relation.issue, "kind": relation.kind, "related": relation.related, "created": created})); }
+                    else if !created { println!("Already related: {relation}"); }
+                    else if kind == RelationKind::DuplicateOf { println!("{relation}; {} is Duplicate", relation.issue); }
+                    else { println!("{relation}"); }
+                }
+                IssueCmd::Unrelate { a, kind, b } => {
+                    let relation = store.unrelate(&a, kind, &b)?;
+                    if cli.json { print_json(&serde_json::json!({"issue": relation.issue, "kind": relation.kind, "related": relation.related, "removed": true})); }
+                    else { println!("Removed: {relation}"); }
                 }
                 IssueCmd::Comment { id, body, body_file, author } => {
                     let Some(body) = body.or(body_file) else { unreachable!("clap requires BODY or --body-file") };

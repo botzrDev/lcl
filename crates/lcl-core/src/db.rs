@@ -6,7 +6,7 @@ use rusqlite::functions::FunctionFlags;
 use rusqlite::types::{Value, ValueRef};
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension, ToSql, Transaction, TransactionBehavior};
 use serde::Serialize;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::str::FromStr;
 use std::time::Duration;
@@ -38,6 +38,10 @@ pub struct IssueFilter {
     pub labels: Vec<String>,
     /// Only the direct sub-issues of this issue.
     pub parent: Option<IssueRef>,
+    /// `Some(true)`: only blocked issues, those with at least one blocker
+    /// that isn't Done, Canceled or Duplicate. `Some(false)`: only issues
+    /// with no such blocker.
+    pub blocked: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -292,6 +296,13 @@ impl Store {
                 conds.push("i.parent_id = ?".into());
                 args.push(Value::Text(resolve_issue(conn, parent)?.id));
             }
+            if let Some(blocked) = filter.blocked {
+                // A blocker whose status can't be read isn't known to be
+                // resolved, so it still blocks.
+                let open_blocker = "EXISTS (SELECT 1 FROM issue_relations r JOIN issues b ON b.id = r.issue_id
+                    WHERE r.related_id = i.id AND r.kind = 'blocks' AND coalesce(lcl_status(b.status), '') NOT IN ('Done', 'Canceled', 'Duplicate'))";
+                conds.push(if blocked { open_blocker.to_string() } else { format!("NOT {open_blocker}") });
+            }
             let where_sql = if conds.is_empty() { String::new() } else { format!(" WHERE {}", conds.join(" AND ")) };
 
             let total: i64 = conn.query_row(&format!("SELECT count(*) FROM issues i{where_sql}"), params_from_iter(&args), |r| r.get(0))?;
@@ -354,6 +365,89 @@ impl Store {
             tx.execute("DELETE FROM issue_cycles WHERE issue_id=?1", params![issue.id])?;
             tx.execute("DELETE FROM issues WHERE id=?1", params![issue.id])?;
             Ok(issue)
+        })
+    }
+
+    // ----- relations -----
+    /// Records `a <kind> b` in its stored form (see migration V7). Returns the
+    /// relation as typed, and false when it was already there (a no-op).
+    /// Refused, inside the transaction: relating an issue to itself, a
+    /// `blocks` row that would close a cycle, a second duplicate-of target,
+    /// and a duplicate-of cycle. duplicate-of also sets `a`'s status to
+    /// Duplicate, with the lifecycle that goes with it.
+    pub fn relate(&mut self, a: &IssueRef, kind: RelationKind, b: &IssueRef) -> Result<(Relation, bool)> {
+        self.write(|tx| {
+            let key = read_key(tx)?;
+            let edge = resolve_edge(tx, a, kind, b)?;
+            if edge_exists(tx, &edge)? {
+                return Ok((edge.typed, false));
+            }
+            check_edge(tx, &key, &edge)?;
+            tx.execute(
+                "INSERT INTO issue_relations(issue_id, related_id, kind, created_at) VALUES (?1, ?2, ?3, ?4)",
+                params![edge.from.id, edge.to.id, edge.stored, crate::models::now()],
+            )?;
+            if edge.stored == "duplicate" && edge.from.status != Status::Duplicate {
+                let mut dup = edge.from.clone();
+                let from = dup.status;
+                dup.status = Status::Duplicate;
+                dup.updated_at = crate::models::now();
+                dup.apply_lifecycle(Some(from), dup.updated_at);
+                tx.execute(
+                    "UPDATE issues SET status=?1, updated_at=?2, completed_at=?3, started_at=?4, canceled_at=?5 WHERE id=?6",
+                    params![dup.status.as_str(), dup.updated_at, dup.completed_at, dup.started_at, dup.canceled_at, dup.id],
+                )?;
+            }
+            Ok((edge.typed, true))
+        })
+    }
+    /// Removes `a <kind> b`, given as it was made or in its other form
+    /// (`b blocks a` for `a blocked-by b`). Statuses are left alone. A
+    /// relation that isn't there is an error.
+    pub fn unrelate(&mut self, a: &IssueRef, kind: RelationKind, b: &IssueRef) -> Result<Relation> {
+        self.write(|tx| {
+            let edge = resolve_edge(tx, a, kind, b)?;
+            let removed = tx.execute(
+                "DELETE FROM issue_relations WHERE issue_id=?1 AND related_id=?2 AND kind=?3",
+                params![edge.from.id, edge.to.id, edge.stored],
+            )?;
+            if removed == 0 {
+                return Err(LclError::RelationNotFound(edge.typed.to_string()));
+            }
+            Ok(edge.typed)
+        })
+    }
+    /// Every relation of the issue with UUID `issue_id`, seen from it.
+    pub fn relations(&self, issue_id: &str) -> Result<Relations> {
+        self.read(|conn| {
+            let key = read_key(conn)?;
+            let mut stmt = conn.prepare(
+                "SELECT x.side, i.number, i.title, i.status FROM (
+                    SELECT 'blocks' AS side, related_id AS other FROM issue_relations WHERE issue_id = ?1 AND kind = 'blocks'
+                    UNION ALL SELECT 'blocked_by', issue_id FROM issue_relations WHERE related_id = ?1 AND kind = 'blocks'
+                    UNION ALL SELECT 'related', related_id FROM issue_relations WHERE issue_id = ?1 AND kind = 'related'
+                    UNION ALL SELECT 'related', issue_id FROM issue_relations WHERE related_id = ?1 AND kind = 'related'
+                    UNION ALL SELECT 'duplicate_of', related_id FROM issue_relations WHERE issue_id = ?1 AND kind = 'duplicate'
+                    UNION ALL SELECT 'duplicates', issue_id FROM issue_relations WHERE related_id = ?1 AND kind = 'duplicate'
+                ) x JOIN issues i ON i.id = x.other ORDER BY i.number",
+            )?;
+            let rows = stmt.query_map(params![issue_id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?)))?;
+            let mut out = Relations::default();
+            for row in rows {
+                let (side, number, title, status) = row?;
+                let status = Status::parse(&status).ok_or(LclError::UnknownStatus { number, value: status })?;
+                let other = RelatedIssue { identifier: identifier(&key, number), title, status };
+                match side.as_str() {
+                    "blocks" => out.blocks.push(other),
+                    "blocked_by" => out.blocked_by.push(other),
+                    "related" => out.related.push(other),
+                    "duplicate_of" => {
+                        out.duplicate_of.get_or_insert(other);
+                    }
+                    _ => out.duplicates.push(other),
+                }
+            }
+            Ok(out)
         })
     }
 
@@ -630,6 +724,122 @@ fn check_parent(conn: &Connection, key: &str, child: Option<&Issue>, parent_id: 
         next = above;
     }
     Ok(())
+}
+
+/// A relation as typed, resolved, and in its stored form: `from <stored> to`.
+struct Edge {
+    typed: Relation,
+    from: Issue,
+    to: Issue,
+    stored: &'static str,
+}
+
+/// Resolves both issues and works out the stored row. Relating an issue to
+/// itself is refused here, for unrelate too: no such row can exist.
+fn resolve_edge(conn: &Connection, a: &IssueRef, kind: RelationKind, b: &IssueRef) -> Result<Edge> {
+    let a = resolve_issue(conn, a)?;
+    let b = resolve_issue(conn, b)?;
+    if a.id == b.id {
+        return Err(LclError::SelfRelation(a.identifier));
+    }
+    let typed = Relation { issue: a.identifier.clone(), kind, related: b.identifier.clone() };
+    let (from, to, stored) = match kind {
+        RelationKind::Blocks => (a, b, "blocks"),
+        RelationKind::BlockedBy => (b, a, "blocks"),
+        // Symmetric: the smaller id first, so either order is the same row.
+        RelationKind::Related if a.id < b.id => (a, b, "related"),
+        RelationKind::Related => (b, a, "related"),
+        RelationKind::DuplicateOf => (a, b, "duplicate"),
+    };
+    Ok(Edge { typed, from, to, stored })
+}
+
+fn edge_exists(conn: &Connection, e: &Edge) -> Result<bool> {
+    Ok(conn
+        .query_row("SELECT 1 FROM issue_relations WHERE issue_id=?1 AND related_id=?2 AND kind=?3", params![e.from.id, e.to.id, e.stored], |_| Ok(()))
+        .optional()?
+        .is_some())
+}
+
+/// Refuses a new row that would close a `blocks` cycle (of any length), a
+/// second duplicate-of target, or a duplicate-of cycle. Must run inside the
+/// write transaction that inserts the row, so two opposite relates can't
+/// both pass it.
+fn check_edge(conn: &Connection, key: &str, e: &Edge) -> Result<()> {
+    match e.stored {
+        "blocks" => {
+            // from -> to closes a cycle if `to` already reaches `from`.
+            if let Some(path) = blocks_path(conn, &e.to, &e.from.id)? {
+                let names: Vec<String> = std::iter::once(e.from.number).chain(path).map(|n| identifier(key, n)).collect();
+                return Err(LclError::BlocksCycle { blocker: e.from.identifier.clone(), blocked: e.to.identifier.clone(), path: names.join(" blocks ") });
+            }
+        }
+        "duplicate" => {
+            let target = |id: &str| -> Result<Option<(String, i64)>> {
+                Ok(conn
+                    .query_row(
+                        "SELECT r.related_id, i.number FROM issue_relations r JOIN issues i ON i.id = r.related_id WHERE r.issue_id = ?1 AND r.kind = 'duplicate' ORDER BY i.number LIMIT 1",
+                        params![id],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )
+                    .optional()?)
+            };
+            if let Some((_, current)) = target(&e.from.id)? {
+                return Err(LclError::AlreadyDuplicate { issue: e.from.identifier.clone(), current: identifier(key, current) });
+            }
+            // Each issue has at most one target, so the chain from `to` is a
+            // line; reaching `from` closes a cycle.
+            let mut path = vec![e.from.number, e.to.number];
+            let mut seen = HashSet::from([e.to.id.clone()]);
+            let mut next = target(&e.to.id)?;
+            while let Some((id, number)) = next {
+                path.push(number);
+                if id == e.from.id {
+                    let path: Vec<String> = path.into_iter().map(|n| identifier(key, n)).collect();
+                    return Err(LclError::DuplicateCycle { issue: e.from.identifier.clone(), target: e.to.identifier.clone(), path: path.join(" -> ") });
+                }
+                // A loop that doesn't pass through `from` (only a hand edit
+                // could make one) ends the walk.
+                if !seen.insert(id.clone()) {
+                    break;
+                }
+                next = target(&id)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// The shortest chain of `blocks` rows from `start` to the issue `goal`, as
+/// issue numbers from start to goal, or None if `start` doesn't reach it.
+fn blocks_path(conn: &Connection, start: &Issue, goal: &str) -> Result<Option<Vec<i64>>> {
+    let mut stmt = conn.prepare("SELECT r.related_id, i.number FROM issue_relations r JOIN issues i ON i.id = r.related_id WHERE r.issue_id = ?1 AND r.kind = 'blocks'")?;
+    // Each issue reached, with the issue it was reached from and its number.
+    let mut came_from: HashMap<String, (Option<String>, i64)> = HashMap::from([(start.id.clone(), (None, start.number))]);
+    let mut queue = VecDeque::from([start.id.clone()]);
+    while let Some(id) = queue.pop_front() {
+        let blocked = stmt.query_map(params![id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?.collect::<std::result::Result<Vec<_>, _>>()?;
+        for (next, number) in blocked {
+            if came_from.contains_key(&next) {
+                continue;
+            }
+            came_from.insert(next.clone(), (Some(id.clone()), number));
+            if next == goal {
+                let mut path = vec![];
+                let mut at = Some(next);
+                while let Some(id) = at {
+                    let (prev, number) = came_from[&id].clone();
+                    path.push(number);
+                    at = prev;
+                }
+                path.reverse();
+                return Ok(Some(path));
+            }
+            queue.push_back(next);
+        }
+    }
+    Ok(None)
 }
 
 /// The issue as just written, read back inside the same transaction so the
