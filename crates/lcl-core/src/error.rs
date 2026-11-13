@@ -160,33 +160,112 @@ pub enum LclError {
 }
 pub type Result<T> = std::result::Result<T, LclError>;
 
+/// What kind of error it is, for a program reading `--json` errors. Every
+/// usage error (exit 2) is `Usage`; the rest exit 1.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErrorKind {
+    /// The command line is wrong, whatever is stored: exit 2.
+    Usage,
+    /// Something named isn't there.
+    NotFound,
+    /// The request conflicts with what is stored.
+    Conflict,
+    /// A file from a newer lcl, or values this lcl doesn't know.
+    Schema,
+    Io,
+    Other,
+}
+
+impl ErrorKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ErrorKind::Usage => "usage",
+            ErrorKind::NotFound => "not_found",
+            ErrorKind::Conflict => "conflict",
+            ErrorKind::Schema => "schema",
+            ErrorKind::Io => "io",
+            ErrorKind::Other => "other",
+        }
+    }
+}
+
 impl LclError {
-    /// The request itself is wrong, whatever the data: an issue from another
-    /// workspace, or a parent link that can never be valid. A CLI reports
-    /// these as usage errors (exit 2). Everything else is about the state of
-    /// the data or the system.
-    pub fn is_usage(&self) -> bool {
-        matches!(
-            self,
+    /// Its kind. The match has no catch-all, so a new variant must be given
+    /// one. A usage error (exit 2) is one the command can't escape in any
+    /// state of the open workspace. One that other stored data would avoid
+    /// (what a reference resolves to; the labels, milestones, relations or
+    /// parents there) exits 1, even when what was typed looks the same.
+    pub fn kind(&self) -> ErrorKind {
+        use ErrorKind::*;
+        match self {
+            LclError::Db(e) => db_kind(e),
+            LclError::NoHome | LclError::Msg(_) => Other,
+            LclError::Io(_) => Io,
+            LclError::SchemaTooNew { .. } | LclError::UnknownStatus { .. } | LclError::UnknownPriority { .. } | LclError::RegistryTooNew { .. } => Schema,
+            LclError::NotFound(_)
+            | LclError::IssueNotFound(_)
+            | LclError::LabelNotFound(_)
+            | LclError::DocNotFound(_)
+            | LclError::RelationNotFound(_)
+            | LclError::WorkspaceNotFound { .. }
+            | LclError::NoWorkspace
+            | LclError::ProjectNotFound { .. }
+            | LclError::MilestoneNotFound { .. }
+            | LclError::UnknownLabel(_) => NotFound,
+            LclError::RefTaken { .. }
+            | LclError::SelfParent(_)
+            | LclError::ParentCycle { .. }
+            | LclError::HasChildren { .. }
+            | LclError::LabelExists { .. }
+            | LclError::DocSelfParent(_)
+            | LclError::DocParentCycle { .. }
+            | LclError::ImportNotEmpty { .. }
+            | LclError::ImportKeyMismatch { .. }
+            | LclError::ExportBlocked { .. }
+            | LclError::OutputExists(_)
+            | LclError::SelfRelation(_)
+            | LclError::BlocksCycle { .. }
+            | LclError::AlreadyDuplicate { .. }
+            | LclError::DuplicateCycle { .. }
+            | LclError::WorkspaceExists(_)
+            | LclError::SlugTaken { .. }
+            | LclError::WorkspaceFileExists(_)
+            | LclError::InitMismatch { .. }
+            | LclError::NameTaken { .. }
+            | LclError::AlreadyRegistered { .. }
+            | LclError::ProjectExists { .. }
+            | LclError::ProjectInUse { .. }
+            | LclError::MilestoneExists { .. }
+            | LclError::MilestoneInUse { .. }
+            | LclError::MilestoneElsewhere { .. }
+            | LclError::MilestoneAmbiguous { .. }
+            | LclError::MilestoneWithoutProject(_) => Conflict,
             LclError::WrongWorkspace { .. }
-                | LclError::ImportLine { .. }
-                | LclError::RefLooksOwn(_)
-                | LclError::SelfParent(_)
-                | LclError::ParentCycle { .. }
-                | LclError::UnknownLabel(_)
-                | LclError::SelfRelation(_)
-                | LclError::BlocksCycle { .. }
-                | LclError::AlreadyDuplicate { .. }
-                | LclError::DuplicateCycle { .. }
-                | LclError::NoSlug(_)
-                | LclError::InitNeedsName
-                | LclError::MilestoneElsewhere { .. }
-                | LclError::MilestoneAmbiguous { .. }
-                | LclError::MilestoneWithoutProject(_)
-                | LclError::MilestoneInNoProject(_)
-                | LclError::EmptyQuery
-                | LclError::NothingToSearch(_)
-        )
+            | LclError::RefLooksOwn(_)
+            | LclError::ImportLine { .. }
+            | LclError::InitNeedsName
+            | LclError::NoSlug(_)
+            | LclError::MilestoneInNoProject(_)
+            | LclError::EmptyQuery
+            | LclError::NothingToSearch(_) => Usage,
+        }
+    }
+
+    /// The request itself is wrong, whatever the data: a CLI reports these
+    /// as usage errors (exit 2). Everything else is about the state of the
+    /// data or the system.
+    pub fn is_usage(&self) -> bool {
+        self.kind() == ErrorKind::Usage
+    }
+}
+
+/// A SQLite error about the file or the disk (it can't be opened, read,
+/// written, or grown) is io; any other is other.
+fn db_kind(e: &rusqlite::Error) -> ErrorKind {
+    use rusqlite::ErrorCode::{CannotOpen, DiskFull, ReadOnly, SystemIoFailure};
+    match e.sqlite_error_code() {
+        Some(CannotOpen | SystemIoFailure | DiskFull | ReadOnly) => ErrorKind::Io,
+        _ => ErrorKind::Other,
     }
 }
 

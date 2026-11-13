@@ -152,9 +152,10 @@ fn unrelate_in_either_form() {
     assert_eq!(dump(&db), before);
 }
 
-/// Each refusal exits 2 and leaves the database as it was.
+/// Each refusal depends on what is stored (what the references resolve to,
+/// the relations there): it exits 1 and leaves the database as it was.
 #[test]
-fn refusals_exit_2_and_change_nothing() {
+fn refusals_exit_1_and_change_nothing() {
     let env = workspace(9);
     relate(&env, 1, "blocks", 2).assert_ok();
     relate(&env, 2, "blocks", 3).assert_ok();
@@ -178,12 +179,12 @@ fn refusals_exit_2_and_change_nothing() {
         let mut cmd = vec!["issue", "relate"];
         cmd.extend(&args);
         let out = env.lcl(&cmd);
-        assert_eq!(out.code, 2, "{args:?}: {out:#?}");
+        assert_eq!(out.code, 1, "{args:?}: {out:#?}");
         assert!(out.stderr.contains(message), "{args:?}: {out:#?}");
         assert_eq!(dump(&db), before, "{args:?} changed the database");
     }
     let out = env.lcl(&["issue", "unrelate", "3", "related", "3"]);
-    assert_eq!(out.code, 2, "{out:#?}");
+    assert_eq!(out.code, 1, "{out:#?}");
     assert_eq!(dump(&db), before);
     // A blocks chain that doesn't close a loop is fine: 1 blocks 3.
     relate(&env, 1, "blocks", 3).assert_ok();
@@ -327,8 +328,8 @@ fn racing_opposite_blocks_store_one() {
         let (one, two) = (&outs[2 * p], &outs[2 * p + 1]);
         let mut codes = [one.code, two.code];
         codes.sort_unstable();
-        assert_eq!(codes, [0, 2], "pair {p}: {one:#?} {two:#?}");
-        let refused = if one.code == 2 { one } else { two };
+        assert_eq!(codes, [0, 1], "pair {p}: {one:#?} {two:#?}");
+        let refused = if one.code == 1 { one } else { two };
         assert!(refused.stderr.contains("would make a cycle"), "pair {p}: {refused:#?}");
     }
     let stored = rows(&env);

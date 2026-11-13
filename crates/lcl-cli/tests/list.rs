@@ -204,7 +204,7 @@ fn labels_and() {
     assert_eq!(numbers(&page), a[..100]);
 
     let out = env.lcl(&["issue", "list", "--label", "a", "--label", "nope"]);
-    assert_eq!(out.code, 2, "{out:#?}");
+    assert_eq!(out.code, 1, "{out:#?}");
     assert!(out.stderr.contains("unknown label \"nope\""), "{out:#?}");
 }
 

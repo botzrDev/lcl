@@ -22,7 +22,7 @@
 
 mod common;
 
-use common::{argv, dump, exec, files, foreign_key_violations, fts_integrity, undo_v8_schema, undo_v10_schema, undo_v9_schema, user_version, Env, Out, FTS_TABLES, V0_INDEX_FIXTURE, V7_FIXTURE};
+use common::{argv, dump, error_text, exec, files, foreign_key_violations, fts_integrity, undo_v8_schema, undo_v10_schema, undo_v9_schema, user_version, Env, Out, FTS_TABLES, V0_INDEX_FIXTURE, V7_FIXTURE};
 use rusqlite::Connection;
 use serde_json::{json, Value};
 use std::path::Path;
@@ -240,7 +240,7 @@ fn milestones_are_unique_in_their_project_and_stay_there() {
 
     // A name two projects have needs --project; an id never does.
     let out = env.lcl(&["milestone", "show", "1.3.1 patch"]);
-    assert_eq!(trio(&out), (2, "", "Error: milestone \"1.3.1 patch\" is in projects \"dreamd-eng\" and \"dreamd-hardening\"; pass --project to choose\n"));
+    assert_eq!(trio(&out), (1, "", "Error: milestone \"1.3.1 patch\" is in projects \"dreamd-eng\" and \"dreamd-hardening\"; pass --project to choose\n"));
     let shown = env.lcl(&["milestone", "show", "1.3.1 Patch", "--project", "dreamd-hardening", "--json"]).assert_ok().json();
     assert_eq!(keys(&shown), ["created_at", "description", "id", "issues", "name", "project", "sort_order", "target_date", "updated_at"]);
     assert_eq!((&shown["id"], &shown["issues"]), (&json!(mid), &no_issues()));
@@ -320,7 +320,7 @@ fn deletes_are_refused_while_anything_is_in_them() {
     ] {
         let before = dump(&db);
         let out = env.lcl(&args);
-        assert_eq!(trio(&out), (1, "", format!("Error: {refusal}\n").as_str()), "{args:?}");
+        assert_eq!(trio(&out), (1, "", error_text(&args, "conflict", refusal).as_str()), "{args:?}");
         assert!(dump(&db) == before, "{args:?} changed the database");
     }
 
@@ -365,19 +365,20 @@ fn an_issues_milestone_is_always_in_its_project() {
     let listed = env.lcl(&["issue", "list", "--json"]).assert_ok().json();
     assert_eq!((&listed["issues"][0]["project"], &listed["issues"][0]["milestone"]), (&json!("dreamd-hardening"), &json!("1.3.1 patch")));
 
-    // A milestone must be in the issue's project, and there must be one.
-    let needs = "Error: milestone \"eng-m\" needs a project: the issue has none; pass --project too\n";
+    // A milestone must be in the issue's project, and there must be one: a
+    // new issue's milestone needs --project (exit 2).
+    let needs = "error: the following required arguments were not provided:\n  --project <PROJECT>\n\nUsage: lcl issue create --title <TITLE> --project <PROJECT> --milestone <MILESTONE>\n\nFor more information, try '--help'.\n";
     let elsewhere = |p: &str| format!("Error: milestone \"eng-m\" is not in project \"{p}\" (it is in project \"dreamd-eng\")\n");
     for (args, want) in [
         (vec!["issue", "create", "--title", "y", "--milestone", "eng-m"], (2, needs.to_string())),
-        (vec!["issue", "create", "--title", "y", "--project", "dreamd-hardening", "--milestone", "eng-m"], (2, elsewhere("dreamd-hardening"))),
+        (vec!["issue", "create", "--title", "y", "--project", "dreamd-hardening", "--milestone", "eng-m"], (1, elsewhere("dreamd-hardening"))),
         (
             vec!["issue", "create", "--title", "y", "--project", "dreamd-hardening", "--milestone", "x"],
-            (2, "Error: milestone \"x\" is not in project \"dreamd-hardening\" (it is in projects \"dreamd-eng\" and \"other\")\n".to_string()),
+            (1, "Error: milestone \"x\" is not in project \"dreamd-hardening\" (it is in projects \"dreamd-eng\" and \"other\")\n".to_string()),
         ),
         (vec!["issue", "create", "--title", "y", "--project", "dreamd-hardening", "--milestone", "nowhere"], (1, "Error: milestone \"nowhere\" not found in project \"dreamd-hardening\"\n".to_string())),
-        (vec!["issue", "update", "1", "--milestone", "eng-m"], (2, elsewhere("dreamd-hardening"))),
-        (vec!["issue", "update", "1", "--project", "other", "--milestone", "eng-m"], (2, elsewhere("other"))),
+        (vec!["issue", "update", "1", "--milestone", "eng-m"], (1, elsewhere("dreamd-hardening"))),
+        (vec!["issue", "update", "1", "--project", "other", "--milestone", "eng-m"], (1, elsewhere("other"))),
         (vec!["issue", "update", "1", "--milestone", "nowhere"], (1, "Error: milestone \"nowhere\" not found in project \"dreamd-hardening\"\n".to_string())),
     ] {
         let before = dump(&db);
@@ -415,8 +416,10 @@ fn an_issues_milestone_is_always_in_its_project() {
     // --no-project clears both, with the note.
     assert_eq!(trio(&env.lcl(&["issue", "update", "1", "--no-project"])), (0, updated, note("eng-m", "dreamd-eng").as_str()));
     assert_eq!(place(&env, 1), (Value::Null, Value::Null));
+    // An issue in no project can't take a milestone alone: with a project
+    // stored it could, so this exits 1.
     let out = env.lcl(&["issue", "update", "1", "--milestone", "eng-m"]);
-    assert_eq!(trio(&out), (2, "", needs));
+    assert_eq!(trio(&out), (1, "", "Error: milestone \"eng-m\" needs a project: the issue has none; pass --project too\n"));
     // A move that also drops the milestone has nothing to report.
     env.lcl(&["issue", "update", "1", "--project", "dreamd-eng", "--milestone", "eng-m"]).assert_ok();
     assert_eq!(trio(&env.lcl(&["issue", "update", "1", "--project", "other", "--no-milestone"])), (0, updated, ""));
@@ -559,7 +562,7 @@ fn issue_list_filters_by_project_and_milestone_before_the_limit() {
     // Once two projects have an M, it needs --project.
     milestone(&env, "M", "none");
     let out = env.lcl(&["issue", "list", "--milestone", "m"]);
-    assert_eq!(trio(&out), (2, "", "Error: milestone \"m\" is in projects \"none\" and \"P\"; pass --project to choose\n"));
+    assert_eq!(trio(&out), (1, "", "Error: milestone \"m\" is in projects \"none\" and \"P\"; pass --project to choose\n"));
     assert_eq!(numbers(&list(&["--project", "P", "--milestone", "M", "--status", "Done", "--all"])), done_in_m);
     assert_eq!(list(&["--project", none.as_str(), "--milestone", "M"])["total"], 0);
 }
@@ -625,7 +628,9 @@ fn a_workspace_name_given_to_project_gets_the_workspace_hint() {
     env.lcl(&["issue", "create", "--title", "mine"]).assert_ok();
     let before = files(&env);
 
-    let hint = |name: &str| format!("Error: project \"{name}\" not found in this workspace; \"{name}\" is a workspace: the workspace flag is now --workspace (-w)\n");
+    let hint = |args: &[&str], name: &str| {
+        error_text(args, "not_found", &format!("project \"{name}\" not found in this workspace; \"{name}\" is a workspace: the workspace flag is now --workspace (-w)"))
+    };
     for (args, name) in [
         (vec!["issue", "create", "--title", "t", "--project", "alpha"], "alpha"),
         (vec!["--json", "issue", "create", "--title", "t", "--project", "ALPHA", "--milestone", "m"], "ALPHA"),
@@ -638,7 +643,7 @@ fn a_workspace_name_given_to_project_gets_the_workspace_hint() {
         (vec!["milestone", "update", "m", "--project", "alpha", "--sort-order", "1"], "alpha"),
         (vec!["milestone", "delete", "m", "--project", "alpha"], "alpha"),
     ] {
-        assert_eq!(trio(&env.lcl(&args)), (1, "", hint(name).as_str()), "{args:?}");
+        assert_eq!(trio(&env.lcl(&args)), (1, "", hint(&args, name).as_str()), "{args:?}");
         assert!(files(&env) == before, "{args:?} changed a file");
     }
     // Neither workspace gained an issue.

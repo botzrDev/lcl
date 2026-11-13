@@ -1,6 +1,6 @@
 //! Parents. `--parent` takes any issue id and is stored as the parent's UUID.
-//! The issues must stay a tree: a missing parent exits 1, and the issue
-//! itself or anything below it exits 2. Also `--no-parent`, `list --parent`,
+//! The issues must stay a tree: a missing parent, the issue itself, or
+//! anything below it exits 1 (each depends on what is stored). Also `--no-parent`, `list --parent`,
 //! sub-issues in `show`, `delete` refusing an issue that has sub-issues, and
 //! migration 4's repair of the parent values 0.1.0 stored as typed.
 //!
@@ -122,7 +122,7 @@ fn an_issue_cannot_be_its_own_parent() {
     let before = dump(&db);
     for form in ["DREA-1", "1", "#1", u1.as_str()] {
         let out = env.lcl(&["issue", "update", "1", "--parent", form]);
-        assert_eq!(out.code, 2, "{form}: {out:#?}");
+        assert_eq!(out.code, 1, "{form}: {out:#?}");
         assert!(out.stderr.contains("DREA-1 can't be its own parent"), "{form}: {out:#?}");
     }
     assert_eq!(dump(&db), before);
@@ -143,7 +143,7 @@ fn a_parent_cycle_is_refused() {
         ("2", "DREA-3", "DREA-2 -> DREA-3 -> DREA-2"),
     ] {
         let out = env.lcl(&["issue", "update", issue, "--parent", parent]);
-        assert_eq!(out.code, 2, "{issue} under {parent}: {out:#?}");
+        assert_eq!(out.code, 1, "{issue} under {parent}: {out:#?}");
         let want = format!("making {parent} the parent of DREA-{issue} would make a cycle: {path}");
         assert!(out.stderr.contains(&want), "{issue} under {parent}: {out:#?}");
     }

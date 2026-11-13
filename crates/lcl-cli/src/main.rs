@@ -3,7 +3,7 @@ use chrono::NaiveDate;
 use clap::parser::ValueSource;
 use clap::{ArgGroup, CommandFactory, FromArgMatches, Parser, Subcommand};
 use lcl_core::db::{AssigneeFilter, Change, IssueFilter, IssueSort, MilestoneUpdate, Page, Placement, ProjectFilter, ProjectUpdate, Store};
-use lcl_core::error::LclError;
+use lcl_core::error::{ErrorKind, LclError};
 use lcl_core::models::*;
 use lcl_core::parse;
 use lcl_core::registry::{self, Registry, WorkspaceKey};
@@ -13,8 +13,21 @@ use std::time::Duration;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+/// `println!` that returns the error when stdout fails (`?`), as
+/// StdoutClosed when its reader went away, instead of panicking.
+macro_rules! outln {
+    ($($arg:tt)*) => {
+        writeln!(std::io::stdout(), $($arg)*).map_err(|e| stdout_failed(e, "can't write to stdout"))?
+    };
+}
+
 #[derive(Parser)]
-#[command(name = "lcl", version, about = "Local Linear-like tracker (one SQLite database per workspace)")]
+#[command(
+    name = "lcl",
+    version,
+    about = "Local Linear-like tracker (one SQLite database per workspace)",
+    after_help = "Exit status: 0 success; 1 the command failed (not found, a conflict with what is stored, a newer schema, an I/O error); 2 the command line is wrong (a bad flag, value or combination).\nWith --json, an error is one line on stderr: {\"error\":{\"kind\":\"usage|not_found|conflict|schema|io|other\",\"message\":\"...\"}}"
+)]
 struct Cli {
     /// Print JSON instead of text.
     #[arg(long, global = true)]
@@ -62,18 +75,22 @@ enum Commands {
         #[command(subcommand)]
         cmd: MilestoneCmd,
     },
+    /// Issues in this workspace: create, list, show, update, delete, relate, comment.
     Issue {
         #[command(subcommand)]
         cmd: IssueCmd,
     },
+    /// Docs in this workspace: create, list, show, update, delete.
     Doc {
         #[command(subcommand)]
         cmd: DocCmd,
     },
+    /// Labels in this workspace: create, list, delete.
     Label {
         #[command(subcommand)]
         cmd: LabelCmd,
     },
+    /// Cycles in this workspace: create, list.
     Cycle {
         #[command(subcommand)]
         cmd: CycleCmd,
@@ -138,6 +155,7 @@ enum Commands {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Open this workspace in a terminal UI.
     Tui,
 }
 
@@ -207,6 +225,7 @@ enum WorkspaceCmd {
     /// same slug can't both exist. For a workspace in the current directory,
     /// use lcl init.
     Create {
+        /// Its name, trimmed: with a letter or digit, and a slug no other workspace has.
         #[arg(value_parser = parse_workspace_name)] name: String,
         /// The prefix of its issue identifiers, as DRM in DRM-12: a letter,
         /// then up to 9 letters or digits. Uppercased.
@@ -227,26 +246,34 @@ enum IssueCmd {
     // clap error: exit 2, before any database is opened. Issue arguments allow
     // a leading '-' so that "-3" reaches the IssueRef parser and is rejected
     // there, rather than being taken for a flag.
+    /// Create an issue. It gets the next number: a number is never handed out twice.
     Create {
+        /// The issue's title.
         #[arg(long)] title: String,
         /// The description inline. For long text, use --description-file.
         #[arg(long, value_parser = inline_description, conflicts_with = "description_file")] description: Option<String>,
         /// Read the description from PATH, or from stdin if PATH is `-`. Stored byte for byte.
         #[arg(long, value_name = "PATH", value_parser = read_description)] description_file: Option<String>,
+        /// Backlog, Todo, In Progress, In Review, Done, Canceled or Duplicate; case, spaces, _ and - are ignored.
         #[arg(long, default_value = "Backlog")] status: Status,
+        /// 0-4, or none, urgent, high, medium or low (0 is none); case is ignored.
         #[arg(long, default_value = "0")] priority: Priority,
+        /// Who it is assigned to: a name, trimmed, not blank.
         #[arg(long, value_parser = parse_assignee)] assignee: Option<String>,
+        /// Its parent issue: KEY-N, #N, N or a UUID.
         #[arg(long, allow_negative_numbers = true)] parent: Option<IssueRef>,
         /// A label name (ignoring case); repeat for more.
         #[arg(long, value_parser = parse_label_name)] label: Vec<String>,
-        #[arg(long, allow_negative_numbers = true, value_parser = clap::value_parser!(i64).range(0..))] estimate: Option<i64>,
+        /// Its estimate: a whole number, 0 or more.
+        #[arg(long, allow_negative_numbers = true, value_parser = parse_estimate)] estimate: Option<i64>,
+        /// Its due date, as YYYY-MM-DD.
         #[arg(long, value_parser = parse_date)] due: Option<NaiveDate>,
         /// The project to put it in, by name (ignoring case) or id.
         #[arg(long, value_name = "PROJECT", value_parser = parse_project_name, conflicts_with = "no_project")] project: Option<String>,
         /// Put it in no project (the default).
         #[arg(long, conflicts_with = "milestone")] no_project: bool,
-        /// Its milestone, by name (ignoring case) or id: one in the --project project.
-        #[arg(long, value_name = "MILESTONE", value_parser = parse_milestone_name, conflicts_with = "no_milestone")] milestone: Option<String>,
+        /// Its milestone, by name (ignoring case) or id: one in the --project project, which it needs.
+        #[arg(long, value_name = "MILESTONE", value_parser = parse_milestone_name, conflicts_with = "no_milestone", requires = "project")] milestone: Option<String>,
         /// Give it no milestone (the default).
         #[arg(long)] no_milestone: bool,
         /// The id it has elsewhere, as BZR-1532 for a Linear issue: on no
@@ -289,22 +316,35 @@ enum IssueCmd {
         /// Show every matching issue.
         #[arg(long, conflicts_with_all = ["limit", "offset"])] all: bool,
     },
-    Show { #[arg(allow_negative_numbers = true)] id: IssueRef },
+    /// Show an issue: its fields, relations, sub-issues and comments.
+    Show {
+        /// The issue: KEY-N, #N, N or its UUID.
+        #[arg(allow_negative_numbers = true)]
+        id: IssueRef,
+    },
+    /// Change an issue: only what the flags name changes.
     Update {
+        /// The issue: KEY-N, #N, N or its UUID.
         #[arg(allow_negative_numbers = true)] id: IssueRef,
+        /// Its new title.
         #[arg(long)] title: Option<String>,
         /// The description inline; "" clears it. For long text, use --description-file.
         #[arg(long, value_parser = inline_description, conflicts_with = "description_file")] description: Option<String>,
         /// Read the description from PATH, or from stdin if PATH is `-`. Stored byte for byte.
         #[arg(long, value_name = "PATH", value_parser = read_description)] description_file: Option<String>,
+        /// Backlog, Todo, In Progress, In Review, Done, Canceled or Duplicate; case, spaces, _ and - are ignored.
         #[arg(long)] status: Option<Status>,
+        /// 0-4, or none, urgent, high, medium or low (0 is none); case is ignored.
         #[arg(long)] priority: Option<Priority>,
+        /// Assign it to this name: trimmed, not blank.
         #[arg(long, value_parser = parse_assignee, conflicts_with = "no_assignee")] assignee: Option<String>,
         /// Unassign the issue.
         #[arg(long)] no_assignee: bool,
-        #[arg(long, allow_negative_numbers = true, value_parser = clap::value_parser!(i64).range(0..), conflicts_with = "no_estimate")] estimate: Option<i64>,
+        /// Its estimate: a whole number, 0 or more.
+        #[arg(long, allow_negative_numbers = true, value_parser = parse_estimate, conflicts_with = "no_estimate")] estimate: Option<i64>,
         /// Clear the estimate.
         #[arg(long)] no_estimate: bool,
+        /// Its due date, as YYYY-MM-DD.
         #[arg(long, value_parser = parse_date, conflicts_with = "no_due")] due: Option<NaiveDate>,
         /// Clear the due date.
         #[arg(long)] no_due: bool,
@@ -335,7 +375,12 @@ enum IssueCmd {
         /// Remove its ref.
         #[arg(long)] no_ref: bool,
     },
-    Delete { #[arg(allow_negative_numbers = true)] id: IssueRef },
+    /// Delete an issue, with its comments and relations. Refused while it has sub-issues.
+    Delete {
+        /// The issue: KEY-N, #N, N or its UUID.
+        #[arg(allow_negative_numbers = true)]
+        id: IssueRef,
+    },
     /// Relate two issues: A blocks B, A blocked-by B, A related B, or A duplicate-of B.
     ///
     /// A blocked-by B is the same relation as B blocks A, and related goes
@@ -344,23 +389,28 @@ enum IssueCmd {
     /// status to Duplicate. A relation that would make a cycle of blocks, or
     /// of duplicates, is refused.
     Relate {
+        /// The first issue, A: KEY-N, #N, N or a UUID.
         #[arg(allow_negative_numbers = true)] a: IssueRef,
         /// blocks, blocked-by, related or duplicate-of.
         kind: RelationKind,
+        /// The second issue, B: KEY-N, #N, N or a UUID.
         #[arg(allow_negative_numbers = true)] b: IssueRef,
     },
     /// Remove a relation, given in either form (B blocks A removes A blocked-by B).
     ///
     /// Statuses stay as they are: unrelating duplicate-of leaves A Duplicate.
     Unrelate {
+        /// The first issue, A: KEY-N, #N, N or a UUID.
         #[arg(allow_negative_numbers = true)] a: IssueRef,
         /// blocks, blocked-by, related or duplicate-of.
         kind: RelationKind,
+        /// The second issue, B: KEY-N, #N, N or a UUID.
         #[arg(allow_negative_numbers = true)] b: IssueRef,
     },
     /// Add a comment: BODY inline, or --body-file PATH. Exactly one.
     #[command(group(ArgGroup::new("body_source").required(true).args(["body", "body_file"])))]
     Comment {
+        /// The issue: KEY-N, #N, N or its UUID.
         #[arg(allow_negative_numbers = true)] id: IssueRef,
         /// The comment inline. For long text, use --body-file.
         #[arg(value_parser = inline_body)] body: Option<String>,
@@ -369,7 +419,12 @@ enum IssueCmd {
         /// Who is writing it. Without it: LCL_AUTHOR, else USER.
         #[arg(long, value_name = "NAME", value_parser = parse_author)] author: Option<String>,
     },
-    Comments { #[arg(allow_negative_numbers = true)] id: IssueRef },
+    /// List an issue's comments, oldest first.
+    Comments {
+        /// The issue: KEY-N, #N, N or its UUID.
+        #[arg(allow_negative_numbers = true)]
+        id: IssueRef,
+    },
 }
 
 #[derive(Subcommand)]
@@ -488,7 +543,9 @@ enum MilestoneCmd {
 
 #[derive(Subcommand)]
 enum DocCmd {
+    /// Create a doc, at the top level or under another doc.
     Create {
+        /// The doc's title.
         #[arg(long)] title: String,
         /// The content inline. For long text, use --content-file.
         #[arg(long, value_parser = inline_content, conflicts_with = "content_file")] content: Option<String>,
@@ -497,10 +554,18 @@ enum DocCmd {
         /// The parent doc's id: it must exist.
         #[arg(long, value_name = "ID")] parent: Option<String>,
     },
+    /// List docs: id and title, most recently updated first.
     List,
-    Show { id: String },
-    Update {
+    /// Show a doc: its title and content.
+    Show {
+        /// The doc's id, as doc list shows it.
         id: String,
+    },
+    /// Change a doc's title, content or parent: only what the flags name changes.
+    Update {
+        /// The doc's id, as doc list shows it.
+        id: String,
+        /// Its new title.
         #[arg(long)] title: Option<String>,
         /// The content inline; "" clears it. For long text, use --content-file.
         #[arg(long, value_parser = inline_content, conflicts_with = "content_file")] content: Option<String>,
@@ -512,20 +577,48 @@ enum DocCmd {
         /// Make it a top-level doc.
         #[arg(long)] no_parent: bool,
     },
-    Delete { id: String },
+    /// Delete a doc.
+    Delete {
+        /// The doc's id, as doc list shows it.
+        id: String,
+    },
 }
 
 #[derive(Subcommand)]
 enum LabelCmd {
-    Create { #[arg(value_parser = parse_label_name)] name: String, #[arg(long, default_value = "#888888", value_parser = parse_color)] color: String },
+    /// Create a label.
+    Create {
+        /// The label's name, trimmed: not blank, and unique ignoring case.
+        #[arg(value_parser = parse_label_name)]
+        name: String,
+        /// Its color, as #rgb or #rrggbb.
+        #[arg(long, default_value = "#888888", value_parser = parse_color)]
+        color: String,
+    },
+    /// List labels: id, name and color, by name.
     List,
     /// Delete a label by name (ignoring case) or id, removing it from every issue.
-    Delete { #[arg(value_parser = parse_label_name)] name_or_id: String },
+    Delete {
+        /// The label's name (ignoring case) or id.
+        #[arg(value_parser = parse_label_name)]
+        name_or_id: String,
+    },
 }
 
 #[derive(Subcommand)]
 enum CycleCmd {
-    Create { name: String, #[arg(long, value_parser = parse_date)] start: Option<NaiveDate>, #[arg(long, value_parser = parse_date)] end: Option<NaiveDate> },
+    /// Create a cycle, with or without its dates.
+    Create {
+        /// The cycle's name.
+        name: String,
+        /// Its first day, as YYYY-MM-DD.
+        #[arg(long, value_parser = parse_date)]
+        start: Option<NaiveDate>,
+        /// Its last day, as YYYY-MM-DD: not before --start.
+        #[arg(long, value_parser = parse_date)]
+        end: Option<NaiveDate>,
+    },
+    /// List cycles: id, name and dates, newest first.
     List,
 }
 
@@ -534,6 +627,15 @@ enum CycleCmd {
 
 /// A real calendar date written exactly as YYYY-MM-DD.
 fn parse_date(s: &str) -> std::result::Result<NaiveDate, String> { parse::date(s).map_err(|e| e.0) }
+
+/// An estimate: a whole number, 0 or more.
+fn parse_estimate(s: &str) -> std::result::Result<i64, String> {
+    let n: i64 = s.parse().map_err(|e: std::num::ParseIntError| e.to_string())?;
+    if n < 0 {
+        return Err(format!("estimate must be 0 or more; got {n}"));
+    }
+    Ok(n)
+}
 
 /// `#rgb` or `#rrggbb`.
 fn parse_color(s: &str) -> std::result::Result<String, String> { parse::color(s).map_err(|e| e.0) }
@@ -723,7 +825,7 @@ fn shell_line(args: &[String]) -> String {
 /// Refuses the commands that were renamed (exit 2, before anything is
 /// opened), with the new form.
 fn refuse_old_forms(cli: &Cli) {
-    let fail = |msg: String| -> ! { Cli::command().error(clap::error::ErrorKind::InvalidSubcommand, msg).exit() };
+    let fail = |msg: String| -> ! { clap_exit(Cli::command().error(clap::error::ErrorKind::InvalidSubcommand, msg)) };
     if cli.project.is_some() {
         // The same command line with the first --project (the one before
         // the subcommand; clap took no other) renamed.
@@ -753,8 +855,8 @@ fn env_set(name: &str) -> Option<std::ffi::OsString> {
 /// would pass it through as the name "". An empty `-w ""` typed on the
 /// command line stays, and is refused later (exit 2).
 fn parse() -> Cli {
-    let matches = Cli::command().get_matches();
-    let mut cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
+    let matches = Cli::command().try_get_matches().unwrap_or_else(|e| clap_exit(e));
+    let mut cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| clap_exit(e));
     if matches.value_source("workspace") == Some(ValueSource::EnvVariable) && cli.workspace.as_deref() == Some("") {
         cli.workspace = None;
     }
@@ -775,22 +877,23 @@ fn honour_lcl_project(cli: &mut Cli) {
 }
 
 /// Checks that span more than one argument. clap's value parsers have
-/// already checked each value on its own; this exits 2 the same way.
+/// already checked each value on its own; this exits 2 the same way, with
+/// the usage of the subcommand at `path` (as clap's own errors have).
 fn validate(cli: &Cli) {
-    let fail = |msg: String| -> ! { Cli::command().error(clap::error::ErrorKind::ValueValidation, msg).exit() };
+    let fail = |path: &[&str], msg: String| -> ! { clap_exit(subcommand_error(path, msg)) };
     if let Commands::Cycle { cmd: CycleCmd::Create { start: Some(start), end: Some(end), .. } } = &cli.cmd
         && end < start
     {
-        fail(format!("cycle end {end} is before its start {start}"));
+        fail(&["cycle", "create"], format!("cycle end {end} is before its start {start}"));
     }
     // Names match ignoring ASCII case, as label lookups do.
     if let Commands::Issue { cmd: IssueCmd::Update { add_label, remove_label, .. } } = &cli.cmd
         && let Some(both) = add_label.iter().find(|a| remove_label.iter().any(|r| r.eq_ignore_ascii_case(a)))
     {
-        fail(format!("label {both:?} is in both --add-label and --remove-label"));
+        fail(&["issue", "update"], format!("label {both:?} is in both --add-label and --remove-label"));
     }
     if let Commands::Issue { cmd: IssueCmd::List { project: Some(ProjectFilter::NoProject), milestone: Some(m), .. } } = &cli.cmd {
-        fail(LclError::MilestoneInNoProject(m.clone()).to_string());
+        fail(&["issue", "list"], LclError::MilestoneInNoProject(m.clone()).to_string());
     }
 }
 
@@ -882,12 +985,102 @@ fn resolve_store(workspace: &Option<String>) -> Result<Store> {
     resolve_workspace(workspace.as_deref()).map(|(_, store)| store)
 }
 
-fn print_json<T: serde::Serialize>(v: &T) {
-    println!("{}", serde_json::to_string_pretty(v).unwrap());
+fn print_json<T: serde::Serialize>(v: &T) -> Result<()> {
+    let text = serde_json::to_string_pretty(v)?;
+    writeln!(std::io::stdout(), "{text}").map_err(|e| stdout_failed(e, "can't write to stdout"))
+}
+
+/// A write to stdout failed because its reader went away (`lcl ... | head`).
+/// It ends lcl quietly with exit 0: the reader has what it wanted.
+#[derive(Debug)]
+struct StdoutClosed;
+
+impl std::fmt::Display for StdoutClosed {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("stdout was closed")
+    }
+}
+
+impl std::error::Error for StdoutClosed {}
+
+/// The error for a failed write to stdout: StdoutClosed for a broken pipe,
+/// else the error with `what` as its context.
+fn stdout_failed(e: std::io::Error, what: &'static str) -> anyhow::Error {
+    if e.kind() == std::io::ErrorKind::BrokenPipe { anyhow::Error::new(StdoutClosed) } else { anyhow::Error::new(e).context(what) }
+}
+
+/// Whether errors print as JSON: `--json` is one of the arguments before
+/// any `--`. Read from the arguments themselves, so it holds for the errors
+/// clap finds before it has parsed anything.
+fn json_errors() -> bool {
+    std::env::args_os().skip(1).take_while(|a| a != "--").any(|a| a == "--json")
+}
+
+/// An error under --json: `{"error":{"kind":K,"message":M}}`, one line on
+/// stderr.
+fn print_json_error(kind: ErrorKind, message: &str) {
+    let line = serde_json::json!({"error": {"kind": kind.as_str(), "message": message}});
+    eprintln!("{line}");
+}
+
+/// Ends lcl with a clap error. --help and --version print as clap prints
+/// them (exit 0), and so does every error without --json (exit 2). Under
+/// --json an error is one JSON line, of kind usage, exit 2.
+fn clap_exit(e: clap::Error) -> ! {
+    if e.exit_code() == 0 || !json_errors() {
+        e.exit()
+    }
+    // A group given no subcommand (`lcl issue`) gets its help printed, which
+    // is no message for a program: it gets clap's MissingSubcommand error.
+    let e = if e.kind() == clap::error::ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand { missing_subcommand().unwrap_or(e) } else { e };
+    print_json_error(ErrorKind::Usage, &clap_message(&e));
+    std::process::exit(2)
+}
+
+/// The error clap gives a group with no subcommand when it doesn't print
+/// the group's help instead ("'lcl issue' requires a subcommand but one was
+/// not provided", and the subcommands): from parsing the same arguments
+/// again with that help turned off.
+fn missing_subcommand() -> Option<clap::Error> {
+    fn no_help_instead(cmd: clap::Command) -> clap::Command {
+        cmd.arg_required_else_help(false).mut_subcommands(no_help_instead)
+    }
+    no_help_instead(Cli::command()).try_get_matches().err()
+}
+
+/// clap's text for an error, without its "error: " prefix, its usage, and
+/// its "For more information" line.
+fn clap_message(e: &clap::Error) -> String {
+    let text = e.render().to_string();
+    let kept: Vec<&str> = text.split("\n\n").filter(|part| !part.starts_with("Usage:") && !part.starts_with("For more information")).collect();
+    let message = kept.join("\n\n");
+    let message = message.trim_end();
+    message.strip_prefix("error: ").unwrap_or(message).to_string()
+}
+
+/// A clap error from the subcommand at `path` (`["cycle", "create"]`), so
+/// that it shows that subcommand's usage, not lcl's.
+fn subcommand_error(path: &[&str], msg: String) -> clap::Error {
+    let mut cmd = Cli::command();
+    cmd.build();
+    let mut sub = &mut cmd;
+    for name in path {
+        sub = sub.find_subcommand_mut(name).expect("a subcommand of lcl");
+    }
+    sub.error(clap::error::ErrorKind::ValueValidation, msg)
+}
+
+/// The kind of an error from `run`.
+fn error_kind(e: &anyhow::Error) -> ErrorKind {
+    if let Some(e) = e.downcast_ref::<LclError>() {
+        return e.kind();
+    }
+    if e.chain().any(|c| c.is::<std::io::Error>()) { ErrorKind::Io } else { ErrorKind::Other }
 }
 
 /// Exit 2 for a usage error, as clap does for a bad argument; 1 for anything
-/// else. Errors print as `fn main() -> Result` would print them.
+/// else. Errors print as `fn main() -> Result` would print them, or, under
+/// --json, as one JSON line.
 fn main() -> ExitCode {
     let mut cli = parse();
     refuse_old_forms(&cli);
@@ -895,10 +1088,11 @@ fn main() -> ExitCode {
     validate(&cli);
     match run(cli) {
         Ok(()) => ExitCode::SUCCESS,
+        Err(e) if e.downcast_ref::<StdoutClosed>().is_some() => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("Error: {e:?}");
-            let usage = e.downcast_ref::<LclError>().is_some_and(LclError::is_usage);
-            ExitCode::from(if usage { 2 } else { 1 })
+            let kind = error_kind(&e);
+            if json_errors() { print_json_error(kind, &format!("{e:?}")); } else { eprintln!("Error: {e:?}"); }
+            ExitCode::from(if kind == ErrorKind::Usage { 2 } else { 1 })
         }
     }
 }
@@ -919,9 +1113,9 @@ fn run(cli: Cli) -> Result<()> {
             }
             let dbpath = cwd.join(".lcl").join("data.sqlite");
             let made = Registry::open(&home)?.init_workspace(&name, &key, &dbpath, open_store)?;
-            if cli.json { print_json(&made); }
-            else if made.created { println!("Initialized workspace '{}' at {}", made.name, made.path); }
-            else { println!("Workspace {:?} (key {}) already exists at {}", made.name, made.key, made.path); }
+            if cli.json { print_json(&made)?; }
+            else if made.created { outln!("Initialized workspace '{}' at {}", made.name, made.path); }
+            else { outln!("Workspace {:?} (key {}) already exists at {}", made.name, made.key, made.path); }
         }
         Commands::Project { cmd } => {
             let mut store = resolve_store(&cli.workspace)?;
@@ -929,25 +1123,25 @@ fn run(cli: Cli) -> Result<()> {
                 ProjectCmd::Create { name, description, description_file, status, target_date, global: _, key: _ } => {
                     let description = description.or(description_file).unwrap_or_default();
                     let p = store.create_project(&name, &description, status, target_date.map(|d| d.to_string()).as_deref())?;
-                    if cli.json { print_json(&p); } else { println!("Created project {:?}", p.name); }
+                    if cli.json { print_json(&p)?; } else { outln!("Created project {:?}", p.name); }
                 }
                 ProjectCmd::List { status } => {
                     let all = store.list_projects(&status)?;
-                    if cli.json { print_json(&all); }
-                    else { for p in &all { println!("{}\t[{}]\t{}", p.name, p.status, p.target_date.as_deref().unwrap_or("")); } }
+                    if cli.json { print_json(&all)?; }
+                    else { for p in &all { outln!("{}\t[{}]\t{}", p.name, p.status, p.target_date.as_deref().unwrap_or("")); } }
                 }
                 ProjectCmd::Show { project } => {
                     let d = store.project_detail(&project)?;
-                    if cli.json { print_json(&d); }
+                    if cli.json { print_json(&d)?; }
                     else {
                         let p = &d.project;
-                        println!("{} [{}]{}", p.name, p.status, p.target_date.as_ref().map(|t| format!("  target {t}")).unwrap_or_default());
-                        if !p.description.is_empty() { println!("\n{}\n", p.description); }
-                        println!("Issues: {}", counts_line(&d.issues));
+                        outln!("{} [{}]{}", p.name, p.status, p.target_date.as_ref().map(|t| format!("  target {t}")).unwrap_or_default());
+                        if !p.description.is_empty() { outln!("\n{}\n", p.description); }
+                        outln!("Issues: {}", counts_line(&d.issues));
                         if !d.milestones.is_empty() {
-                            println!("Milestones:");
+                            outln!("Milestones:");
                             for m in &d.milestones {
-                                println!("  {}\t{}\t{} issue{}", m.name, m.target_date.as_deref().unwrap_or(""), m.issues, if m.issues == 1 { "" } else { "s" });
+                                outln!("  {}\t{}\t{} issue{}", m.name, m.target_date.as_deref().unwrap_or(""), m.issues, if m.issues == 1 { "" } else { "s" });
                             }
                         }
                     }
@@ -964,11 +1158,11 @@ fn run(cli: Cli) -> Result<()> {
                         },
                     };
                     let p = store.update_project(&project, &u)?;
-                    if cli.json { print_json(&p); } else { println!("Updated project {:?}", p.name); }
+                    if cli.json { print_json(&p)?; } else { outln!("Updated project {:?}", p.name); }
                 }
                 ProjectCmd::Delete { project } => {
                     let p = store.delete_project(&project)?;
-                    if cli.json { print_json(&serde_json::json!({"deleted": p.name, "id": p.id})); } else { println!("Deleted project {:?}", p.name); }
+                    if cli.json { print_json(&serde_json::json!({"deleted": p.name, "id": p.id}))?; } else { outln!("Deleted project {:?}", p.name); }
                 }
             }
         }
@@ -979,21 +1173,21 @@ fn run(cli: Cli) -> Result<()> {
                     let description = description.or(description_file).unwrap_or_default();
                     let target = target_date.map(|d| d.to_string());
                     let m = project_hint(store.create_milestone(&name, &project, &description, target.as_deref(), sort_order), Some(&project))?;
-                    if cli.json { print_json(&m); } else { println!("Created milestone {:?} in project {:?}", m.name, m.project); }
+                    if cli.json { print_json(&m)?; } else { outln!("Created milestone {:?} in project {:?}", m.name, m.project); }
                 }
                 MilestoneCmd::List { project } => {
                     let all = project_hint(store.list_milestones(project.as_deref()), project.as_deref())?;
-                    if cli.json { print_json(&all); }
-                    else { for m in &all { println!("{}\t{}\t{}\t{}", m.project, m.sort_order, m.name, m.target_date.as_deref().unwrap_or("")); } }
+                    if cli.json { print_json(&all)?; }
+                    else { for m in &all { outln!("{}\t{}\t{}\t{}", m.project, m.sort_order, m.name, m.target_date.as_deref().unwrap_or("")); } }
                 }
                 MilestoneCmd::Show { milestone, project } => {
                     let d = project_hint(store.milestone_detail(&milestone, project.as_deref()), project.as_deref())?;
-                    if cli.json { print_json(&d); }
+                    if cli.json { print_json(&d)?; }
                     else {
                         let m = &d.milestone;
-                        println!("{} (project {:?}){}", m.name, m.project, m.target_date.as_ref().map(|t| format!("  target {t}")).unwrap_or_default());
-                        if !m.description.is_empty() { println!("\n{}\n", m.description); }
-                        println!("Issues: {}", counts_line(&d.issues));
+                        outln!("{} (project {:?}){}", m.name, m.project, m.target_date.as_ref().map(|t| format!("  target {t}")).unwrap_or_default());
+                        if !m.description.is_empty() { outln!("\n{}\n", m.description); }
+                        outln!("Issues: {}", counts_line(&d.issues));
                     }
                 }
                 MilestoneCmd::Update { milestone, project, name, description, description_file, target_date, no_target_date, sort_order } => {
@@ -1008,26 +1202,26 @@ fn run(cli: Cli) -> Result<()> {
                         sort_order,
                     };
                     let m = project_hint(store.update_milestone(&milestone, project.as_deref(), &u), project.as_deref())?;
-                    if cli.json { print_json(&m); } else { println!("Updated milestone {:?} in project {:?}", m.name, m.project); }
+                    if cli.json { print_json(&m)?; } else { outln!("Updated milestone {:?} in project {:?}", m.name, m.project); }
                 }
                 MilestoneCmd::Delete { milestone, project } => {
                     let m = project_hint(store.delete_milestone(&milestone, project.as_deref()), project.as_deref())?;
-                    if cli.json { print_json(&serde_json::json!({"deleted": m.name, "id": m.id, "project": m.project})); }
-                    else { println!("Deleted milestone {:?} from project {:?}", m.name, m.project); }
+                    if cli.json { print_json(&serde_json::json!({"deleted": m.name, "id": m.id, "project": m.project}))?; }
+                    else { outln!("Deleted milestone {:?} from project {:?}", m.name, m.project); }
                 }
             }
         }
         Commands::Workspace { cmd } => match cmd {
             WorkspaceCmd::Create { name, key } => {
                 let made = Registry::open(&home()?)?.create_workspace(&name, &key)?;
-                if cli.json { print_json(&made); }
-                else { println!("Created workspace {:?} (key {}) at {}", made.name, made.key, made.path); }
+                if cli.json { print_json(&made)?; }
+                else { outln!("Created workspace {:?} (key {}) at {}", made.name, made.key, made.path); }
             }
             WorkspaceCmd::List => {
                 let all = Registry::open(&home()?)?.list()?;
-                if cli.json { print_json(&all); }
+                if cli.json { print_json(&all)?; }
                 else {
-                    for w in &all { println!("{}\t{}\t{}{}", w.name, w.slug, w.path, if w.missing { "\t(missing)" } else { "" }); }
+                    for w in &all { outln!("{}\t{}\t{}{}", w.name, w.slug, w.path, if w.missing { "\t(missing)" } else { "" }); }
                 }
             }
             WorkspaceCmd::Show => {
@@ -1039,7 +1233,7 @@ fn run(cli: Cli) -> Result<()> {
                 let description = store.get_meta("description")?.unwrap_or_default();
                 let schema_version = store.schema_version()?;
                 let v = serde_json::json!({"name": name, "key": key, "description": description, "path": path, "schema_version": schema_version, "created_at": created_at});
-                if cli.json { print_json(&v); } else { println!("{} [{}] {}", name, key, path.display()); }
+                if cli.json { print_json(&v)?; } else { outln!("{} [{}] {}", name, key, path.display()); }
             }
         },
         Commands::Issue { cmd } => {
@@ -1059,7 +1253,7 @@ fn run(cli: Cli) -> Result<()> {
                         r#ref: issue_ref, creator: author.or_else(env_author), estimate, due_date: due.map(|d| d.to_string()), labels: label,
                         created_at: 0, updated_at: 0, completed_at: None, started_at: None, canceled_at: None,
                     }, &place), flag.as_deref())?;
-                    if cli.json { print_json(&issue); } else { println!("Created {}", issue.identifier); }
+                    if cli.json { print_json(&issue)?; } else { outln!("Created {}", issue.identifier); }
                 }
                 IssueCmd::List { status, assignee, label, parent, blocked, unblocked, project, milestone, sort, limit, offset, all } => {
                     let page = if all { Page::ALL } else { Page { limit: Some(limit), offset } };
@@ -1067,12 +1261,12 @@ fn run(cli: Cli) -> Result<()> {
                     let flag = match &project { Some(ProjectFilter::Is(p)) => Some(p.clone()), _ => None };
                     let filter = IssueFilter { statuses: status, assignee, labels: label, parent, blocked, project, milestone };
                     let list = project_hint(store.list_issues(&filter, sort, page), flag.as_deref())?;
-                    if cli.json { print_json(&list); }
+                    if cli.json { print_json(&list)?; }
                     else {
-                        for i in &list.issues { println!("{}\t[{}]\t{}\t{}", i.identifier, i.status, i.priority.label(), i.title); }
+                        for i in &list.issues { outln!("{}\t[{}]\t{}\t{}", i.identifier, i.status, i.priority.label(), i.title); }
                         if list.truncated {
                             let first = list.offset as usize + 1;
-                            println!("showing {first}–{} of {}; use --all, or --limit/--offset", first + list.issues.len() - 1, list.total);
+                            outln!("showing {first}–{} of {}; use --all, or --limit/--offset", first + list.issues.len() - 1, list.total);
                         }
                     }
                 }
@@ -1083,36 +1277,37 @@ fn run(cli: Cli) -> Result<()> {
                     let relations = store.relations(&issue.id)?;
                     if cli.json {
                         let children: Vec<&str> = children.iter().map(|c| c.identifier.as_str()).collect();
-                        print_json(&serde_json::json!({"issue": issue, "comments": comments, "children": children, "relations": relations}));
+                        print_json(&serde_json::json!({"issue": issue, "comments": comments, "children": children, "relations": relations}))?;
                     }
                     else {
-                        println!("{} {}", issue.identifier, issue.title);
-                        println!("Status: {}  Priority: {}  Assignee: {}", issue.status, issue.priority.label(), issue.assignee.as_deref().unwrap_or("Unassigned"));
-                        if let Some(r) = &issue.r#ref { println!("Ref: {r}"); }
-                        if let Some(c) = &issue.creator { println!("Creator: {c}"); }
-                        if !issue.labels.is_empty() { println!("Labels: {}", issue.labels.join(", ")); }
-                        if let Some(p) = &issue.parent_identifier { println!("Parent: {p}"); }
-                        if let Some(p) = &issue.project { println!("Project: {p}"); }
-                        if let Some(m) = &issue.milestone { println!("Milestone: {m}"); }
-                        let line = |name: &str, others: &[RelatedIssue]| {
+                        outln!("{} {}", issue.identifier, issue.title);
+                        outln!("Status: {}  Priority: {}  Assignee: {}", issue.status, issue.priority.label(), issue.assignee.as_deref().unwrap_or("Unassigned"));
+                        if let Some(r) = &issue.r#ref { outln!("Ref: {r}"); }
+                        if let Some(c) = &issue.creator { outln!("Creator: {c}"); }
+                        if !issue.labels.is_empty() { outln!("Labels: {}", issue.labels.join(", ")); }
+                        if let Some(p) = &issue.parent_identifier { outln!("Parent: {p}"); }
+                        if let Some(p) = &issue.project { outln!("Project: {p}"); }
+                        if let Some(m) = &issue.milestone { outln!("Milestone: {m}"); }
+                        let line = |name: &str, others: &[RelatedIssue]| -> Result<()> {
                             if !others.is_empty() {
                                 let others: Vec<String> = others.iter().map(|o| format!("{} [{}]", o.identifier, o.status)).collect();
-                                println!("{name}: {}", others.join(", "));
+                                outln!("{name}: {}", others.join(", "));
                             }
+                            Ok(())
                         };
-                        line("Blocks", &relations.blocks);
-                        line("Blocked by", &relations.blocked_by);
-                        line("Related", &relations.related);
-                        line("Duplicate of", relations.duplicate_of.as_slice());
-                        line("Duplicates", &relations.duplicates);
-                        if !issue.description.is_empty() { println!("\n{}", issue.description); }
+                        line("Blocks", &relations.blocks)?;
+                        line("Blocked by", &relations.blocked_by)?;
+                        line("Related", &relations.related)?;
+                        line("Duplicate of", relations.duplicate_of.as_slice())?;
+                        line("Duplicates", &relations.duplicates)?;
+                        if !issue.description.is_empty() { outln!("\n{}", issue.description); }
                         if !children.is_empty() {
-                            println!("\nSub-issues:");
-                            for c in &children { println!("  {} {}", c.identifier, c.title); }
+                            outln!("\nSub-issues:");
+                            for c in &children { outln!("  {} {}", c.identifier, c.title); }
                         }
                         if !comments.is_empty() {
-                            println!("\nComments:");
-                            for c in comments { println!("  - {}: {}", c.author.as_deref().unwrap_or("anon"), c.body); }
+                            outln!("\nComments:");
+                            for c in comments { outln!("  - {}: {}", c.author.as_deref().unwrap_or("anon"), c.body); }
                         }
                     }
                 }
@@ -1156,34 +1351,34 @@ fn run(cli: Cli) -> Result<()> {
                     if let Some(c) = cleared {
                         eprintln!("lcl: milestone {:?} cleared: it belongs to project {:?}", c.milestone, c.project);
                     }
-                    if cli.json { print_json(&issue); } else { println!("Updated {}", issue.identifier); }
+                    if cli.json { print_json(&issue)?; } else { outln!("Updated {}", issue.identifier); }
                 }
                 IssueCmd::Delete { id } => {
                     let issue = store.delete_issue(&id)?;
-                    if cli.json { print_json(&serde_json::json!({"deleted": issue.identifier, "id": issue.id})); } else { println!("Deleted {}", issue.identifier); }
+                    if cli.json { print_json(&serde_json::json!({"deleted": issue.identifier, "id": issue.id}))?; } else { outln!("Deleted {}", issue.identifier); }
                 }
                 IssueCmd::Relate { a, kind, b } => {
                     let (relation, created) = store.relate(&a, kind, &b)?;
-                    if cli.json { print_json(&serde_json::json!({"issue": relation.issue, "kind": relation.kind, "related": relation.related, "created": created})); }
-                    else if !created { println!("Already related: {relation}"); }
-                    else if kind == RelationKind::DuplicateOf { println!("{relation}; {} is Duplicate", relation.issue); }
-                    else { println!("{relation}"); }
+                    if cli.json { print_json(&serde_json::json!({"issue": relation.issue, "kind": relation.kind, "related": relation.related, "created": created}))?; }
+                    else if !created { outln!("Already related: {relation}"); }
+                    else if kind == RelationKind::DuplicateOf { outln!("{relation}; {} is Duplicate", relation.issue); }
+                    else { outln!("{relation}"); }
                 }
                 IssueCmd::Unrelate { a, kind, b } => {
                     let relation = store.unrelate(&a, kind, &b)?;
-                    if cli.json { print_json(&serde_json::json!({"issue": relation.issue, "kind": relation.kind, "related": relation.related, "removed": true})); }
-                    else { println!("Removed: {relation}"); }
+                    if cli.json { print_json(&serde_json::json!({"issue": relation.issue, "kind": relation.kind, "related": relation.related, "removed": true}))?; }
+                    else { outln!("Removed: {relation}"); }
                 }
                 IssueCmd::Comment { id, body, body_file, author } => {
                     let Some(body) = body.or(body_file) else { unreachable!("clap requires BODY or --body-file") };
                     let c = store.add_comment(&id, body, author.or_else(env_author))?;
-                    if cli.json { print_json(&c); } else { println!("Comment added"); }
+                    if cli.json { print_json(&c)?; } else { outln!("Comment added"); }
                 }
                 IssueCmd::Comments { id } => {
                     let issue = store.resolve(&id)?;
                     let comments = store.list_comments(&issue.id)?;
-                    if cli.json { print_json(&comments); }
-                    else { for c in comments { println!("[{}] {}: {}", c.created_at, c.author.as_deref().unwrap_or("anon"), c.body); } }
+                    if cli.json { print_json(&comments)?; }
+                    else { for c in comments { outln!("[{}] {}: {}", c.created_at, c.author.as_deref().unwrap_or("anon"), c.body); } }
                 }
             }
         },
@@ -1193,16 +1388,16 @@ fn run(cli: Cli) -> Result<()> {
                 DocCmd::Create { title, content, content_file, parent } => {
                     let content = content.or(content_file).unwrap_or_default();
                     let d = store.create_doc(Doc { id: String::new(), title, content, parent_id: parent, created_at: 0, updated_at: 0 })?;
-                    if cli.json { print_json(&d); } else { println!("Created doc {}", d.id); }
+                    if cli.json { print_json(&d)?; } else { outln!("Created doc {}", d.id); }
                 }
                 DocCmd::List => {
                     let docs = store.list_docs()?;
-                    if cli.json { print_json(&docs); }
-                    else { for d in docs { println!("{}\t{}", d.id, d.title); } }
+                    if cli.json { print_json(&docs)?; }
+                    else { for d in docs { outln!("{}\t{}", d.id, d.title); } }
                 }
                 DocCmd::Show { id } => {
-                    let d = store.get_doc(&id)?.ok_or_else(|| anyhow::anyhow!("doc not found"))?;
-                    if cli.json { print_json(&d); } else { println!("# {}\n\n{}", d.title, d.content); }
+                    let d = store.get_doc(&id)?.ok_or_else(|| LclError::DocNotFound(id.clone()))?;
+                    if cli.json { print_json(&d)?; } else { outln!("# {}\n\n{}", d.title, d.content); }
                 }
                 DocCmd::Update { id, title, content, content_file, parent, no_parent } => {
                     let parent = match (parent, no_parent) {
@@ -1211,11 +1406,11 @@ fn run(cli: Cli) -> Result<()> {
                         (None, false) => Change::Keep,
                     };
                     let d = store.update_doc(&id, title, content.or(content_file), parent)?;
-                    if cli.json { print_json(&d); } else { println!("Updated {}", id); }
+                    if cli.json { print_json(&d)?; } else { outln!("Updated {}", id); }
                 }
                 DocCmd::Delete { id } => {
                     store.delete_doc(&id)?;
-                    if cli.json { print_json(&serde_json::json!({"deleted": id})); } else { println!("Deleted {}", id); }
+                    if cli.json { print_json(&serde_json::json!({"deleted": id}))?; } else { outln!("Deleted {}", id); }
                 }
             }
         },
@@ -1225,16 +1420,16 @@ fn run(cli: Cli) -> Result<()> {
                 LabelCmd::Create { name, color } => {
                     let l = Label { id: uuid::Uuid::new_v4().to_string(), name, color };
                     store.create_label(&l)?;
-                    if cli.json { print_json(&l); } else { println!("Created label {}", l.name); }
+                    if cli.json { print_json(&l)?; } else { outln!("Created label {}", l.name); }
                 }
                 LabelCmd::List => {
                     let ls = store.list_labels()?;
-                    if cli.json { print_json(&ls); } else { for l in ls { println!("{} {} ({})", l.id, l.name, l.color); } }
+                    if cli.json { print_json(&ls)?; } else { for l in ls { outln!("{} {} ({})", l.id, l.name, l.color); } }
                 }
                 LabelCmd::Delete { name_or_id } => {
                     let (label, issues) = store.delete_label(&name_or_id)?;
-                    if cli.json { print_json(&serde_json::json!({"deleted": label.name, "id": label.id, "removed_from_issues": issues})); }
-                    else { println!("Deleted label {} (removed from {} issue{})", label.name, issues, if issues == 1 { "" } else { "s" }); }
+                    if cli.json { print_json(&serde_json::json!({"deleted": label.name, "id": label.id, "removed_from_issues": issues}))?; }
+                    else { outln!("Deleted label {} (removed from {} issue{})", label.name, issues, if issues == 1 { "" } else { "s" }); }
                 }
             }
         },
@@ -1243,15 +1438,15 @@ fn run(cli: Cli) -> Result<()> {
             match cmd {
                 CycleCmd::Create { name, start, end } => {
                     let c = store.create_cycle(Cycle { id: String::new(), name, starts_at: start.map(|d| d.to_string()), ends_at: end.map(|d| d.to_string()), created_at: 0 })?;
-                    if cli.json { print_json(&c); } else { println!("Created cycle {}", c.id); }
+                    if cli.json { print_json(&c)?; } else { outln!("Created cycle {}", c.id); }
                 }
                 CycleCmd::List => {
                     let cs = store.list_cycles()?;
-                    if cli.json { print_json(&cs); }
+                    if cli.json { print_json(&cs)?; }
                     else {
                         for c in cs {
                             let (start, end) = (c.starts_at.as_deref().unwrap_or("?"), c.ends_at.as_deref().unwrap_or("?"));
-                            println!("{}\t{}\t{start}..{end}", c.id, c.name);
+                            outln!("{}\t{}\t{start}..{end}", c.id, c.name);
                         }
                     }
                 }
@@ -1261,16 +1456,16 @@ fn run(cli: Cli) -> Result<()> {
             let query = search_query(&words);
             let store = resolve_store(&cli.workspace)?;
             let found = store.search(&query, limit as usize)?;
-            if cli.json { print_json(&found); }
+            if cli.json { print_json(&found)?; }
             else {
                 for h in &found.issues {
                     let fields: Vec<&str> = h.matched_in.iter().map(|f| f.as_str()).collect();
-                    println!("{}\t[{}]\t{}\t{}", h.issue.identifier, h.issue.status, h.issue.title, fields.join(", "));
+                    outln!("{}\t[{}]\t{}\t{}", h.issue.identifier, h.issue.status, h.issue.title, fields.join(", "));
                 }
-                for d in &found.docs { println!("doc\t{}\t{}", d.id, d.title); }
-                if found.issue_total > found.issues.len() { println!("showing {} of {} issues", found.issues.len(), found.issue_total); }
-                if found.doc_total > found.docs.len() { println!("showing {} of {} docs", found.docs.len(), found.doc_total); }
-                if found.issue_total == 0 && found.doc_total == 0 { println!("no matches"); }
+                for d in &found.docs { outln!("doc\t{}\t{}", d.id, d.title); }
+                if found.issue_total > found.issues.len() { outln!("showing {} of {} issues", found.issues.len(), found.issue_total); }
+                if found.doc_total > found.docs.len() { outln!("showing {} of {} docs", found.docs.len(), found.doc_total); }
+                if found.issue_total == 0 && found.doc_total == 0 { outln!("no matches"); }
             }
         },
         Commands::Export { output, force } => {
@@ -1279,16 +1474,16 @@ fn run(cli: Cli) -> Result<()> {
             match output.as_deref() {
                 None | Some("-") => {
                     let mut out = std::io::stdout().lock();
-                    out.write_all(export.text.as_bytes()).and_then(|()| out.flush()).context("can't write the export to stdout")?;
+                    out.write_all(export.text.as_bytes()).and_then(|()| out.flush()).map_err(|e| stdout_failed(e, "can't write the export to stdout"))?;
                 }
                 Some(path) => {
                     write_export(path, &export.text, force)?;
                     if cli.json {
                         let mut v = serde_json::to_value(export.counts)?;
                         v["path"] = serde_json::Value::String(path.to_string());
-                        print_json(&v);
+                        print_json(&v)?;
                     } else {
-                        println!("Exported {} to {path}", export.counts.phrase());
+                        outln!("Exported {} to {path}", export.counts.phrase());
                     }
                 }
             }
@@ -1296,11 +1491,11 @@ fn run(cli: Cli) -> Result<()> {
         Commands::Import { input, dry_run } => {
             let mut store = resolve_store(&cli.workspace)?;
             let s = store.import(&input.0, dry_run)?;
-            if cli.json { print_json(&s); }
+            if cli.json { print_json(&s)?; }
             else {
                 let next = identifier(&s.key, s.next_issue_number);
                 let what = format!("{} into workspace {} (key {}); next number {next}", s.counts.phrase(), s.workspace, s.key);
-                if s.dry_run { println!("Dry run, nothing written: would import {what}"); } else { println!("Imported {what}"); }
+                if s.dry_run { outln!("Dry run, nothing written: would import {what}"); } else { outln!("Imported {what}"); }
             }
         }
         Commands::Tui => {
@@ -1308,4 +1503,40 @@ fn run(cli: Cli) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every subcommand without an about line, and every argument without
+    /// help text, as `lcl ... ARG`. clap's own --help, --version and help
+    /// subcommand are left out.
+    fn missing_help(cmd: &clap::Command, path: &str, missing: &mut Vec<String>) {
+        for arg in cmd.get_arguments() {
+            let id = arg.get_id().as_str();
+            if id == "help" || id == "version" {
+                continue;
+            }
+            if arg.get_help().is_none() && arg.get_long_help().is_none() {
+                missing.push(format!("{path} {id}"));
+            }
+        }
+        for sub in cmd.get_subcommands().filter(|s| s.get_name() != "help") {
+            let sub_path = format!("{path} {}", sub.get_name());
+            if sub.get_about().is_none() && sub.get_long_about().is_none() {
+                missing.push(format!("{sub_path} (the subcommand)"));
+            }
+            missing_help(sub, &sub_path, missing);
+        }
+    }
+
+    #[test]
+    fn every_subcommand_and_argument_has_help() {
+        let mut cmd = Cli::command();
+        cmd.build();
+        let mut missing = Vec::new();
+        missing_help(&cmd, "lcl", &mut missing);
+        assert!(missing.is_empty(), "without help:\n{}", missing.join("\n"));
+    }
 }

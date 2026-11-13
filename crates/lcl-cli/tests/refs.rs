@@ -21,7 +21,7 @@
 
 mod common;
 
-use common::{argv, dump, exec, files, foreign_key_violations, fts_integrity, undo_v10_schema, undo_v9_schema, user_version, Env, Out, FTS_TABLES, V8_FIXTURE};
+use common::{argv, dump, error_text, exec, files, foreign_key_violations, fts_integrity, undo_v10_schema, undo_v9_schema, user_version, Env, Out, FTS_TABLES, V8_FIXTURE};
 use rusqlite::Connection;
 use serde_json::{json, Value};
 use std::path::Path;
@@ -154,7 +154,7 @@ fn bad_refs_exit_2_and_taken_refs_exit_1_writing_nothing() {
         (vec!["--json", "issue", "update", "3", "--ref", "BZR-1532"], "BZR-1532"),
         (vec!["issue", "create", "--title", "t", "--ref", "Bzr-1532"], "Bzr-1532"),
     ] {
-        let want = format!("Error: ref \"{given}\" is already on DRM-1\n");
+        let want = error_text(&args, "conflict", &format!("ref \"{given}\" is already on DRM-1"));
         assert_eq!(trio(&env.lcl(&args)), (1, "", want.as_str()), "{args:?}");
     }
     assert!(dump(&db) == before, "a refused ref changed the database");
@@ -222,7 +222,7 @@ fn a_wrong_key_names_the_issue_with_that_ref() {
     env.lcl(&["issue", "update", "3", "--ref", "BZR-1532"]).assert_ok();
     let before = files(&env);
 
-    let hint = |given: &str| format!("Error: {given} is not in this workspace (key DRM); DRM-3 has ref BZR-1532\n");
+    let hint = |args: &[&str], given: &str| error_text(args, "usage", &format!("{given} is not in this workspace (key DRM); DRM-3 has ref BZR-1532"));
     for (args, given) in [
         (vec!["issue", "show", "BZR-1532"], "BZR-1532"),
         (vec!["issue", "show", "bzr-1532", "--json"], "bzr-1532"),
@@ -237,7 +237,7 @@ fn a_wrong_key_names_the_issue_with_that_ref() {
         (vec!["issue", "update", "1", "--parent", "BZR-1532"], "BZR-1532"),
         (vec!["issue", "list", "--parent", "BZR-1532"], "BZR-1532"),
     ] {
-        assert_eq!(trio(&env.lcl(&args)), (2, "", hint(given).as_str()), "{args:?}");
+        assert_eq!(trio(&env.lcl(&args)), (2, "", hint(&args, given).as_str()), "{args:?}");
         assert!(files(&env) == before, "{args:?} changed a file");
     }
     // No ref matches: today's message alone.

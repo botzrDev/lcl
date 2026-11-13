@@ -11,6 +11,17 @@ use std::process::{Command, Stdio};
 use std::sync::Barrier;
 use tempfile::TempDir;
 
+/// What lcl prints on stderr for an error that isn't clap's: `Error: M`,
+/// or, when `args` has `--json` before any `--`, one JSON line,
+/// `{"error":{"kind":K,"message":M}}`.
+pub fn error_text(args: &[&str], kind: &str, message: &str) -> String {
+    if args.iter().take_while(|a| **a != "--").any(|a| *a == "--json") {
+        format!("{}\n", serde_json::json!({"error": {"kind": kind, "message": message}}))
+    } else {
+        format!("Error: {message}\n")
+    }
+}
+
 /// Builds an owned argv for `Env::lcl_parallel`.
 pub fn argv(args: &[&str]) -> Vec<String> {
     args.iter().map(|a| a.to_string()).collect()

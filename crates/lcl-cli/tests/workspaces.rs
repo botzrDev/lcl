@@ -36,7 +36,7 @@
 
 mod common;
 
-use common::{argv, dump, exec, files, user_version, Dump, Env, V0_FIXTURE, V0_INDEX_ALPHA_FIXTURE, V0_INDEX_CWD_FIXTURE, V0_INDEX_FIXTURE, V7_INDEX_FIXTURE};
+use common::{argv, dump, error_text, exec, files, user_version, Dump, Env, V0_FIXTURE, V0_INDEX_ALPHA_FIXTURE, V0_INDEX_CWD_FIXTURE, V0_INDEX_FIXTURE, V7_INDEX_FIXTURE};
 use lcl_core::SCHEMA_VERSION;
 use rusqlite::types::Value as SqlValue;
 use serde_json::{json, Value};
@@ -439,7 +439,11 @@ fn old_forms_exit_2_with_a_hint_and_touch_nothing() {
     ] {
         let out = env.lcl(&args);
         assert_eq!(out.code, 2, "{args:?}: {out:#?}");
-        assert!(out.stderr.starts_with(&format!("error: {hint}\n")), "{args:?}: {out:#?}");
+        if args.contains(&"--json") {
+            assert_eq!(out.stderr, error_text(&args, "usage", &hint), "{args:?}");
+        } else {
+            assert!(out.stderr.starts_with(&format!("error: {hint}\n")), "{args:?}: {out:#?}");
+        }
         assert_eq!(out.stdout, "", "{args:?}");
         assert!(files(&env) == before, "{args:?} changed a file");
     }
@@ -715,7 +719,8 @@ fn concurrent_creates_of_one_name_make_one() {
     for (i, out) in outs.iter().enumerate() {
         if i != winners[0] {
             assert_eq!(out.code, 1, "{i}: {out:#?}");
-            assert!(out.stderr.contains("workspace \"same\" already exists"), "{i}: {out:#?}");
+            let args: Vec<&str> = cmds[i].iter().map(String::as_str).collect();
+            assert_eq!(out.stderr, error_text(&args, "conflict", "workspace \"same\" already exists"), "{i}");
         }
     }
     let winner = outs[winners[0]].json();

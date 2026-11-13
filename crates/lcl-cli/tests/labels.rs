@@ -115,8 +115,10 @@ fn issue_labels_are_names_sorted_ignoring_case() {
     assert_eq!(listed["issues"][0]["labels"], json!(["Alpha", "beta", "gamma"]));
 }
 
+/// An unknown label is not found (exit 1): with the label there, the
+/// command would succeed. The error says how to make it.
 #[test]
-fn an_unknown_label_exits_2_and_changes_nothing() {
+fn an_unknown_label_exits_1_and_changes_nothing() {
     let env = workspace(&["hitl"]);
     env.lcl(&["issue", "create", "--title", "t", "--label", "hitl"]).assert_ok();
     let db = env.db_path();
@@ -131,7 +133,7 @@ fn an_unknown_label_exits_2_and_changes_nothing() {
         (vec!["issue", "update", "1", "--add-label", "it's"], "it's", r"lcl label create 'it'\''s'"),
     ] {
         let out = env.lcl(&args);
-        assert_eq!(out.code, 2, "{args:?}: {out:#?}");
+        assert_eq!(out.code, 1, "{args:?}: {out:#?}");
         assert!(out.stderr.contains(&format!("unknown label {name:?}; create it with: {hint}")), "{args:?}: {out:#?}");
     }
     for blank in ["", "  "] {
