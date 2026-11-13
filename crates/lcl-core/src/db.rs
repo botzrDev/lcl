@@ -2454,38 +2454,7 @@ mod tests {
     /// first read has fixed that snapshot and before the count runs.
     #[test]
     fn a_list_reads_one_snapshot() {
-        use std::sync::Mutex;
-        use std::time::Duration;
-
-        struct Pending {
-            path: std::path::PathBuf,
-            wrote: bool,
-        }
-        static PENDING: Mutex<Option<Pending>> = Mutex::new(None);
-
-        fn after_statement(sql: &str, _: Duration) {
-            // The first SELECT is the key read. It has already fixed the
-            // transaction's snapshot; the count has not run yet.
-            if !sql.starts_with("SELECT") {
-                return;
-            }
-            let path = {
-                let mut slot = PENDING.lock().expect("snapshot slot");
-                let Some(pending) = slot.as_mut() else { return };
-                if pending.wrote {
-                    return;
-                }
-                pending.wrote = true;
-                pending.path.clone()
-            };
-            let writer = Connection::open(&path).expect("second connection");
-            writer
-                .execute(
-                    "INSERT INTO issues(id, number, title, description, status, priority, created_at, updated_at) VALUES ('issue-4', 4, 't', '', 'Done', 0, 1, 1)",
-                    [],
-                )
-                .expect("concurrent insert");
-        }
+        use rusqlite::trace::{TraceEvent, TraceEventCodes};
 
         let path =
             std::env::temp_dir().join(format!("lcl-snapshot-{}.sqlite", uuid::Uuid::new_v4()));
@@ -2499,11 +2468,32 @@ mod tests {
                 )
                 .expect("seed");
         }
-        *PENDING.lock().expect("snapshot slot") = Some(Pending {
-            path: path.clone(),
-            wrote: false,
-        });
-        store.conn.profile(Some(after_statement));
+        let writer_path = path.clone();
+        let mut wrote = false;
+        store
+            .conn
+            .trace_v2(
+                TraceEventCodes::SQLITE_TRACE_PROFILE,
+                Some(move |event: TraceEvent<'_>| {
+                    // The first SELECT is the key read. It has already fixed
+                    // the transaction's snapshot; the count has not run yet.
+                    let TraceEvent::Profile(stmt, _) = event else {
+                        return;
+                    };
+                    if wrote || !stmt.sql().starts_with("SELECT") {
+                        return;
+                    }
+                    wrote = true;
+                    let writer = Connection::open(&writer_path).expect("second connection");
+                    writer
+                        .execute(
+                            "INSERT INTO issues(id, number, title, description, status, priority, created_at, updated_at) VALUES ('issue-4', 4, 't', '', 'Done', 0, 1, 1)",
+                            [],
+                        )
+                        .expect("concurrent insert");
+                }),
+            )
+            .expect("trace");
 
         let filter = IssueFilter {
             statuses: vec![Status::Done],
@@ -2526,8 +2516,13 @@ mod tests {
             "the concurrent write did land"
         );
 
-        store.conn.profile(None);
-        *PENDING.lock().expect("snapshot slot") = None;
+        store
+            .conn
+            .trace_v2(
+                TraceEventCodes::SQLITE_TRACE_PROFILE,
+                None::<fn(TraceEvent<'_>)>,
+            )
+            .expect("clear trace");
         drop(store);
         for suffix in ["", "-wal", "-shm"] {
             let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));

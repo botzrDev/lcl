@@ -360,7 +360,7 @@ pub fn issue_row(db: &Path, number: i64) -> Row {
 
 fn rows(conn: &rusqlite::Connection, sql: &str) -> Vec<Row> {
     let mut stmt = conn.prepare(sql).unwrap_or_else(|e| panic!("{sql}: {e}"));
-    let names: Vec<String> = stmt.column_names().into_iter().map(String::from).collect();
+    let names: Vec<String> = stmt.column_names().map(String::from).collect();
     stmt.query_map([], |r| {
         (0..names.len())
             .map(|i| Ok((names[i].clone(), r.get::<_, Value>(i)?)))
