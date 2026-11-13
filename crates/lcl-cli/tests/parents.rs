@@ -36,7 +36,7 @@
 
 mod common;
 
-use common::{dump, foreign_key_violations, fts_integrity, FTS_TABLES, issue_row, undo_v5_schema, undo_v6_schema, undo_v7_schema, undo_v8_schema, undo_v9_schema, user_version, Env, V0_PARENTS_FIXTURE};
+use common::{dump, foreign_key_violations, fts_integrity, FTS_TABLES, issue_row, undo_v5_schema, undo_v6_schema, undo_v7_schema, undo_v8_schema, undo_v10_schema, undo_v9_schema, user_version, Env, V0_PARENTS_FIXTURE};
 use lcl_core::SCHEMA_VERSION;
 use rusqlite::types::Value as SqlValue;
 use serde_json::{json, Value};
@@ -322,6 +322,7 @@ fn upgrade_repairs_parent_ids() {
     undo_v5_schema(&mut after, &mut before);
     undo_v6_schema(&mut after);
     undo_v7_schema(&mut after);
+    undo_v10_schema(&mut after);
     undo_v9_schema(&mut after);
     undo_v8_schema(&mut after);
     assert_eq!(foreign_key_violations(&db), vec![]);

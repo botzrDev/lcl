@@ -9,11 +9,28 @@
 //! database that already ran it will never run it again, so an edit silently
 //! forks the schema.
 
+use crate::error::Result;
+use crate::parse;
+use rusqlite::{params, Row, Transaction};
+use std::collections::{HashMap, HashSet};
+
 /// The schema version this build reads and writes. Derived from the list, so
 /// adding a migration bumps it and the two can't drift apart.
 pub const SCHEMA_VERSION: i64 = MIGRATIONS.len() as i64;
 
-pub(crate) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8, V9];
+/// One step of `MIGRATIONS`.
+pub(crate) enum Migration {
+    /// SQL, run as one batch.
+    Sql(&'static str),
+    /// Rust, for a step that must read values the way lcl's own parsers do.
+    /// It returns what it changed, as phrases for the one line `db::migrate`
+    /// hands back to whoever opened the file; empty when it changed nothing.
+    Code(fn(&Transaction<'_>) -> Result<Vec<String>>),
+}
+
+use Migration::{Code, Sql};
+
+pub(crate) const MIGRATIONS: &[Migration] = &[Sql(V1), Sql(V2), Sql(V3), Sql(V4), Sql(V5), Sql(V6), Sql(V7), Sql(V8), Sql(V9), Code(v10)];
 
 /// v0 -> v1: the lcl 0.1.0 schema, verbatim.
 ///
@@ -370,3 +387,209 @@ ALTER TABLE issues ADD COLUMN ref TEXT;
 CREATE UNIQUE INDEX issues_ref ON issues(ref COLLATE NOCASE) WHERE ref IS NOT NULL;
 ALTER TABLE issues ADD COLUMN creator TEXT;
 "#;
+
+/// v9 -> v10: the values lcl 0.1.0 accepted but lcl can't read, made
+/// readable, so a workspace from 0.1.0 can be exported. Text lcl can't read
+/// is kept where it can be seen, or dropped only when it said nothing.
+/// Values that are already valid are left alone, and no `updated_at` moves.
+///
+/// - A blank label name becomes "unnamed", or the first of "unnamed-2",
+///   "unnamed-3", … that no other label has, ignoring case. (V5 trimmed the
+///   names, so from 0.1.0 at most one is blank.)
+/// - A label colour that isn't `#rgb` or `#rrggbb` becomes #888888.
+/// - An issue's due date that isn't a real date written as YYYY-MM-DD (so
+///   2026-02-30 too) is cleared, and its text becomes the last line of the
+///   description, "Due (from 0.1.0): <text>", after a blank line when the
+///   description isn't empty.
+/// - A cycle's start or end date that isn't one is cleared, and its text is
+///   added to the cycle's name: "Sprint 1 (start: soon) (end: 2026-13-01)".
+/// - A blank date (empty, or only whitespace) said nothing, so it is just
+///   cleared: no line, no addition to the name.
+/// - A negative estimate is cleared.
+/// - A doc's parent follows V4's rule for issues: a value naming an existing
+///   doc's id, in any ASCII case, becomes that id as lcl stores it
+///   (lowercase); anything else is cleared. Then every link on a loop (a doc
+///   that is its own ancestor, itself included) is cleared too. 0.1.0 can't
+///   make a loop (its `doc update` has no `--parent`), but a direct writer
+///   can.
+/// - A comment's author is trimmed, and cleared when blank.
+///
+/// "Whitespace" is Unicode White_Space, as Rust's `str::trim` reads it.
+/// Changes no schema. Idempotent: a second run finds nothing to change.
+fn v10(tx: &Transaction<'_>) -> Result<Vec<String>> {
+    let mut n = V10::default();
+
+    for (rowid, name, color) in rows(tx, "SELECT rowid, name, color FROM labels ORDER BY rowid", |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))? {
+        if name.trim().is_empty() {
+            let mut i = 1;
+            let name = loop {
+                let candidate = if i == 1 { "unnamed".to_string() } else { format!("unnamed-{i}") };
+                let taken: bool = tx.query_row("SELECT EXISTS (SELECT 1 FROM labels WHERE name = ?1 COLLATE NOCASE)", [&candidate], |r| r.get(0))?;
+                if !taken {
+                    break candidate;
+                }
+                i += 1;
+            };
+            tx.execute("UPDATE labels SET name = ?1 WHERE rowid = ?2", params![name, rowid])?;
+            n.blank_labels += 1;
+        }
+        if parse::color(&color).is_err() {
+            tx.execute("UPDATE labels SET color = '#888888' WHERE rowid = ?1", [rowid])?;
+            n.colours += 1;
+        }
+    }
+
+    for (rowid, description, due) in rows(tx, "SELECT rowid, description, due_date FROM issues WHERE due_date IS NOT NULL ORDER BY rowid", |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))? {
+        match date_text(&due) {
+            DateText::Readable => {}
+            DateText::Blank => {
+                tx.execute("UPDATE issues SET due_date = NULL WHERE rowid = ?1", [rowid])?;
+                n.due_blank += 1;
+            }
+            DateText::Unreadable => {
+                let line = format!("Due (from 0.1.0): {due}");
+                let description = if description.is_empty() { line } else { format!("{description}\n\n{line}") };
+                tx.execute("UPDATE issues SET due_date = NULL, description = ?1 WHERE rowid = ?2", params![description, rowid])?;
+                n.due_moved += 1;
+            }
+        }
+    }
+    n.estimates = tx.execute("UPDATE issues SET estimate = NULL WHERE estimate < 0", [])?;
+
+    for (rowid, name, starts, ends) in rows(tx, "SELECT rowid, name, starts_at, ends_at FROM cycles ORDER BY rowid", |r| {
+        Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, Option<String>>(2)?, r.get::<_, Option<String>>(3)?))
+    })? {
+        let mut suffix = String::new();
+        let new_starts = cycle_date(&starts, "start", &mut suffix, &mut n.cycle_blank);
+        let new_ends = cycle_date(&ends, "end", &mut suffix, &mut n.cycle_blank);
+        if (&new_starts, &new_ends) != (&starts, &ends) {
+            tx.execute("UPDATE cycles SET name = ?1, starts_at = ?2, ends_at = ?3 WHERE rowid = ?4", params![format!("{name}{suffix}"), new_starts, new_ends, rowid])?;
+            n.cycles_renamed += usize::from(!suffix.is_empty());
+        }
+    }
+
+    let docs = rows(tx, "SELECT id, parent_id FROM docs ORDER BY rowid", |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)))?;
+    let ids: HashSet<&str> = docs.iter().map(|(id, _)| id.as_str()).collect();
+    // Each doc's parent under the naming rule, before loops are broken.
+    let parent: HashMap<&str, String> = docs
+        .iter()
+        .filter_map(|(id, raw)| raw.as_ref().map(|raw| (id.as_str(), raw.to_ascii_lowercase())))
+        .filter(|(_, p)| ids.contains(p.as_str()))
+        .collect();
+    let on_loop = |start: &str| {
+        let mut seen = HashSet::new();
+        let mut cur = parent.get(start);
+        while let Some(p) = cur {
+            if p == start {
+                return true;
+            }
+            if !seen.insert(p) {
+                return false; // a loop above this doc, not through it
+            }
+            cur = parent.get(p.as_str());
+        }
+        false
+    };
+    for (id, raw) in &docs {
+        let Some(raw) = raw else { continue };
+        let kept = parent.get(id.as_str()).filter(|_| !on_loop(id));
+        match kept {
+            Some(p) if p == raw => {}
+            Some(p) => {
+                tx.execute("UPDATE docs SET parent_id = ?1 WHERE id = ?2", params![p, id])?;
+                n.doc_parents_lowercased += 1;
+            }
+            None => {
+                tx.execute("UPDATE docs SET parent_id = NULL WHERE id = ?1", [id])?;
+                n.doc_parents_cleared += 1;
+            }
+        }
+    }
+
+    for (rowid, author) in rows(tx, "SELECT rowid, author FROM comments WHERE author IS NOT NULL ORDER BY rowid", |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))? {
+        let trimmed = Some(author.trim()).filter(|a| !a.is_empty());
+        if trimmed != Some(author.as_str()) {
+            tx.execute("UPDATE comments SET author = ?1 WHERE rowid = ?2", params![trimmed, rowid])?;
+            n.authors += 1;
+        }
+    }
+
+    Ok(n.phrases())
+}
+
+/// How many values of each kind v10 changed.
+#[derive(Default)]
+struct V10 {
+    blank_labels: usize,
+    colours: usize,
+    due_moved: usize,
+    due_blank: usize,
+    cycles_renamed: usize,
+    cycle_blank: usize,
+    estimates: usize,
+    doc_parents_cleared: usize,
+    doc_parents_lowercased: usize,
+    authors: usize,
+}
+
+impl V10 {
+    /// "named 1 blank label", …: one phrase per kind with a count, in this
+    /// order.
+    fn phrases(&self) -> Vec<String> {
+        let phrase = |count: usize, verb: &str, one: &str, many: &str| match count {
+            0 => None,
+            1 => Some(format!("{verb} 1 {one}")),
+            _ => Some(format!("{verb} {count} {many}")),
+        };
+        [
+            phrase(self.blank_labels, "named", "blank label", "blank labels"),
+            phrase(self.colours, "reset", "label colour", "label colours"),
+            phrase(self.due_moved, "moved", "unreadable due date into a description", "unreadable due dates into descriptions"),
+            phrase(self.due_blank, "cleared", "blank due date", "blank due dates"),
+            phrase(self.cycles_renamed, "renamed", "cycle with unreadable dates", "cycles with unreadable dates"),
+            phrase(self.cycle_blank, "cleared", "blank cycle date", "blank cycle dates"),
+            phrase(self.estimates, "cleared", "negative estimate", "negative estimates"),
+            phrase(self.doc_parents_cleared, "cleared", "doc parent", "doc parents"),
+            phrase(self.doc_parents_lowercased, "lowercased", "doc parent", "doc parents"),
+            phrase(self.authors, "cleaned", "comment author", "comment authors"),
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
+    }
+}
+
+enum DateText {
+    Readable,
+    Blank,
+    Unreadable,
+}
+
+fn date_text(s: &str) -> DateText {
+    if parse::date(s).is_ok() {
+        DateText::Readable
+    } else if s.trim().is_empty() {
+        DateText::Blank
+    } else {
+        DateText::Unreadable
+    }
+}
+
+/// A cycle date as v10 leaves it: kept when unset or readable, else
+/// cleared. Unreadable text is added to `suffix` as " (start: <text>)";
+/// blank text is counted in `blank`.
+fn cycle_date(date: &Option<String>, which: &str, suffix: &mut String, blank: &mut usize) -> Option<String> {
+    let text = date.as_deref()?;
+    match date_text(text) {
+        DateText::Readable => return date.clone(),
+        DateText::Blank => *blank += 1,
+        DateText::Unreadable => suffix.push_str(&format!(" ({which}: {text})")),
+    }
+    None
+}
+
+fn rows<T>(tx: &Transaction<'_>, sql: &str, f: impl FnMut(&Row<'_>) -> rusqlite::Result<T>) -> Result<Vec<T>> {
+    let mut stmt = tx.prepare(sql)?;
+    let all = stmt.query_map([], f)?.collect::<rusqlite::Result<Vec<T>>>()?;
+    Ok(all)
+}

@@ -47,6 +47,10 @@ pub const V0_PARENTS_FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests
 /// tests/labels.rs for how it was built.
 pub const V0_LABELS_FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/v0-labels.sqlite");
 
+/// A 0.1.0 database holding every value 0.1.0 accepted that lcl can't
+/// read, for migration 10. See tests/v010_repairs.rs for how it was built.
+pub const V010_DIRTY_FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/v010-dirty.sqlite");
+
 /// What one `lcl` invocation produced.
 #[derive(Debug)]
 pub struct Out {
@@ -465,6 +469,14 @@ pub fn undo_v9_schema(after: &mut Dump) {
     let v8 = sql.strip_suffix(V9_ISSUE_COLUMNS).unwrap_or_else(|| panic!("the v9 columns aren't at the end of {sql}"));
     issues.insert("sql".into(), Value::Text(format!("{v8})")));
 }
+
+/// Undoes migration 10's changes on an upgraded dump: there is nothing to
+/// undo. V10 changes no schema, and it only rewrites values 0.1.0 accepted
+/// that lcl can't read; the fixtures the upgrade tests use hold none (each
+/// upgrades without printing a line, which tests/v010_repairs.rs checks), so
+/// their rows are as V9 left them. Kept so each upgrade test names every
+/// migration it undoes. Call it before `undo_v9_schema`.
+pub fn undo_v10_schema(_after: &mut Dump) {}
 
 /// The schema plus every row of every table, for before/after comparisons.
 #[derive(Debug, PartialEq)]

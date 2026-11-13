@@ -1,5 +1,5 @@
 use crate::error::{LclError, Result};
-use crate::migrations::{MIGRATIONS, SCHEMA_VERSION};
+use crate::migrations::{Migration, MIGRATIONS, SCHEMA_VERSION};
 use crate::models::*;
 use crate::search::{Field, IssueHit, SearchQuery, SearchResults};
 use rusqlite::functions::FunctionFlags;
@@ -44,6 +44,7 @@ pub(crate) const NEXT_ISSUE_NUMBER: &str = "next_issue_number";
 
 pub struct Store {
     pub conn: Connection,
+    upgrade_note: Option<String>,
 }
 
 /// Which issues `Store::list_issues` returns. Each part narrows the list
@@ -222,8 +223,17 @@ impl Store {
         use_wal(&conn)?;
         conn.pragma_update(None, "foreign_keys", true)?;
         register_lcl_status(&conn)?;
-        migrate(&mut conn)?;
-        Ok(Store { conn })
+        let upgrade_note = migrate(&mut conn)?;
+        Ok(Store { conn, upgrade_note })
+    }
+
+    /// When this open upgraded the file and the upgrade changed values, one
+    /// line saying so: `upgraded workspace "prob" to schema 10: named 1 blank
+    /// label, …`. Else None. It is there only for the open that upgraded,
+    /// so it is shown once. lcl-core prints nothing itself: whoever opens a
+    /// workspace for a person shows it, on stderr.
+    pub fn upgrade_note(&self) -> Option<&str> {
+        self.upgrade_note.as_deref()
     }
 
     /// The schema version recorded in the file (`PRAGMA user_version`).
@@ -1533,11 +1543,12 @@ fn check_supported(found: i64) -> Result<usize> {
     usize::try_from(found).map_err(|_| LclError::Msg(format!("database schema version {found} is invalid")))
 }
 
-/// Brings the database up to `SCHEMA_VERSION`, all or nothing.
-fn migrate(conn: &mut Connection) -> Result<()> {
+/// Brings the database up to `SCHEMA_VERSION`, all or nothing. Returns the
+/// line for `Store::upgrade_note` when a step changed values.
+fn migrate(conn: &mut Connection) -> Result<Option<String>> {
     // Unlocked fast path: an up-to-date database takes no write lock.
     if check_supported(user_version(conn)?)? == MIGRATIONS.len() {
-        return Ok(());
+        return Ok(None);
     }
     // Take the write lock, then read again: another process may have migrated
     // between our read and acquiring the lock.
@@ -1545,15 +1556,25 @@ fn migrate(conn: &mut Connection) -> Result<()> {
     let from = check_supported(user_version(&tx)?)?;
     let pending = &MIGRATIONS[from..];
     if pending.is_empty() {
-        return Ok(()); // someone else migrated while we waited
+        return Ok(None); // someone else migrated while we waited
     }
-    for sql in pending {
-        tx.execute_batch(sql)?;
+    let mut changed = Vec::new();
+    for step in pending {
+        match step {
+            Migration::Sql(sql) => tx.execute_batch(sql)?,
+            Migration::Code(f) => changed.extend(f(&tx)?),
+        }
     }
     tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+    let note = if changed.is_empty() {
+        None
+    } else {
+        let name: String = tx.query_row("SELECT value FROM meta WHERE key = 'name'", [], |r| r.get(0)).optional()?.unwrap_or_default();
+        Some(format!("upgraded workspace {name:?} to schema {SCHEMA_VERSION}: {}", changed.join(", ")))
+    };
     // An early return above drops `tx`, which rolls back every migration.
     tx.commit()?;
-    Ok(())
+    Ok(note)
 }
 
 #[cfg(test)]

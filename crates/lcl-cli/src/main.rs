@@ -851,8 +851,18 @@ fn resolve_workspace(workspace: Option<&str>) -> Result<(PathBuf, Store)> {
         }
         None => find_local_db().ok_or(LclError::NoWorkspace)?,
     };
-    let store = Store::open(&path).with_context(|| format!("open workspace {}", path.display()))?;
+    let store = open_store(&path).with_context(|| format!("open workspace {}", path.display()))?;
     Ok((path, store))
+}
+
+/// Opens a workspace file, and when that upgraded it and the upgrade changed
+/// values, says so on stderr. The upgrade runs once, so the line shows once.
+fn open_store(path: &std::path::Path) -> lcl_core::error::Result<Store> {
+    let store = Store::open(path)?;
+    if let Some(note) = store.upgrade_note() {
+        eprintln!("lcl: {note}");
+    }
+    Ok(store)
 }
 
 fn resolve_store(workspace: &Option<String>) -> Result<Store> {
@@ -893,7 +903,7 @@ fn run(cli: Cli) -> Result<()> {
             let dir = std::env::current_dir()?.join(".lcl");
             std::fs::create_dir_all(&dir)?;
             let dbpath = dir.join("data.sqlite");
-            let mut store = Store::open(&dbpath)?;
+            let mut store = open_store(&dbpath)?;
             let created_at = now().to_string();
             store.set_meta(&[("name", pname.as_str()), ("key", key.as_str()), ("description", ""), ("created_at", created_at.as_str())])?;
             Registry::open(&home)?.register(&pname, &dbpath)?;
