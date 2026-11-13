@@ -23,7 +23,7 @@ fn parent_of(env: &Env, d: &str) -> Value {
 #[test]
 fn a_new_doc_needs_a_parent_that_exists() {
     let env = Env::new();
-    env.lcl(&["init", "docs"]).assert_ok();
+    env.lcl(&["init", "docs", "--key", "DOCS"]).assert_ok();
     let before = dump(&env.db_path());
     let out = env.lcl(&["doc", "create", "--title", "orphan", "--parent", "nope"]);
     assert_eq!((out.code, out.stdout.as_str(), out.stderr.as_str()), (1, "", "Error: doc nope not found\n"));
@@ -40,7 +40,7 @@ fn a_new_doc_needs_a_parent_that_exists() {
 #[test]
 fn a_doc_moves_only_where_it_makes_no_cycle() {
     let env = Env::new();
-    env.lcl(&["init", "docs"]).assert_ok();
+    env.lcl(&["init", "docs", "--key", "DOCS"]).assert_ok();
     let a = id(&doc(&env, &["create", "--title", "a"]));
     let b = id(&doc(&env, &["create", "--title", "b", "--parent", &a]));
     let c = id(&doc(&env, &["create", "--title", "c", "--parent", &b]));

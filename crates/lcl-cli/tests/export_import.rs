@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 /// An empty workspace with key DRM.
 fn drm() -> Env {
     let env = Env::new();
-    env.lcl(&["init", "drm"]).assert_ok();
+    env.lcl(&["init", "drm", "--key", "DRM"]).assert_ok();
     env
 }
 
@@ -211,7 +211,7 @@ fn import_needs_an_empty_workspace_with_the_files_key() {
         assert!(dump(&env.db_path()) == before, "a refused import changed the workspace");
     }
     let other = Env::new();
-    other.lcl(&["init", "bzr"]).assert_ok();
+    other.lcl(&["init", "bzr", "--key", "BZR"]).assert_ok();
     let before = dump(&other.db_path());
     let want = "Error: the file is for key DRM but this workspace's key is BZR; import it into a workspace with key DRM\n";
     assert_eq!(trio(&import(&other, &file)), (1, "", want));
@@ -586,7 +586,7 @@ fn the_0_1_0_fixture_exports_and_round_trips() {
     assert_eq!((&recs[0]["key"], of_type(&recs, "issue").len(), of_type(&recs, "comment").len(), of_type(&recs, "doc").len()), (&json!("FIXT"), 3, 1, 1));
     let new = Env::new();
     // The same name: import keeps the target's own.
-    new.lcl(&["init", "fixture"]).assert_ok();
+    new.lcl(&["init", "fixture", "--key", "FIXT"]).assert_ok();
     import(&new, &first).assert_ok();
     assert!(export(&new) == first, "the 0.1.0 fixture didn't round-trip");
 }

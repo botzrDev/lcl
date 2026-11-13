@@ -10,7 +10,7 @@ use serde_json::{json, Value};
 /// A workspace (key DREA) with issues 1..=n, titled "issue N".
 fn workspace(n: i64) -> Env {
     let env = Env::new();
-    env.lcl(&["init", "dreamd"]).assert_ok();
+    env.lcl(&["init", "dreamd", "--key", "DREA"]).assert_ok();
     for i in 1..=n {
         assert_eq!(env.create(&format!("issue {i}")), i);
     }

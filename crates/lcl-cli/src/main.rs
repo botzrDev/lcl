@@ -19,8 +19,9 @@ struct Cli {
     /// Print JSON instead of text.
     #[arg(long, global = true)]
     json: bool,
-    /// The global workspace NAME (~/.lcl/projects/<slug>.sqlite). Without it,
-    /// the nearest .lcl/data.sqlite at or above the current directory.
+    /// The registered workspace NAME: a global one
+    /// (~/.lcl/projects/<slug>.sqlite) or one lcl init made. Without it, the
+    /// nearest .lcl/data.sqlite at or above the current directory.
     #[arg(short = 'w', long, global = true, value_name = "NAME", env = "LCL_WORKSPACE")]
     workspace: Option<String>,
     /// The old name of --workspace: refused with a hint. Not global, so only
@@ -33,8 +34,19 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Make a workspace in the current directory, at .lcl/data.sqlite.
-    Init { name: Option<String> },
+    /// Make a workspace in the current directory, at .lcl/data.sqlite, and
+    /// register it, so --workspace NAME finds it from anywhere.
+    ///
+    /// Run again with the same name and key, it does nothing. It never
+    /// renames or re-keys a workspace, and a name another workspace has
+    /// (compared by slug, as workspace create compares them) is refused.
+    Init {
+        /// Its name; the current directory's name if left out.
+        #[arg(value_parser = parse_workspace_name)] name: Option<String>,
+        /// The prefix of its issue identifiers, as DRM in DRM-12: a letter,
+        /// then up to 9 letters or digits. Uppercased.
+        #[arg(long, value_name = "KEY")] key: WorkspaceKey,
+    },
     /// Create, list and show workspaces.
     Workspace {
         #[command(subcommand)]
@@ -784,8 +796,8 @@ fn validate(cli: &Cli) {
 
 /// `r`, except that a --project value (`flag`) naming no project gets a
 /// hint when it is a registered workspace's name: lcl 0.1.0's --project
-/// selected a workspace. The registry is read only here, read-only; with
-/// HOME unset there is no hint.
+/// selected a workspace. The registry is read here without being created
+/// or upgraded; with HOME unset there is no hint.
 fn project_hint<T>(r: lcl_core::error::Result<T>, flag: Option<&str>) -> Result<T> {
     match r {
         Err(LclError::ProjectNotFound { name, .. }) if flag == Some(name.as_str()) => {
@@ -836,14 +848,15 @@ fn find_local_db() -> Option<PathBuf> {
     None
 }
 
-/// The workspace a command works in: the global one --workspace names, or
-/// else the nearest .lcl/data.sqlite at or above the current directory.
-/// Never creates one, and never opens the registry.
+/// The workspace a command works in: the registered one --workspace names
+/// (see `registry::resolve`), or else the nearest .lcl/data.sqlite at or
+/// above the current directory. Never creates one; the registry is read
+/// only for --workspace, and only if it exists.
 fn resolve_workspace(workspace: Option<&str>) -> Result<(PathBuf, Store)> {
     let path = match workspace {
         Some(name) => {
             let slug = registry::slug(name).ok_or_else(|| LclError::NoSlug(name.to_string()))?;
-            let path = registry::workspace_path(&home()?, &slug);
+            let path = registry::resolve(&home()?, &slug)?;
             if !path.exists() {
                 return Err(LclError::WorkspaceNotFound { name: name.to_string(), path: path.display().to_string() }.into());
             }
@@ -892,23 +905,23 @@ fn main() -> ExitCode {
 
 fn run(cli: Cli) -> Result<()> {
     match cli.cmd {
-        Commands::Init { name } => {
-            // Before anything is created: init registers what it makes.
+        Commands::Init { name, key } => {
+            // Every check that needs nothing opened comes first, so a
+            // refused init creates nothing: not .lcl/, not ~/.lcl.
             let home = home()?;
-            let pname = name.unwrap_or_else(|| {
-                std::env::current_dir().ok().and_then(|p| p.file_name().map(|s| s.to_string_lossy().to_string())).unwrap_or_else(|| "project".into())
-            });
-            let key = pname.chars().filter(|c| c.is_alphanumeric()).collect::<String>().to_uppercase();
-            let key = if key.is_empty() { "PRJ".to_string() } else { key.chars().take(4).collect() };
-            let dir = std::env::current_dir()?.join(".lcl");
-            std::fs::create_dir_all(&dir)?;
-            let dbpath = dir.join("data.sqlite");
-            let mut store = open_store(&dbpath)?;
-            let created_at = now().to_string();
-            store.set_meta(&[("name", pname.as_str()), ("key", key.as_str()), ("description", ""), ("created_at", created_at.as_str())])?;
-            Registry::open(&home)?.register(&pname, &dbpath)?;
-            if cli.json { print_json(&serde_json::json!({"path": dbpath, "name": pname, "key": key})); }
-            else { println!("Initialized workspace '{}' at {}", pname, dbpath.display()); }
+            let cwd = std::env::current_dir()?;
+            let name = match name {
+                Some(name) => name,
+                None => cwd.file_name().map(|s| s.to_string_lossy().trim().to_string()).ok_or(LclError::InitNeedsName)?,
+            };
+            if registry::slug(&name).is_none() {
+                return Err(LclError::NoSlug(name).into());
+            }
+            let dbpath = cwd.join(".lcl").join("data.sqlite");
+            let made = Registry::open(&home)?.init_workspace(&name, &key, &dbpath, open_store)?;
+            if cli.json { print_json(&made); }
+            else if made.created { println!("Initialized workspace '{}' at {}", made.name, made.path); }
+            else { println!("Workspace {:?} (key {}) already exists at {}", made.name, made.key, made.path); }
         }
         Commands::Project { cmd } => {
             let mut store = resolve_store(&cli.workspace)?;
@@ -1296,7 +1309,3 @@ fn run(cli: Cli) -> Result<()> {
     }
     Ok(())
 }
-
-fn now() -> i64 { lcl_core::models::now() }
-
-// helper to avoid import name clash

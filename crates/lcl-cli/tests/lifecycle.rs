@@ -38,7 +38,7 @@ fn check(issue: &Value, at: &str, step: &str, started: T, completed: T, canceled
 fn create_stamps_the_initial_status() {
     use T::*;
     let env = Env::new();
-    env.lcl(&["init"]).assert_ok();
+    env.lcl(&["init", "--key", "TEST"]).assert_ok();
     let cases = [
         ("Backlog", Unset, Unset, Unset),
         ("Todo", Unset, Unset, Unset),
@@ -61,7 +61,7 @@ fn create_stamps_the_initial_status() {
 fn update_follows_every_transition() {
     use T::*;
     let env = Env::new();
-    env.lcl(&["init"]).assert_ok();
+    env.lcl(&["init", "--key", "TEST"]).assert_ok();
     assert_eq!(env.create("moving"), 1);
     let db = env.db_path();
     let plant = |field: &str, v: i64| exec(&db, &format!("UPDATE issues SET {field} = {v} WHERE number = 1"));

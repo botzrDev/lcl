@@ -49,7 +49,7 @@ use std::path::Path;
 
 fn workspace(labels: &[&str]) -> Env {
     let env = Env::new();
-    env.lcl(&["init", "dreamd"]).assert_ok();
+    env.lcl(&["init", "dreamd", "--key", "DREA"]).assert_ok();
     for l in labels {
         env.lcl(&["label", "create", l]).assert_ok();
     }

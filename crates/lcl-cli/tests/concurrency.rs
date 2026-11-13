@@ -36,7 +36,7 @@ fn while_locked(db: &Path, hold: Duration, f: impl FnOnce() -> Out) -> (Out, Dur
 #[test]
 fn a_write_waits_out_a_seven_second_lock() {
     let env = Env::new();
-    env.lcl(&["init"]).assert_ok();
+    env.lcl(&["init", "--key", "TEST"]).assert_ok();
     env.create("one");
     let (out, took) = while_locked(&env.db_path(), Duration::from_secs(7), || env.lcl(&["issue", "comment", "1", "x"]));
     assert_eq!((out.code, out.stdout.as_str(), out.stderr.as_str()), (0, "Comment added\n", ""), "after {took:?}");
@@ -64,7 +64,7 @@ fn workspace_create_waits_out_a_seven_second_lock_on_the_index() {
 fn parallel_creates_all_succeed_with_distinct_numbers() {
     const PROCS: i64 = 30;
     let env = Env::new();
-    env.lcl(&["init"]).assert_ok();
+    env.lcl(&["init", "--key", "TEST"]).assert_ok();
 
     let cmds: Vec<_> = (1..=PROCS).map(|i| argv(&["issue", "create", "--title", &format!("par {i}"), "--json"])).collect();
     let outs = env.lcl_parallel(&cmds);
@@ -91,7 +91,7 @@ fn parallel_creates_all_succeed_with_distinct_numbers() {
 #[test]
 fn concurrent_updates_lose_nothing() {
     let env = Env::new();
-    env.lcl(&["init"]).assert_ok();
+    env.lcl(&["init", "--key", "TEST"]).assert_ok();
     assert_eq!(env.create("t0"), 1);
     let updates = [
         argv(&["issue", "update", "1", "--status", "Done"]),
@@ -117,7 +117,7 @@ fn concurrent_updates_lose_nothing() {
 fn concurrent_comments_and_updates_all_land() {
     const EACH: usize = 20;
     let env = Env::new();
-    env.lcl(&["init"]).assert_ok();
+    env.lcl(&["init", "--key", "TEST"]).assert_ok();
     assert_eq!(env.create("busy issue"), 1);
 
     let mut cmds = Vec::new();
@@ -147,7 +147,7 @@ fn concurrent_comments_and_updates_all_land() {
 fn parallel_add_labels_all_land() {
     const PROCS: usize = 20;
     let env = Env::new();
-    env.lcl(&["init"]).assert_ok();
+    env.lcl(&["init", "--key", "TEST"]).assert_ok();
     let names: Vec<String> = (0..PROCS).map(|i| format!("l{i:02}")).collect();
     for n in &names {
         env.lcl(&["label", "create", n]).assert_ok();

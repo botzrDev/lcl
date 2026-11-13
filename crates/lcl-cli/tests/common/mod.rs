@@ -21,6 +21,10 @@ pub fn argv(args: &[&str]) -> Vec<String> {
 pub const V0_INDEX_FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/v0-index.sqlite");
 pub const V0_INDEX_ALPHA_FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/v0-index-alpha.sqlite");
 
+/// lcl 0.1.0's index holding a cwd workspace (made by its `init`) and a
+/// global one, the shape of a real index. See tests/workspaces.rs.
+pub const V0_INDEX_CWD_FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/v0-index-cwd.sqlite");
+
 /// A workspace index written by a build of 097af5c, which opened it as a
 /// workspace: user_version 7. See tests/workspaces.rs.
 pub const V7_INDEX_FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/v7-index.sqlite");

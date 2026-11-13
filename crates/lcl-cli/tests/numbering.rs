@@ -13,7 +13,7 @@ fn next_issue_number(db: &std::path::Path) -> String {
 #[test]
 fn deleted_numbers_are_never_reused() {
     let env = Env::new();
-    env.lcl(&["init"]).assert_ok();
+    env.lcl(&["init", "--key", "TEST"]).assert_ok();
     assert_eq!([env.create("a"), env.create("b"), env.create("c")], [1, 2, 3]);
 
     env.lcl(&["issue", "delete", "3"]).assert_ok();

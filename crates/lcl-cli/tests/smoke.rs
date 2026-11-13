@@ -5,7 +5,7 @@ use common::Env;
 #[test]
 fn init_create_show_round_trips_title() {
     let env = Env::new();
-    env.lcl(&["init"]).assert_ok();
+    env.lcl(&["init", "--key", "TEST"]).assert_ok();
 
     let created = env.lcl(&["issue", "create", "--title", "x", "--json"]).assert_ok().json();
     assert_eq!(created["title"], "x", "create: {created:#}");

@@ -216,7 +216,7 @@ fn after_the_upgrade_export_import_export_is_byte_identical() {
     let first = env.lcl(&["export"]).assert_ok().stdout.clone();
     assert!(first.contains("\"name\":\"Sprint 1 (start: soon)\""), "{first}");
     let new = Env::new();
-    new.lcl(&["init", "prob"]).assert_ok();
+    new.lcl(&["init", "prob", "--key", "PROB"]).assert_ok();
     let out = new.lcl_stdin(&["import", "-"], first.as_bytes());
     out.assert_ok();
     assert_eq!(out.stderr, "", "a new workspace has nothing to upgrade");
@@ -237,7 +237,7 @@ fn a_clean_workspace_upgrades_without_a_word() {
         out.json();
     }
     let env = Env::new();
-    let out = env.lcl(&["init", "fresh"]);
+    let out = env.lcl(&["init", "fresh", "--key", "FRES"]);
     out.assert_ok();
     assert_eq!(out.stderr, "");
     assert_eq!(env.lcl(&["--json", "issue", "list"]).assert_ok().stderr, "");
@@ -309,7 +309,7 @@ fn a_blank_label_takes_the_first_free_unnamed_name() {
 #[test]
 fn init_on_a_0_1_0_file_says_what_the_upgrade_changed() {
     let env = dirty("");
-    let out = env.lcl(&["init", "prob"]);
+    let out = env.lcl(&["init", "prob", "--key", "PROB"]);
     out.assert_ok();
     assert_eq!(out.stderr, line(CYCLES, DOCS), "{out:#?}");
     assert_eq!(user_version(&env.db_path()), 10);

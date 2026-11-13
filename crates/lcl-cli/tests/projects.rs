@@ -30,7 +30,7 @@ use std::path::Path;
 /// A workspace (key DREA) in the env's cwd.
 fn workspace() -> Env {
     let env = Env::new();
-    env.lcl(&["init", "dreamd"]).assert_ok();
+    env.lcl(&["init", "dreamd", "--key", "DREA"]).assert_ok();
     env
 }
 
@@ -621,7 +621,7 @@ fn a_workspace_name_given_to_project_gets_the_workspace_hint() {
     let env = Env::new();
     env.lcl(&["workspace", "create", "alpha", "--key", "ALPHA"]).assert_ok();
     env.lcl(&["workspace", "create", "R&D", "--key", "RD"]).assert_ok();
-    env.lcl(&["init", "here"]).assert_ok();
+    env.lcl(&["init", "here", "--key", "HERE"]).assert_ok();
     env.lcl(&["issue", "create", "--title", "mine"]).assert_ok();
     let before = files(&env);
 

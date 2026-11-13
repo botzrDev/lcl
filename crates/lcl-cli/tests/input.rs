@@ -38,7 +38,7 @@ const STATUS_BAD: &[&str] = &["Finished", "Finshed", "", "Started", "Closed", "D
 #[test]
 fn status_spellings_through_create_update_and_list() {
     let env = Env::new();
-    env.lcl(&["init"]).assert_ok();
+    env.lcl(&["init", "--key", "TEST"]).assert_ok();
     assert_eq!(env.create("update target"), 1);
 
     for &(spelling, canonical) in STATUS_OK {
@@ -73,7 +73,7 @@ fn status_spellings_through_create_update_and_list() {
 #[test]
 fn priority_spellings_through_create_and_update() {
     let env = Env::new();
-    env.lcl(&["init"]).assert_ok();
+    env.lcl(&["init", "--key", "TEST"]).assert_ok();
     assert_eq!(env.create("update target"), 1);
 
     let ok = [
@@ -103,7 +103,7 @@ fn priority_spellings_through_create_and_update() {
 #[test]
 fn a_rejected_update_changes_nothing() {
     let env = Env::new();
-    env.lcl(&["init"]).assert_ok();
+    env.lcl(&["init", "--key", "TEST"]).assert_ok();
     env.lcl(&["issue", "create", "--title", "keep me", "--status", "todo", "--priority", "2", "--due", "2026-05-01", "--estimate", "3"])
         .assert_ok();
     let db = env.db_path();
@@ -135,7 +135,7 @@ const DATE_BAD: &[&str] = &[
 #[test]
 fn dates_must_be_real_yyyy_mm_dd() {
     let env = Env::new();
-    env.lcl(&["init"]).assert_ok();
+    env.lcl(&["init", "--key", "TEST"]).assert_ok();
     for good in ["2026-02-28", "2024-02-29", "2026-12-31"] {
         let created = env.lcl(&["issue", "create", "--title", "t", &format!("--due={good}"), "--json"]).assert_ok().json();
         assert_eq!(created["due_date"], good);
@@ -164,7 +164,7 @@ fn dates_must_be_real_yyyy_mm_dd() {
 #[test]
 fn a_cycle_cannot_end_before_it_starts() {
     let env = Env::new();
-    env.lcl(&["init"]).assert_ok();
+    env.lcl(&["init", "--key", "TEST"]).assert_ok();
     let out = env.lcl(&["cycle", "create", "c", "--start", "2026-03-01", "--end", "2026-02-28"]);
     assert_eq!(out.code, 2, "{out:#?}");
     assert!(out.stderr.contains("cycle end 2026-02-28 is before its start 2026-03-01"), "{out:#?}");
@@ -183,7 +183,7 @@ fn a_cycle_cannot_end_before_it_starts() {
 #[test]
 fn estimates_cannot_be_negative() {
     let env = Env::new();
-    env.lcl(&["init"]).assert_ok();
+    env.lcl(&["init", "--key", "TEST"]).assert_ok();
     for good in ["0", "5"] {
         let created = env.lcl(&["issue", "create", "--title", "t", &format!("--estimate={good}"), "--json"]).assert_ok().json();
         assert_eq!(created["estimate"].to_string(), good);
@@ -204,7 +204,7 @@ fn estimates_cannot_be_negative() {
 #[test]
 fn label_colors_must_be_hex() {
     let env = Env::new();
-    env.lcl(&["init"]).assert_ok();
+    env.lcl(&["init", "--key", "TEST"]).assert_ok();
     for (name, good) in [("a", "#abc"), ("b", "#A1B2C3"), ("c", "#888888")] {
         let label = env.lcl(&["label", "create", name, &format!("--color={good}"), "--json"]).assert_ok().json();
         assert_eq!(label["color"], good);
@@ -221,7 +221,7 @@ fn label_colors_must_be_hex() {
 #[test]
 fn an_unknown_stored_status_is_an_error_not_backlog() {
     let env = Env::new();
-    env.lcl(&["init"]).assert_ok();
+    env.lcl(&["init", "--key", "TEST"]).assert_ok();
     env.create("hand-edited");
     env.create("untouched");
     let db = env.db_path();
@@ -246,7 +246,7 @@ fn an_unknown_stored_status_is_an_error_not_backlog() {
 #[test]
 fn a_stored_status_reads_leniently() {
     let env = Env::new();
-    env.lcl(&["init"]).assert_ok();
+    env.lcl(&["init", "--key", "TEST"]).assert_ok();
     for t in ["writer one", "writer two", "writer three"] {
         env.create(t);
     }
@@ -279,7 +279,7 @@ fn a_stored_status_reads_leniently() {
 #[test]
 fn an_unknown_stored_priority_is_an_error_not_none() {
     let env = Env::new();
-    env.lcl(&["init"]).assert_ok();
+    env.lcl(&["init", "--key", "TEST"]).assert_ok();
     env.create("hand-edited");
     env.create("untouched");
     let db = env.db_path();

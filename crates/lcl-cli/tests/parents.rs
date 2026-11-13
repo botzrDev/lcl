@@ -45,7 +45,7 @@ use std::path::Path;
 /// A workspace with key DREA.
 fn workspace() -> Env {
     let env = Env::new();
-    env.lcl(&["init", "dreamd"]).assert_ok();
+    env.lcl(&["init", "dreamd", "--key", "DREA"]).assert_ok();
     env
 }
 

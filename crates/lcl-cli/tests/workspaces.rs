@@ -14,6 +14,18 @@
 //! tables as well as `projects`, whose paths point into that temp HOME. It is
 //! at user_version 0 in WAL mode.
 //!
+//! tests/fixtures/v0-index-cwd.sqlite was made by the same 0.1.0 (copied to
+//! $F/bin/lcl and run as `env -i PATH="$F/bin:/usr/bin:/bin" HOME=$F/home
+//! sh -e` from an empty $F/cwd/testlcl) with
+//!
+//!     lcl init
+//!     lcl project create globaldemo --global
+//!
+//! and then $F/home/.lcl/index.sqlite was copied. Its `projects` table has a
+//! cwd row (testlcl, at $F/cwd/testlcl/.lcl/data.sqlite) and a global one
+//! (globaldemo, at $F/home/.lcl/projects/globaldemo.sqlite): the shape of a
+//! real index. User_version 0, WAL mode.
+//!
 //! tests/fixtures/v7-index.sqlite was made the same way by a build of 097af5c
 //! (`git archive`, built in its own target dir), with
 //! `lcl project create beta --global --key BETA`. That build ran the
@@ -24,7 +36,7 @@
 
 mod common;
 
-use common::{argv, dump, files, user_version, Dump, Env, V0_INDEX_ALPHA_FIXTURE, V0_INDEX_FIXTURE, V7_INDEX_FIXTURE};
+use common::{argv, dump, exec, files, user_version, Dump, Env, V0_FIXTURE, V0_INDEX_ALPHA_FIXTURE, V0_INDEX_CWD_FIXTURE, V0_INDEX_FIXTURE, V7_INDEX_FIXTURE};
 use lcl_core::SCHEMA_VERSION;
 use rusqlite::types::Value as SqlValue;
 use serde_json::{json, Value};
@@ -73,8 +85,8 @@ fn undo_registry(after: &mut Dump) {
     let text = |s: &str| SqlValue::Text(s.into());
     let meta = &after.tables["registry_meta"];
     assert_eq!(meta.len(), 1, "{meta:?}");
-    assert_eq!((&meta[0]["key"], &meta[0]["value"]), (&text("schema_version"), &text("1")));
-    let ours = ["registry_meta", "workspaces", "sqlite_autoindex_registry_meta_1", "sqlite_autoindex_workspaces_1"];
+    assert_eq!((&meta[0]["key"], &meta[0]["value"]), (&text("schema_version"), &text("2")));
+    let ours = ["registry_meta", "workspaces", "sqlite_autoindex_registry_meta_1", "sqlite_autoindex_workspaces_1", "workspaces_path"];
     let before = after.schema.len();
     after.schema.retain(|r| !ours.iter().any(|n| r["name"] == text(n)));
     assert_eq!(before - after.schema.len(), ours.len(), "the registry adds exactly these schema entries");
@@ -103,8 +115,8 @@ fn upgrades_a_0_1_0_index() {
     assert_eq!(
         list,
         json!([
-            {"name": "R&D", "slug": "r-d", "path": format!("{home}/.lcl/projects/r-d.sqlite"), "created_at": V0_CREATED, "missing": true},
-            {"name": "alpha", "slug": "alpha", "path": format!("{home}/.lcl/projects/alpha.sqlite"), "created_at": V0_CREATED, "missing": false},
+            {"name": "R&D", "slug": "r-d", "kind": "global", "path": format!("{home}/.lcl/projects/r-d.sqlite"), "created_at": V0_CREATED, "missing": true},
+            {"name": "alpha", "slug": "alpha", "kind": "global", "path": format!("{home}/.lcl/projects/alpha.sqlite"), "created_at": V0_CREATED, "missing": false},
         ])
     );
     let human = env.lcl(&["workspace", "list"]).assert_ok().stdout.clone();
@@ -158,22 +170,250 @@ fn opens_an_index_a_dev_build_migrated() {
     assert_eq!(user_version(&idx), 7);
 }
 
+/// An index from a newer lcl is refused, and left as it is, by everything
+/// that reads it: `workspace list` and `create`, and `--workspace` (or
+/// LCL_WORKSPACE), which looks names up there. Opening a guessed file would
+/// be worse. A workspace found from the current directory doesn't read the
+/// index, so it still works.
+/// The registry's schema version, read directly.
+fn registry_version(env: &Env) -> String {
+    let conn = rusqlite::Connection::open(index(env)).expect("open index");
+    conn.query_row("SELECT value FROM registry_meta WHERE key = 'schema_version'", [], |r| r.get(0)).expect("schema_version")
+}
+
+fn mtime(path: &Path) -> std::time::SystemTime {
+    std::fs::metadata(path).and_then(|m| m.modified()).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+}
+
+/// An index of the shape a real one has, made by 0.1.0: a cwd workspace
+/// (its `init`) and a global one. After the upgrade the global row is found
+/// under the current HOME, whatever path it recorded, and the cwd row at
+/// its recorded path.
+#[test]
+fn a_0_1_0_index_s_cwd_and_global_rows_are_told_apart() {
+    let env = Env::new();
+    let idx = install(&env, V0_INDEX_CWD_FIXTURE, ".lcl/index.sqlite");
+    // The cwd row is pointed into this test's cwd; the global row keeps the
+    // path 0.1.0 recorded under the HOME it was made in.
+    let cwd_db = env.cwd.path().join("testlcl").join(".lcl").join("data.sqlite");
+    exec(&idx, &format!("UPDATE projects SET path = '{}' WHERE name = 'testlcl'", cwd_db.display()));
+    let global_db = projects_dir(&env).join("globaldemo.sqlite");
+    let entry = |name: &str, kind: &str, path: &Path, missing: bool| {
+        json!({"name": name, "slug": name, "kind": kind, "path": path.display().to_string(), "created_at": 1794535633, "missing": missing})
+    };
+    let list = env.lcl(&["workspace", "list", "--json"]).assert_ok().json();
+    assert_eq!(list, json!([entry("globaldemo", "global", &global_db, true), entry("testlcl", "cwd", &cwd_db, true)]));
+    assert_eq!(registry_version(&env), "2");
+
+    // Each is opened where it was found.
+    for path in [&cwd_db, &global_db] {
+        std::fs::create_dir_all(path.parent().unwrap()).expect("mkdir");
+        std::fs::copy(V0_FIXTURE, path).expect("copy workspace");
+    }
+    assert_eq!(show(&env, "testlcl")["path"], json!(cwd_db.display().to_string()));
+    assert_eq!(show(&env, "globaldemo")["path"], json!(global_db.display().to_string()));
+}
+
+/// After HOME moves (copied to a new place, HOME pointed at the copy),
+/// every global workspace is found under the new HOME: none is missing, and
+/// `-w` opens the copy, never the file at the old path.
+#[test]
+fn a_home_move_keeps_every_global_workspace() {
+    let env = Env::new();
+    workspace(&env, "alpha", "AL");
+    env.lcl(&["-w", "alpha", "issue", "create", "--title", "first"]).assert_ok();
+    env.lcl(&["init", "here", "--key", "HERE"]).assert_ok();
+    let moved = tempfile::TempDir::new().expect("new HOME");
+    let copy = |from: &Path, to: &Path| {
+        std::fs::create_dir_all(to.parent().unwrap()).expect("mkdir");
+        std::fs::copy(from, to).expect("copy");
+    };
+    copy(&index(&env), &moved.path().join(".lcl").join("index.sqlite"));
+    let old_alpha = projects_dir(&env).join("alpha.sqlite");
+    let new_alpha = moved.path().join(".lcl").join("projects").join("alpha.sqlite");
+    copy(&old_alpha, &new_alpha);
+    let (old_mtime, old_dump) = (mtime(&old_alpha), dump(&old_alpha));
+
+    let in_moved = |args: &[&str]| {
+        env.lcl_with(args, |cmd| {
+            cmd.env("HOME", moved.path());
+        })
+    };
+    let list = in_moved(&["workspace", "list", "--json"]);
+    list.assert_ok();
+    let seen: Vec<_> = list.json().as_array().unwrap().iter().map(|w| (w["name"].clone(), w["kind"].clone(), w["path"].clone(), w["missing"].clone())).collect();
+    assert_eq!(
+        seen,
+        [
+            (json!("alpha"), json!("global"), json!(new_alpha.display().to_string()), json!(false)),
+            (json!("here"), json!("cwd"), json!(env.db_path().display().to_string()), json!(false)),
+        ]
+    );
+    assert_eq!(in_moved(&["-w", "alpha", "issue", "create", "--title", "moved"]).stdout, "Created AL-2\n");
+    assert_eq!(in_moved(&["-w", "alpha", "issue", "list"]).stdout, "AL-2\t[Backlog]\tNone\tmoved\nAL-1\t[Backlog]\tNone\tfirst\n");
+    assert_eq!(mtime(&old_alpha), old_mtime, "the file at the old path was opened");
+    assert!(dump(&old_alpha) == old_dump);
+}
+
+/// A registry written before V2 can hold several rows for one file (an
+/// init under another name added one). The upgrade keeps one: the row
+/// whose slug is the slug of the name stored in the file, else the last
+/// row inserted. It reads that name without opening the file as a
+/// workspace (which would upgrade it). Then a path is on one row only.
+#[test]
+fn the_registry_upgrade_keeps_one_row_per_file() {
+    let env = Env::new();
+    let place = |dir: &str, name: Option<&str>| {
+        let db = env.cwd.path().join(dir).join(".lcl").join("data.sqlite");
+        if let Some(name) = name {
+            std::fs::create_dir_all(db.parent().unwrap()).expect("mkdir");
+            std::fs::copy(V0_FIXTURE, &db).expect("copy");
+            exec(&db, &format!("UPDATE meta SET value = '{name}' WHERE key = 'name'"));
+        }
+        db
+    };
+    let named = place("p", Some("alpha")); // its name matches a row, not the last
+    let gone = place("q", None); // no file: the last row
+    let other = place("r", Some("fixture")); // its name matches no row: the last
+    let global = projects_dir(&env).join("g.sqlite");
+    let idx = index(&env);
+    std::fs::create_dir_all(idx.parent().unwrap()).expect("mkdir");
+    exec(
+        &idx,
+        &format!(
+            "CREATE TABLE registry_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+             INSERT INTO registry_meta VALUES ('schema_version', '1');
+             CREATE TABLE workspaces (slug TEXT PRIMARY KEY, name TEXT NOT NULL, path TEXT NOT NULL, created_at INTEGER NOT NULL);
+             INSERT INTO workspaces VALUES ('alpha', 'alpha', '{p}', 1), ('a', 'a', '{p}', 2),
+                                           ('x', 'x', '{q}', 3), ('y', 'y', '{q}', 4),
+                                           ('m', 'm', '{r}', 5), ('n', 'n', '{r}', 6),
+                                           ('g', 'g', '{g}', 7);",
+            p = named.display(),
+            q = gone.display(),
+            r = other.display(),
+            g = global.display()
+        ),
+    );
+    let (named_before, other_before) = (dump(&named), dump(&other));
+
+    let list = env.lcl(&["workspace", "list", "--json"]).assert_ok().json();
+    let seen: Vec<_> = list.as_array().unwrap().iter().map(|w| (w["slug"].clone(), w["kind"].clone(), w["path"].clone())).collect();
+    let at = |p: &Path| json!(p.display().to_string());
+    assert_eq!(
+        seen,
+        [(json!("alpha"), json!("cwd"), at(&named)), (json!("g"), json!("global"), at(&global)), (json!("n"), json!("cwd"), at(&other)), (json!("y"), json!("cwd"), at(&gone))]
+    );
+    assert_eq!(registry_version(&env), "2");
+    assert!(dump(&named) == named_before && dump(&other) == other_before, "the upgrade wrote to a workspace file");
+    assert_eq!((user_version(&named), user_version(&other)), (0, 0), "the upgrade opened a workspace file as a workspace");
+    let conn = rusqlite::Connection::open(&idx).expect("open index");
+    let dup = conn.execute("INSERT INTO workspaces(slug, name, path, created_at) VALUES ('z', 'z', ?1, 8)", [named.display().to_string()]);
+    assert!(dup.is_err(), "a second row for one path was accepted");
+}
+
+/// `--workspace` reads the index when there is one, so it upgrades an old
+/// one, once: the next lookup finds V2 and writes nothing. With no index it
+/// creates none, and a global file is found where it always was.
+#[test]
+fn a_workspace_flag_lookup_upgrades_an_old_index_once() {
+    let env = Env::new();
+    let idx = install(&env, V0_INDEX_FIXTURE, ".lcl/index.sqlite");
+    install(&env, V0_INDEX_ALPHA_FIXTURE, ".lcl/projects/alpha.sqlite");
+    repoint(&env, &idx);
+    assert_eq!(env.lcl(&["-w", "alpha", "issue", "list", "--json"]).assert_ok().json()["total"], 0);
+    assert_eq!(registry_version(&env), "2");
+    let (stamp, before) = (mtime(&idx), dump(&idx));
+    env.lcl(&["-w", "alpha", "issue", "list"]).assert_ok();
+    assert_eq!(mtime(&idx), stamp, "the second lookup wrote to the index");
+    assert!(dump(&idx) == before);
+
+    let bare = Env::new();
+    install(&bare, V0_INDEX_ALPHA_FIXTURE, ".lcl/projects/alpha.sqlite");
+    assert_eq!(bare.lcl(&["-w", "alpha", "issue", "list", "--json"]).assert_ok().json()["total"], 0);
+    assert!(!index(&bare).exists(), "a lookup created an index");
+}
+
+/// With an index, a name it has no row for is still looked for where a
+/// global workspace's file is: a ~/.lcl/projects/<slug>.sqlite put there by
+/// hand opens with `-w`, which leaves the index as it was.
+#[test]
+fn the_workspace_flag_finds_an_unregistered_global_file() {
+    let env = Env::new();
+    workspace(&env, "other", "OT");
+    let idx = index(&env);
+    let before = dump(&idx);
+    install(&env, V0_INDEX_ALPHA_FIXTURE, ".lcl/projects/alpha.sqlite");
+    let out = env.lcl(&["-w", "alpha", "issue", "list", "--json"]);
+    out.assert_ok();
+    assert_eq!(out.json()["total"], 0);
+    assert!(dump(&idx) == before, "-w changed the index");
+}
+
+/// lcl 0.1.0 still reads an index this lcl upgraded: its `project list`
+/// shows what it showed before. Needs 0.1.0's binary: LCL_010_BIN, or
+/// ~/.local/bin/lcl, run from a copy; skipped (saying so) when neither is
+/// 0.1.0.
+#[test]
+fn lcl_0_1_0_still_reads_an_upgraded_index() {
+    let candidate = std::env::var_os("LCL_010_BIN")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local").join("bin").join("lcl")));
+    let version = |bin: &Path| std::process::Command::new(bin).arg("--version").output().ok().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
+    let Some(original) = candidate.filter(|b| version(b).as_deref() == Some("lcl 0.1.0")) else {
+        eprintln!("SKIPPED lcl_0_1_0_still_reads_an_upgraded_index: no lcl 0.1.0 binary (set LCL_010_BIN)");
+        return;
+    };
+    let bin_dir = tempfile::TempDir::new().expect("bin dir");
+    let bin = bin_dir.path().join("lcl");
+    std::fs::copy(&original, &bin).expect("copy 0.1.0");
+    let env = Env::new();
+    let idx = install(&env, V0_INDEX_FIXTURE, ".lcl/index.sqlite");
+    install(&env, V0_INDEX_ALPHA_FIXTURE, ".lcl/projects/alpha.sqlite");
+    repoint(&env, &idx);
+    let old_list = || {
+        let out = std::process::Command::new(&bin)
+            .args(["project", "list"])
+            .current_dir(env.cwd.path())
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", env.home.path())
+            .output()
+            .expect("run 0.1.0");
+        (out.status.code(), String::from_utf8_lossy(&out.stdout).into_owned(), String::from_utf8_lossy(&out.stderr).into_owned())
+    };
+    let before = old_list();
+    assert_eq!(before, (Some(0), "\"R&D\" (\"r-d\")\n\"alpha\" (\"alpha\")\n".to_string(), String::new()));
+    env.lcl(&["workspace", "list"]).assert_ok();
+    assert_eq!(registry_version(&env), "2");
+    assert_eq!(old_list(), before, "0.1.0 reads the upgraded index differently");
+    env.lcl(&["workspace", "list"]).assert_ok();
+}
+
 #[test]
 fn refuses_a_newer_registry_untouched() {
     let env = Env::new();
     workspace(&env, "alpha", "ALPHA");
+    let sub = env.cwd.path().join("sub");
+    std::fs::create_dir(&sub).expect("mkdir sub");
+    env.lcl(&["init", "here", "--key", "HERE"]).assert_ok();
+    env.create("in the cwd workspace");
     common::exec(&index(&env), "UPDATE registry_meta SET value = '99' WHERE key = 'schema_version'");
     let before = files(&env);
 
-    for args in [vec!["workspace", "list"], vec!["workspace", "create", "beta", "--key", "BETA"]] {
+    let too_new = format!("Error: the workspace index {} is v99, newer than this lcl supports (v2); upgrade lcl\n", index(&env).display());
+    for args in [vec!["workspace", "list"], vec!["workspace", "create", "beta", "--key", "BETA"], vec!["-w", "alpha", "issue", "list"]] {
         let out = env.lcl(&args);
-        assert_eq!(out.code, 1, "{args:?}: {out:#?}");
-        assert!(out.stderr.contains("is v99, newer than this lcl supports (v1)"), "{args:?}: {out:#?}");
+        assert_eq!((out.code, out.stdout.as_str(), out.stderr.as_str()), (1, "", too_new.as_str()), "{args:?}");
     }
+    let out = env.lcl_env(&[("LCL_WORKSPACE", "alpha")], &["issue", "list"]);
+    assert_eq!((out.code, out.stdout.as_str(), out.stderr.as_str()), (1, "", too_new.as_str()), "LCL_WORKSPACE");
+    // The cwd workspace, found by walking up from a directory below it.
+    let out = env.lcl_with(&["issue", "list"], |cmd| {
+        cmd.current_dir(&sub);
+    });
+    assert_eq!((out.code, out.stdout.as_str()), (0, "HERE-1\t[Backlog]\tNone\tin the cwd workspace\n"), "{out:#?}");
     // assert! rather than assert_eq!: a mismatch would print every byte.
     assert!(files(&env) == before, "a refused registry was written to");
-    // Workspaces themselves never open the registry.
-    env.lcl(&["-w", "alpha", "issue", "list"]).assert_ok();
 }
 
 /// The old flag and subcommand exit 2 with the new form, before anything is
@@ -182,7 +422,7 @@ fn refuses_a_newer_registry_untouched() {
 fn old_forms_exit_2_with_a_hint_and_touch_nothing() {
     let env = Env::new();
     workspace(&env, "alpha", "ALPHA");
-    env.lcl(&["init", "here"]).assert_ok();
+    env.lcl(&["init", "here", "--key", "HERE"]).assert_ok();
     let before = files(&env);
 
     let flag = "the workspace flag is now --workspace: ";
@@ -328,7 +568,7 @@ fn workspace_show_json() {
     assert_eq!(show(&env, "dreamd"), exact("dreamd's tracker"));
 
     // A workspace in the current directory, found from cwd.
-    env.lcl(&["init", "here"]).assert_ok();
+    env.lcl(&["init", "here", "--key", "HERE"]).assert_ok();
     let here = env.lcl(&["workspace", "show", "--json"]).assert_ok().json();
     assert_eq!(here["path"], json!(env.db_path().display().to_string()));
     assert!(here["created_at"].is_i64(), "{here:#}");
@@ -346,20 +586,6 @@ fn workspace_show_json() {
     assert!(!none.home.path().join(".lcl").exists(), "resolving a workspace created ~/.lcl");
 }
 
-/// `init` registers its workspace unless the slug is taken, and never
-/// replaces another workspace's row.
-#[test]
-fn init_registers_without_replacing() {
-    let env = Env::new();
-    workspace(&env, "alpha", "ALPHA");
-    let global = registry_rows(&env);
-    env.lcl(&["init", "alpha"]).assert_ok();
-    assert_eq!(registry_rows(&env), global);
-    let other = Env::new();
-    other.lcl(&["init", "here"]).assert_ok();
-    assert_eq!(registry_rows(&other), [("here".to_string(), "here".to_string(), other.db_path().display().to_string())]);
-}
-
 /// F2: lcl needs HOME only for ~/.lcl: the registry, `-w` and
 /// LCL_WORKSPACE, and init (which registers what it makes). Unset or empty
 /// is an error there, never a fallback directory.
@@ -367,7 +593,7 @@ fn init_registers_without_replacing() {
 fn no_home_is_an_error_only_where_home_is_needed() {
     let env = Env::new();
     workspace(&env, "alpha", "ALPHA");
-    env.lcl(&["init", "here"]).assert_ok();
+    env.lcl(&["init", "here", "--key", "HERE"]).assert_ok();
     env.create("in the cwd workspace");
     let message = "Error: HOME is not set; lcl keeps its workspace registry in $HOME/.lcl\n";
     let fresh = tempfile::TempDir::new().expect("temp cwd");
@@ -382,7 +608,7 @@ fn no_home_is_an_error_only_where_home_is_needed() {
             vec!["workspace", "list"],
             vec!["workspace", "create", "x", "--key", "X"],
             vec!["-w", "alpha", "issue", "list"],
-            vec!["init", "here"],
+            vec!["init", "here", "--key", "HERE"],
         ] {
             let out = without(&args, fresh.path());
             assert_eq!((out.code, out.stdout.as_str(), out.stderr.as_str()), (1, "", message), "{label}: {args:?}");
@@ -409,7 +635,7 @@ fn no_home_is_an_error_only_where_home_is_needed() {
 fn empty_workspace_variables_count_as_unset() {
     let env = Env::new();
     workspace(&env, "alpha", "ALPHA");
-    env.lcl(&["init", "here"]).assert_ok();
+    env.lcl(&["init", "here", "--key", "HERE"]).assert_ok();
     let notice = "lcl: LCL_PROJECT is deprecated; use LCL_WORKSPACE\n";
     let key = |vars: &[(&str, &str)], args: &[&str]| {
         let out = env.lcl_env(vars, args);
@@ -442,7 +668,7 @@ fn concurrent_inits_of_a_new_workspace_all_succeed() {
     for round in 0..ROUNDS {
         let env = Env::new();
         env.lcl(&["workspace", "list"]).assert_ok();
-        let cmds: Vec<Vec<String>> = (0..PROCS).map(|_| argv(&["init", "race"])).collect();
+        let cmds: Vec<Vec<String>> = (0..PROCS).map(|_| argv(&["init", "race", "--key", "RACE"])).collect();
         for (i, out) in env.lcl_parallel(&cmds).iter().enumerate() {
             assert_eq!(out.code, 0, "round {round}, process {i}: {out:#?}");
         }

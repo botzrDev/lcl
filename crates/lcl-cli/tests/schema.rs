@@ -124,7 +124,7 @@ fn upgrades_a_0_1_0_database() {
 #[test]
 fn fresh_database_is_at_latest_version() {
     let env = Env::new();
-    env.lcl(&["init"]).assert_ok();
+    env.lcl(&["init", "--key", "TEST"]).assert_ok();
 
     assert_eq!(user_version(&env.db_path()), SCHEMA_VERSION);
     let project = env.lcl(&["workspace", "show", "--json"]).assert_ok().json();

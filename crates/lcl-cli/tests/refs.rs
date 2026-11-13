@@ -30,7 +30,7 @@ use std::process::Command;
 /// A workspace (key DRM) with issues 1..=n, titled "issue N".
 fn workspace(n: i64) -> Env {
     let env = Env::new();
-    env.lcl(&["init", "drm"]).assert_ok();
+    env.lcl(&["init", "drm", "--key", "DRM"]).assert_ok();
     for i in 1..=n {
         env.create(&format!("issue {i}"));
     }

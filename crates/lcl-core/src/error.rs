@@ -96,6 +96,18 @@ pub enum LclError {
     /// A workspace file that is there although nothing registered it.
     #[error("a workspace file already exists at {0}")]
     WorkspaceFileExists(String),
+    /// `init` with no name, in a directory that has none to lend it (/).
+    #[error("this directory has no name for the workspace; give it one: lcl init NAME --key KEY")]
+    InitNeedsName,
+    /// `init` where a workspace with another name or key already is.
+    #[error("this directory already has workspace {name:?} (key {key}) at {path}; init doesn't rename or re-key a workspace")]
+    InitMismatch { name: String, key: String, path: String },
+    /// `init` of a name whose slug another workspace has.
+    #[error("the name {name:?} is taken: workspace {existing:?} is registered at {path}")]
+    NameTaken { name: String, existing: String, path: String },
+    /// `init` of a name registered, exactly, to another place.
+    #[error("workspace {name:?} is already registered at {path}")]
+    AlreadyRegistered { name: String, path: String },
     /// A workspace name with no letters or digits, so no file name.
     #[error("workspace name {0:?} has no letters or digits")]
     NoSlug(String),
@@ -167,6 +179,7 @@ impl LclError {
                 | LclError::AlreadyDuplicate { .. }
                 | LclError::DuplicateCycle { .. }
                 | LclError::NoSlug(_)
+                | LclError::InitNeedsName
                 | LclError::MilestoneElsewhere { .. }
                 | LclError::MilestoneAmbiguous { .. }
                 | LclError::MilestoneWithoutProject(_)

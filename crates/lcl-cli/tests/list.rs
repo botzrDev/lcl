@@ -65,7 +65,7 @@ fn uuid(x: i64) -> String {
 /// A workspace (key DREA) holding the seeded 1,700 issues, labels a and b.
 fn seeded() -> Env {
     let env = Env::new();
-    env.lcl(&["init", "dreamd"]).assert_ok();
+    env.lcl(&["init", "dreamd", "--key", "DREA"]).assert_ok();
     for l in ["a", "b"] {
         env.lcl(&["label", "create", l]).assert_ok();
     }
@@ -308,7 +308,7 @@ fn all_limit_and_offset_rules() {
 #[test]
 fn a_hand_edited_status_matches_its_filter() {
     let env = Env::new();
-    env.lcl(&["init", "dreamd"]).assert_ok();
+    env.lcl(&["init", "dreamd", "--key", "DREA"]).assert_ok();
     for t in ["hand done", "hand in progress", "real done", "unknown", "todo"] {
         env.lcl(&["issue", "create", "--title", t]).assert_ok();
     }
