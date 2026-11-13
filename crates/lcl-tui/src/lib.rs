@@ -28,17 +28,35 @@ pub enum Action {
     Quit,
 }
 
-/// The issues as last read, the status filter, and the selected row of the
-/// filtered list (always a row of it, or 0 when it is empty).
+/// The issues as last read, the status filter, and the selected issue.
+///
+/// The selection is the issue's UUID, not its row, so it stays on the same
+/// issue when a reload moves the rows. It is `None` exactly when the
+/// filtered list is empty; otherwise it names an issue in that list.
 pub struct App {
     issues: Vec<Issue>,
     filter: Option<Status>,
-    selected: usize,
+    selected: Option<String>,
 }
 
 impl App {
     pub fn new(issues: Vec<Issue>) -> App {
-        App { issues, filter: None, selected: 0 }
+        let mut app = App { issues, filter: None, selected: None };
+        app.select_row(0);
+        app
+    }
+
+    /// The selected issue's row in the filtered list; 0 when it is empty.
+    pub fn row(&self) -> usize {
+        self.selected.as_ref().and_then(|id| self.visible().iter().position(|i| &i.id == id)).unwrap_or(0)
+    }
+
+    /// Selects the issue on `row` of the filtered list, or on its last row
+    /// if `row` is past it; nothing when the list is empty.
+    fn select_row(&mut self, row: usize) {
+        let visible = self.visible();
+        let id = visible.get(row.min(visible.len().saturating_sub(1))).map(|i| i.id.clone());
+        self.selected = id;
     }
 
     /// The issues the filter lets through, in list order.
@@ -58,29 +76,31 @@ impl App {
             KeyCode::Char('q') => Action::Quit,
             KeyCode::Char('r') => Action::Reload,
             KeyCode::Char('j') | KeyCode::Down => {
-                if self.selected + 1 < self.visible().len() {
-                    self.selected += 1;
-                }
+                self.select_row(self.row() + 1);
                 Action::Stay
             }
             KeyCode::Char('k') | KeyCode::Up => {
-                self.selected = self.selected.saturating_sub(1);
+                self.select_row(self.row().saturating_sub(1));
                 Action::Stay
             }
             KeyCode::Char(c @ '0'..='7') => {
                 self.filter = status_key(c);
-                self.selected = 0;
+                self.select_row(0);
                 Action::Stay
             }
             _ => Action::Stay,
         }
     }
 
-    /// Takes a fresh read of the issues, keeping the filter, and the
-    /// selection where it was if that row is still there (else the last).
+    /// Takes a fresh read of the issues, keeping the filter and the selected
+    /// issue, whatever row it is on now. If that issue is no longer in the
+    /// filtered list, the selection goes to the row it was on (else the last).
     pub fn reloaded(&mut self, issues: Vec<Issue>) {
+        let row = self.row();
         self.issues = issues;
-        self.selected = self.selected.min(self.visible().len().saturating_sub(1));
+        if !self.visible().iter().any(|i| Some(&i.id) == self.selected.as_ref()) {
+            self.select_row(row);
+        }
     }
 
     pub fn draw(&self, f: &mut Frame) {
@@ -100,7 +120,7 @@ impl App {
             .highlight_style(Style::default().bg(Color::DarkGray))
             .highlight_symbol(">> ");
         let mut state = ListState::default();
-        state.select(Some(self.selected));
+        state.select(Some(self.row()));
         f.render_stateful_widget(list, chunks[1], &mut state);
 
         f.render_widget(Paragraph::new(HELP).block(Block::default().borders(Borders::ALL)), chunks[2]);
@@ -230,7 +250,7 @@ mod tests {
     }
 
     fn selected(app: &App) -> &str {
-        &app.visible()[app.selected].identifier
+        &app.visible()[app.row()].identifier
     }
 
     #[test]
@@ -240,9 +260,9 @@ mod tests {
         for _ in 0..4 {
             assert_eq!(app.key(press('j')), Action::Stay);
         }
-        assert_eq!((app.visible().len(), app.selected, selected(&app)), (2, 1, "W-3"));
+        assert_eq!((app.visible().len(), app.row(), selected(&app)), (2, 1, "W-3"));
         app.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
-        assert_eq!(app.selected, 1);
+        assert_eq!(app.row(), 1);
         app.key(press('k'));
         assert_eq!(selected(&app), "W-1");
     }
@@ -255,14 +275,14 @@ mod tests {
         }
         assert_eq!(selected(&app), "W-5");
         app.key(press('1'));
-        assert_eq!((app.selected, selected(&app)), (0, "W-2"));
+        assert_eq!((app.row(), selected(&app)), (0, "W-2"));
         app.key(press('j'));
         app.key(press('0'));
-        assert_eq!((app.selected, selected(&app)), (0, "W-1"));
+        assert_eq!((app.row(), selected(&app)), (0, "W-1"));
         // A status no issue has: an empty list, and j stays on row 0.
         app.key(press('7'));
         app.key(press('j'));
-        assert_eq!((app.visible().len(), app.selected), (0, 0));
+        assert_eq!((app.visible().len(), app.row(), &app.selected), (0, 0, &None));
     }
 
     #[test]
@@ -276,6 +296,75 @@ mod tests {
         // W-5 is gone: the selection moves up to the last row left.
         app.reloaded(five().into_iter().take(4).collect());
         assert_eq!((app.visible().len(), selected(&app)), (2, "W-4"));
+    }
+
+    /// Issues `numbers`, in that order, all Backlog.
+    fn numbered(numbers: &[i64]) -> Vec<Issue> {
+        numbers.iter().map(|n| issue(*n, Status::Backlog)).collect()
+    }
+
+    #[test]
+    fn a_reload_keeps_the_selected_issue_not_its_row() {
+        let mut app = App::new(numbered(&[5, 4, 3, 2, 1]));
+        app.key(press('j'));
+        app.key(press('j'));
+        assert_eq!((app.row(), selected(&app)), (2, "W-3"));
+        // Another process made W-6, which lists first: W-3 is now a row down.
+        app.reloaded(numbered(&[6, 5, 4, 3, 2, 1]));
+        assert_eq!((app.row(), selected(&app)), (3, "W-3"));
+        // W-3 is deleted: the selection stays on the row it had.
+        app.reloaded(numbered(&[6, 5, 4, 2, 1]));
+        assert_eq!((app.row(), selected(&app)), (3, "W-2"));
+        // That row is gone too: the last row.
+        app.reloaded(numbered(&[6, 5]));
+        assert_eq!((app.row(), selected(&app)), (1, "W-5"));
+        app.reloaded(vec![]);
+        assert_eq!((app.row(), &app.selected), (0, &None));
+        // From an empty list, a reload selects the first row.
+        app.reloaded(numbered(&[2, 1]));
+        assert_eq!(selected(&app), "W-2");
+    }
+
+    /// Every sequence of up to five keys and reloads, from three starting
+    /// lists. After each one: the selection is None exactly when the filtered
+    /// list is empty, else an issue in it; and a reload that keeps the
+    /// selected issue in the filtered list leaves it selected.
+    #[test]
+    fn the_selection_is_always_an_issue_in_the_filtered_list() {
+        let reloads = [vec![], five(), numbered(&[6, 5, 4, 3, 2, 1]), five().into_iter().skip(2).collect()];
+        let keys = ['j', 'k', '1', '5', '7', '0'];
+        let ops = keys.len() + reloads.len();
+        let apply = |app: &mut App, op: usize| {
+            if op < keys.len() {
+                app.key(press(keys[op]));
+            } else {
+                let before = app.selected.clone();
+                app.reloaded(reloads[op - keys.len()].clone());
+                if before.is_some() && app.visible().iter().any(|i| Some(&i.id) == before.as_ref()) {
+                    assert_eq!(app.selected, before, "a reload moved the selection off an issue still listed");
+                }
+            }
+            let visible = app.visible();
+            match &app.selected {
+                None => assert!(visible.is_empty(), "nothing selected in a list of {}", visible.len()),
+                Some(id) => assert!(visible.iter().any(|i| &i.id == id), "{id} is selected but not listed"),
+            }
+        };
+        let mut sequences = 0;
+        for start in [vec![], five(), numbered(&[1])] {
+            for len in 0..=5u32 {
+                for mut n in 0..ops.pow(len) {
+                    let mut app = App::new(start.clone());
+                    assert_eq!(app.selected.is_none(), start.is_empty());
+                    for _ in 0..len {
+                        apply(&mut app, n % ops);
+                        n /= ops;
+                    }
+                    sequences += 1;
+                }
+            }
+        }
+        assert_eq!(sequences, 3 * 111_111);
     }
 
     #[test]
@@ -336,7 +425,7 @@ mod tests {
             Ok(five())
         };
         run_app(&mut terminal, &mut app, reload, keys(&[press('r'), press('j'), press('q')])).unwrap();
-        assert_eq!((*reloads.borrow(), app.selected), (1, 1));
+        assert_eq!((*reloads.borrow(), app.row()), (1, 1));
 
         let failing = || Err(anyhow::anyhow!("database is locked"));
         let e = run_app(&mut terminal, &mut app, failing, keys(&[press('r')])).unwrap_err();
