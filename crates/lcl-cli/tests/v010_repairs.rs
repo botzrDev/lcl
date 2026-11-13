@@ -49,7 +49,10 @@
 
 mod common;
 
-use common::{exec, foreign_key_violations, fts_integrity, user_version, Env, FTS_TABLES, V010_DIRTY_FIXTURE, V0_FIXTURE, V0_LABELS_FIXTURE, V0_PARENTS_FIXTURE, V7_FIXTURE, V8_FIXTURE};
+use common::{
+    Env, FTS_TABLES, V0_FIXTURE, V0_LABELS_FIXTURE, V0_PARENTS_FIXTURE, V7_FIXTURE, V8_FIXTURE,
+    V010_DIRTY_FIXTURE, exec, foreign_key_violations, fts_integrity, user_version,
+};
 use lcl_core::SCHEMA_VERSION;
 use serde_json::Value;
 use std::path::Path;
@@ -65,7 +68,7 @@ const UNTITLED: &str = "b22accd5-f92e-4f8d-938a-4e8ee5ae1d96";
 /// doc-parent phrases and `cycles` in place of its two cycle phrases.
 fn line(cycles: &str, docs: &str) -> String {
     format!(
-        "lcl: upgraded workspace \"prob\" to schema 10: named 1 blank label, reset 4 label colours, moved 3 unreadable due dates into descriptions, cleared 1 blank due date, {cycles}, cleared 1 negative estimate, {docs}, cleaned 3 comment authors\n"
+        "lcl: upgraded workspace \"prob\" to schema 11: named 1 blank label, reset 4 label colours, moved 3 unreadable due dates into descriptions, cleared 1 blank due date, {cycles}, cleared 1 negative estimate, {docs}, cleaned 3 comment authors\n"
     )
 }
 
@@ -90,7 +93,7 @@ fn upgrade(env: &Env) -> String {
     out.assert_ok();
     let shown: Value = out.json();
     assert_eq!(shown["schema_version"], SCHEMA_VERSION, "{out:#?}");
-    assert_eq!(user_version(&env.db_path()), 10);
+    assert_eq!(user_version(&env.db_path()), SCHEMA_VERSION);
     out.stderr
 }
 
@@ -110,27 +113,65 @@ fn s(v: &str) -> Option<String> {
 /// What each issue's title, description, due date, estimate and times are
 /// after the upgrade, by number.
 fn issues(db: &Path) -> Vec<Vec<Option<String>>> {
-    table(db, "SELECT CAST(number AS TEXT), title, description, due_date, CAST(estimate AS TEXT), CAST(created_at AS TEXT), CAST(updated_at AS TEXT) FROM issues ORDER BY number", 7)
+    table(
+        db,
+        "SELECT CAST(number AS TEXT), title, description, due_date, CAST(estimate AS TEXT), CAST(created_at AS TEXT), CAST(updated_at AS TEXT) FROM issues ORDER BY number",
+        7,
+    )
 }
 
-fn issue(n: &str, title: &str, description: &str, due: Option<&str>, estimate: Option<&str>) -> Vec<Option<String>> {
-    vec![s(n), s(title), s(description), due.map(String::from), estimate.map(String::from), s(&T.to_string()), s(&T.to_string())]
+fn issue(
+    n: &str,
+    title: &str,
+    description: &str,
+    due: Option<&str>,
+    estimate: Option<&str>,
+) -> Vec<Option<String>> {
+    vec![
+        s(n),
+        s(title),
+        s(description),
+        due.map(String::from),
+        estimate.map(String::from),
+        s(&T.to_string()),
+        s(&T.to_string()),
+    ]
 }
 
 fn cycles(db: &Path) -> Vec<Vec<Option<String>>> {
-    table(db, "SELECT id, name, starts_at, ends_at, CAST(created_at AS TEXT) FROM cycles ORDER BY id", 5)
+    table(
+        db,
+        "SELECT id, name, starts_at, ends_at, CAST(created_at AS TEXT) FROM cycles ORDER BY id",
+        5,
+    )
 }
 
 fn cycle(id: &str, name: &str, starts: Option<&str>, ends: Option<&str>) -> Vec<Option<String>> {
-    vec![s(id), s(name), starts.map(String::from), ends.map(String::from), s(&T.to_string())]
+    vec![
+        s(id),
+        s(name),
+        starts.map(String::from),
+        ends.map(String::from),
+        s(&T.to_string()),
+    ]
 }
 
 fn docs(db: &Path) -> Vec<Vec<Option<String>>> {
-    table(db, "SELECT id, title, parent_id, CAST(created_at AS TEXT), CAST(updated_at AS TEXT) FROM docs ORDER BY id", 5)
+    table(
+        db,
+        "SELECT id, title, parent_id, CAST(created_at AS TEXT), CAST(updated_at AS TEXT) FROM docs ORDER BY id",
+        5,
+    )
 }
 
 fn doc(id: &str, title: &str, parent: Option<&str>) -> Vec<Option<String>> {
-    vec![s(id), s(title), parent.map(String::from), s(&T.to_string()), s(&T.to_string())]
+    vec![
+        s(id),
+        s(title),
+        parent.map(String::from),
+        s(&T.to_string()),
+        s(&T.to_string()),
+    ]
 }
 
 #[test]
@@ -144,12 +185,36 @@ fn the_upgrade_repairs_what_0_1_0_accepted_and_says_so_once() {
     assert_eq!(
         table(&db, "SELECT id, name, color FROM labels ORDER BY id", 3),
         [
-            [s("1fcf7d83-73cb-435f-8802-12e1bcba019b"), s("keep"), s("#00aa11")],
-            [s("212e23d1-b65c-451e-be7c-19933b97b058"), s("bug"), s("#888888")],
-            [s("38ef3607-ec2b-4787-8825-3273b47ae109"), s("unnamed"), s("#888888")],
-            [s("405a2096-d7ea-42c0-92b0-9e5a3eb246a3"), s("x"), s("#888888")],
-            [s("590e4e13-7a77-416c-9575-c3ccb525462d"), s("padded"), s("#888888")],
-            [s("e39e5ec7-109a-4437-a835-0c99d510a26a"), s("nocolor"), s("#888888")],
+            [
+                s("1fcf7d83-73cb-435f-8802-12e1bcba019b"),
+                s("keep"),
+                s("#00aa11")
+            ],
+            [
+                s("212e23d1-b65c-451e-be7c-19933b97b058"),
+                s("bug"),
+                s("#888888")
+            ],
+            [
+                s("38ef3607-ec2b-4787-8825-3273b47ae109"),
+                s("unnamed"),
+                s("#888888")
+            ],
+            [
+                s("405a2096-d7ea-42c0-92b0-9e5a3eb246a3"),
+                s("x"),
+                s("#888888")
+            ],
+            [
+                s("590e4e13-7a77-416c-9575-c3ccb525462d"),
+                s("padded"),
+                s("#888888")
+            ],
+            [
+                s("e39e5ec7-109a-4437-a835-0c99d510a26a"),
+                s("nocolor"),
+                s("#888888")
+            ],
         ]
     );
     // M3, M4: unreadable due dates move into the description (after a blank
@@ -164,7 +229,13 @@ fn the_upgrade_repairs_what_0_1_0_accepted_and_says_so_once() {
             issue("3", "   ", "Due (from 0.1.0): 2026-02-30", None, None),
             issue("4", "t4", "", None, None),
             issue("5", "t8", "", None, None),
-            issue("6", "with text", "has text\n\nDue (from 0.1.0): end of month", None, None),
+            issue(
+                "6",
+                "with text",
+                "has text\n\nDue (from 0.1.0): end of month",
+                None,
+                None
+            ),
             issue("7", "blank due", "", None, None),
             issue("8", "good", "", Some("2026-12-24"), Some("0")),
         ]
@@ -174,10 +245,30 @@ fn the_upgrade_repairs_what_0_1_0_accepted_and_says_so_once() {
     assert_eq!(
         cycles(&db),
         [
-            cycle("2934fb1c-735c-4123-bd9e-8922c55c372f", "Sprint 2", Some("2026-11-01"), Some("2026-11-14")),
-            cycle("29ade97e-eeac-4de5-9f98-656f5a5628c2", "  (start: soon) (end: 2026-13-01)", None, None),
-            cycle("a15539d1-b743-428a-a9df-2cc151a2bd49", "c2", None, Some("2026-12-31")),
-            cycle("a88d68db-06a3-41d9-a1cb-794104df41da", "Sprint 1 (start: soon)", None, Some("2026-11-14")),
+            cycle(
+                "2934fb1c-735c-4123-bd9e-8922c55c372f",
+                "Sprint 2",
+                Some("2026-11-01"),
+                Some("2026-11-14")
+            ),
+            cycle(
+                "29ade97e-eeac-4de5-9f98-656f5a5628c2",
+                "  (start: soon) (end: 2026-13-01)",
+                None,
+                None
+            ),
+            cycle(
+                "a15539d1-b743-428a-a9df-2cc151a2bd49",
+                "c2",
+                None,
+                Some("2026-12-31")
+            ),
+            cycle(
+                "a88d68db-06a3-41d9-a1cb-794104df41da",
+                "Sprint 1 (start: soon)",
+                None,
+                Some("2026-11-14")
+            ),
         ]
     );
     // M5: "nope" and "d1" name no doc and are cleared; upper's parent, top's
@@ -195,7 +286,12 @@ fn the_upgrade_repairs_what_0_1_0_accepted_and_says_so_once() {
     // M6: authors trimmed, and cleared when blank.
     assert_eq!(
         table(&db, "SELECT body, author FROM comments ORDER BY body", 2),
-        [[s("c"), s("bob")], [s("c2"), None], [s("c3"), None], [s("c4"), s("carol")]]
+        [
+            [s("c"), s("bob")],
+            [s("c2"), None],
+            [s("c3"), None],
+            [s("c4"), s("carol")]
+        ]
     );
     fts_integrity(&db, &FTS_TABLES);
     assert_eq!(foreign_key_violations(&db), vec![]);
@@ -214,26 +310,42 @@ fn after_the_upgrade_export_import_export_is_byte_identical() {
     let env = dirty("");
     upgrade(&env);
     let first = env.lcl(&["export"]).assert_ok().stdout.clone();
-    assert!(first.contains("\"name\":\"Sprint 1 (start: soon)\""), "{first}");
+    assert!(
+        first.contains("\"name\":\"Sprint 1 (start: soon)\""),
+        "{first}"
+    );
     let new = Env::new();
     new.lcl(&["init", "prob", "--key", "PROB"]).assert_ok();
     let out = new.lcl_stdin(&["import", "-"], first.as_bytes());
     out.assert_ok();
     assert_eq!(out.stderr, "", "a new workspace has nothing to upgrade");
-    assert!(new.lcl(&["export"]).assert_ok().stdout == first, "the upgraded fixture didn't round-trip");
+    assert!(
+        new.lcl(&["export"]).assert_ok().stdout == first,
+        "the upgraded fixture didn't round-trip"
+    );
 }
 
 /// Every other fixture holds only readable values, so its upgrade prints
 /// nothing; nor does a new workspace's first open.
 #[test]
 fn a_clean_workspace_upgrades_without_a_word() {
-    for fixture in [V0_FIXTURE, V0_LABELS_FIXTURE, V0_PARENTS_FIXTURE, V7_FIXTURE, V8_FIXTURE] {
+    for fixture in [
+        V0_FIXTURE,
+        V0_LABELS_FIXTURE,
+        V0_PARENTS_FIXTURE,
+        V7_FIXTURE,
+        V8_FIXTURE,
+    ] {
         let env = Env::new();
         let db = env.install_db(fixture);
         assert!(user_version(&db) < 10, "{fixture}");
         let out = env.lcl(&["--json", "issue", "list"]);
         out.assert_ok();
-        assert_eq!((user_version(&db), out.stderr.as_str()), (10, ""), "{fixture}");
+        assert_eq!(
+            (user_version(&db), out.stderr.as_str()),
+            (SCHEMA_VERSION, ""),
+            "{fixture}"
+        );
         out.json();
     }
     let env = Env::new();
@@ -257,11 +369,29 @@ fn a_blank_date_is_just_cleared() {
     let db = env.db_path();
     assert_eq!(
         upgrade(&env),
-        line("renamed 3 cycles with unreadable dates, cleared 1 blank cycle date", DOCS).replace("cleared 1 blank due date", "cleared 2 blank due dates")
+        line(
+            "renamed 3 cycles with unreadable dates, cleared 1 blank cycle date",
+            DOCS
+        )
+        .replace("cleared 1 blank due date", "cleared 2 blank due dates")
     );
     let rows = issues(&db);
-    assert_eq!((&rows[1], &rows[6]), (&issue("2", "", "kept", None, None), &issue("7", "blank due", "", None, None)));
-    assert_eq!(cycles(&db)[2], cycle("a15539d1-b743-428a-a9df-2cc151a2bd49", "c2 (end: later)", None, None));
+    assert_eq!(
+        (&rows[1], &rows[6]),
+        (
+            &issue("2", "", "kept", None, None),
+            &issue("7", "blank due", "", None, None)
+        )
+    );
+    assert_eq!(
+        cycles(&db)[2],
+        cycle(
+            "a15539d1-b743-428a-a9df-2cc151a2bd49",
+            "c2 (end: later)",
+            None,
+            None
+        )
+    );
 }
 
 /// A doc-parent loop, which only a direct writer can make: every link on it
@@ -276,7 +406,10 @@ fn every_link_on_a_doc_parent_loop_is_cleared() {
         child = CHILD.to_uppercase()
     ));
     let db = env.db_path();
-    assert_eq!(upgrade(&env), line(CYCLES, "cleared 4 doc parents, lowercased 1 doc parent"));
+    assert_eq!(
+        upgrade(&env),
+        line(CYCLES, "cleared 4 doc parents, lowercased 1 doc parent")
+    );
     assert_eq!(
         docs(&db),
         [
@@ -299,7 +432,11 @@ fn a_blank_label_takes_the_first_free_unnamed_name() {
     );
     assert_eq!(upgrade(&env), line(CYCLES, DOCS));
     assert_eq!(
-        table(&env.db_path(), "SELECT name FROM labels WHERE id = '38ef3607-ec2b-4787-8825-3273b47ae109'", 1),
+        table(
+            &env.db_path(),
+            "SELECT name FROM labels WHERE id = '38ef3607-ec2b-4787-8825-3273b47ae109'",
+            1
+        ),
         [[s("unnamed-3")]]
     );
 }
@@ -312,7 +449,7 @@ fn init_on_a_0_1_0_file_says_what_the_upgrade_changed() {
     let out = env.lcl(&["init", "prob", "--key", "PROB"]);
     out.assert_ok();
     assert_eq!(out.stderr, line(CYCLES, DOCS), "{out:#?}");
-    assert_eq!(user_version(&env.db_path()), 10);
+    assert_eq!(user_version(&env.db_path()), SCHEMA_VERSION);
     let again = env.lcl(&["--json", "workspace", "show"]);
     again.assert_ok();
     assert_eq!(again.stderr, "");
@@ -326,9 +463,21 @@ fn a_comment_author_is_trimmed_of_any_whitespace() {
         "UPDATE comments SET author = '\tcarol' WHERE body = 'c4';
          UPDATE comments SET author = '\u{3000}bob\u{3000}' WHERE body = 'c';",
     );
-    assert_eq!(upgrade(&env), line(CYCLES, DOCS).replace("cleaned 3 comment authors", "cleaned 4 comment authors"));
     assert_eq!(
-        table(&env.db_path(), "SELECT body, author FROM comments ORDER BY body", 2),
-        [[s("c"), s("bob")], [s("c2"), None], [s("c3"), None], [s("c4"), s("carol")]]
+        upgrade(&env),
+        line(CYCLES, DOCS).replace("cleaned 3 comment authors", "cleaned 4 comment authors")
+    );
+    assert_eq!(
+        table(
+            &env.db_path(),
+            "SELECT body, author FROM comments ORDER BY body",
+            2
+        ),
+        [
+            [s("c"), s("bob")],
+            [s("c2"), None],
+            [s("c3"), None],
+            [s("c4"), s("carol")]
+        ]
     );
 }

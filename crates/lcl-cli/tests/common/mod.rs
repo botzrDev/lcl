@@ -15,8 +15,15 @@ use tempfile::TempDir;
 /// or, when `args` has `--json` before any `--`, one JSON line,
 /// `{"error":{"kind":K,"message":M}}`.
 pub fn error_text(args: &[&str], kind: &str, message: &str) -> String {
-    if args.iter().take_while(|a| **a != "--").any(|a| *a == "--json") {
-        format!("{}\n", serde_json::json!({"error": {"kind": kind, "message": message}}))
+    if args
+        .iter()
+        .take_while(|a| **a != "--")
+        .any(|a| *a == "--json")
+    {
+        format!(
+            "{}\n",
+            serde_json::json!({"error": {"kind": kind, "message": message}})
+        )
     } else {
         format!("Error: {message}\n")
     }
@@ -29,16 +36,28 @@ pub fn argv(args: &[&str]) -> Vec<String> {
 
 /// lcl 0.1.0's workspace index, and the file of one workspace it lists. See
 /// tests/workspaces.rs for how they were built.
-pub const V0_INDEX_FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/v0-index.sqlite");
-pub const V0_INDEX_ALPHA_FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/v0-index-alpha.sqlite");
+pub const V0_INDEX_FIXTURE: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/v0-index.sqlite"
+);
+pub const V0_INDEX_ALPHA_FIXTURE: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/v0-index-alpha.sqlite"
+);
 
 /// lcl 0.1.0's index holding a cwd workspace (made by its `init`) and a
 /// global one, the shape of a real index. See tests/workspaces.rs.
-pub const V0_INDEX_CWD_FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/v0-index-cwd.sqlite");
+pub const V0_INDEX_CWD_FIXTURE: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/v0-index-cwd.sqlite"
+);
 
 /// A workspace index written by a build of 097af5c, which opened it as a
 /// workspace: user_version 7. See tests/workspaces.rs.
-pub const V7_INDEX_FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/v7-index.sqlite");
+pub const V7_INDEX_FIXTURE: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/v7-index.sqlite"
+);
 
 /// A workspace written by a build of 097af5c (schema v7) with a label, a
 /// parent, a blocks and a duplicate relation, a comment and a doc. See
@@ -55,16 +74,25 @@ pub const V0_FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixture
 
 /// A 0.1.0 database whose issues have parents typed in every form 0.1.0
 /// accepted. See tests/parents.rs for how it was built.
-pub const V0_PARENTS_FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/v0-parents.sqlite");
+pub const V0_PARENTS_FIXTURE: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/v0-parents.sqlite"
+);
 
 /// A 0.1.0 database with duplicate labels, labels attached by raw name in
 /// mixed case and by id, blank labels and blank assignees. See
 /// tests/labels.rs for how it was built.
-pub const V0_LABELS_FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/v0-labels.sqlite");
+pub const V0_LABELS_FIXTURE: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/v0-labels.sqlite"
+);
 
 /// A 0.1.0 database holding every value 0.1.0 accepted that lcl can't
 /// read, for migration 10. See tests/v010_repairs.rs for how it was built.
-pub const V010_DIRTY_FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/v010-dirty.sqlite");
+pub const V010_DIRTY_FIXTURE: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/v010-dirty.sqlite"
+);
 
 /// What one `lcl` invocation produced.
 #[derive(Debug)]
@@ -108,7 +136,11 @@ impl Env {
         // test against it.
         for dir in env.cwd.path().ancestors().skip(1) {
             let stray = dir.join(".lcl").join("data.sqlite");
-            assert!(!stray.exists(), "stray lcl database at {} would leak into tests", stray.display());
+            assert!(
+                !stray.exists(),
+                "stray lcl database at {} would leak into tests",
+                stray.display()
+            );
         }
         env
     }
@@ -126,7 +158,13 @@ impl Env {
 
     /// As `lcl`, with stdin opened on /dev/null.
     pub fn lcl_devnull(&self, args: &[&str]) -> Out {
-        self.run(args, None, std::fs::File::open("/dev/null").expect("open /dev/null").into())
+        self.run(
+            args,
+            None,
+            std::fs::File::open("/dev/null")
+                .expect("open /dev/null")
+                .into(),
+        )
     }
 
     /// The command `lcl` runs, for wrapping in another program.
@@ -163,7 +201,12 @@ impl Env {
     }
 
     /// As `lcl_stdin`, after `adjust` has changed the command.
-    pub fn lcl_stdin_with(&self, args: &[&str], input: &[u8], adjust: impl FnOnce(&mut Command)) -> Out {
+    pub fn lcl_stdin_with(
+        &self,
+        args: &[&str],
+        input: &[u8],
+        adjust: impl FnOnce(&mut Command),
+    ) -> Out {
         self.run_with(args, Some(input), Stdio::piped(), adjust)
     }
 
@@ -171,7 +214,13 @@ impl Env {
         self.run_with(args, input, stdin, |_| {})
     }
 
-    fn run_with(&self, args: &[&str], input: Option<&[u8]>, stdin: Stdio, adjust: impl FnOnce(&mut Command)) -> Out {
+    fn run_with(
+        &self,
+        args: &[&str],
+        input: Option<&[u8]>,
+        stdin: Stdio,
+        adjust: impl FnOnce(&mut Command),
+    ) -> Out {
         let mut cmd = self.command(env!("CARGO_BIN_EXE_lcl"));
         adjust(&mut cmd);
         let mut child = cmd
@@ -194,11 +243,14 @@ impl Env {
         });
         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-        let code = output
-            .status
-            .code()
-            .unwrap_or_else(|| panic!("lcl {args:?} killed by a signal\nstdout: {stdout}\nstderr: {stderr}"));
-        Out { code, stdout, stderr }
+        let code = output.status.code().unwrap_or_else(|| {
+            panic!("lcl {args:?} killed by a signal\nstdout: {stdout}\nstderr: {stderr}")
+        });
+        Out {
+            code,
+            stdout,
+            stderr,
+        }
     }
 
     /// Runs every command at once: one thread per command, all released
@@ -217,7 +269,10 @@ impl Env {
                     })
                 })
                 .collect();
-            handles.into_iter().map(|h| h.join().expect("thread panicked")).collect()
+            handles
+                .into_iter()
+                .map(|h| h.join().expect("thread panicked"))
+                .collect()
         })
     }
 
@@ -225,7 +280,9 @@ impl Env {
     #[track_caller]
     pub fn create(&self, title: &str) -> i64 {
         let out = self.lcl(&["issue", "create", "--title", title, "--json"]);
-        out.assert_ok().json()["number"].as_i64().unwrap_or_else(|| panic!("no number in {out:#?}"))
+        out.assert_ok().json()["number"]
+            .as_i64()
+            .unwrap_or_else(|| panic!("no number in {out:#?}"))
     }
 
     /// The project database lcl discovers from this env's cwd.
@@ -247,7 +304,9 @@ impl Env {
 /// Every file under this env's HOME and cwd, with its bytes.
 pub fn files(env: &Env) -> BTreeMap<PathBuf, Vec<u8>> {
     fn walk(dir: &Path, out: &mut BTreeMap<PathBuf, Vec<u8>>) {
-        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
         for entry in entries {
             let path = entry.expect("dir entry").path();
             if path.is_dir() {
@@ -266,20 +325,23 @@ pub fn files(env: &Env) -> BTreeMap<PathBuf, Vec<u8>> {
 /// Reads `PRAGMA user_version` directly, bypassing lcl.
 pub fn user_version(db: &Path) -> i64 {
     let conn = rusqlite::Connection::open(db).expect("open db");
-    conn.pragma_query_value(None, "user_version", |r| r.get(0)).expect("read user_version")
+    conn.pragma_query_value(None, "user_version", |r| r.get(0))
+        .expect("read user_version")
 }
 
 /// Writes `PRAGMA user_version` directly, bypassing lcl.
 pub fn set_user_version(db: &Path, v: i64) {
     let conn = rusqlite::Connection::open(db).expect("open db");
-    conn.pragma_update(None, "user_version", v).expect("write user_version");
+    conn.pragma_update(None, "user_version", v)
+        .expect("write user_version");
 }
 
 /// Runs SQL directly against `db`, bypassing lcl (to fake hand edits or
 /// older binaries).
 pub fn exec(db: &Path, sql: &str) {
     let conn = rusqlite::Connection::open(db).expect("open db");
-    conn.execute_batch(sql).unwrap_or_else(|e| panic!("{sql}: {e}"));
+    conn.execute_batch(sql)
+        .unwrap_or_else(|e| panic!("{sql}: {e}"));
 }
 
 /// One database row, keyed by column name.
@@ -288,15 +350,24 @@ pub type Row = BTreeMap<String, Value>;
 /// Every column of issue `number`, read directly.
 pub fn issue_row(db: &Path, number: i64) -> Row {
     let conn = rusqlite::Connection::open(db).expect("open db");
-    rows(&conn, &format!("SELECT * FROM issues WHERE number = {number}")).pop().unwrap_or_else(|| panic!("no issue {number}"))
+    rows(
+        &conn,
+        &format!("SELECT * FROM issues WHERE number = {number}"),
+    )
+    .pop()
+    .unwrap_or_else(|| panic!("no issue {number}"))
 }
 
 fn rows(conn: &rusqlite::Connection, sql: &str) -> Vec<Row> {
     let mut stmt = conn.prepare(sql).unwrap_or_else(|e| panic!("{sql}: {e}"));
     let names: Vec<String> = stmt.column_names().into_iter().map(String::from).collect();
-    stmt.query_map([], |r| (0..names.len()).map(|i| Ok((names[i].clone(), r.get::<_, Value>(i)?))).collect())
-        .and_then(Iterator::collect)
-        .unwrap_or_else(|e| panic!("{sql}: {e}"))
+    stmt.query_map([], |r| {
+        (0..names.len())
+            .map(|i| Ok((names[i].clone(), r.get::<_, Value>(i)?)))
+            .collect()
+    })
+    .and_then(Iterator::collect)
+    .unwrap_or_else(|e| panic!("{sql}: {e}"))
 }
 
 /// Every FTS index lcl keeps.
@@ -308,7 +379,10 @@ pub const FTS_TABLES: [&str; 3] = ["issues_fts", "docs_fts", "comments_fts"];
 /// the check covers the index's internal structure alone.
 pub fn fts_integrity(db: &Path, tables: &[&str]) {
     for t in tables {
-        exec(db, &format!("INSERT INTO {t}({t}, rank) VALUES('integrity-check', 1);"));
+        exec(
+            db,
+            &format!("INSERT INTO {t}({t}, rank) VALUES('integrity-check', 1);"),
+        );
     }
 }
 
@@ -324,10 +398,22 @@ pub fn foreign_key_violations(db: &Path) -> Vec<Row> {
 /// label names (removed).
 pub fn undo_v5_schema(after: &mut Dump, before: &mut Dump) {
     let t = |s: &str| Value::Text(s.into());
-    let index = after.schema.iter().position(|r| r["name"] == t("labels_name")).expect("labels_name index");
+    let index = after
+        .schema
+        .iter()
+        .position(|r| r["name"] == t("labels_name"))
+        .expect("labels_name index");
     let index = after.schema.remove(index);
-    assert_eq!(index["sql"], t("CREATE UNIQUE INDEX labels_name ON labels(name COLLATE NOCASE)"));
-    let sql = after.schema.iter().find(|r| r["name"] == t("issue_labels")).map(|r| format!("{:?}", r["sql"])).unwrap_or_default();
+    assert_eq!(
+        index["sql"],
+        t("CREATE UNIQUE INDEX labels_name ON labels(name COLLATE NOCASE)")
+    );
+    let sql = after
+        .schema
+        .iter()
+        .find(|r| r["name"] == t("issue_labels"))
+        .map(|r| format!("{:?}", r["sql"]))
+        .unwrap_or_default();
     assert!(
         sql.contains("issue_id TEXT NOT NULL REFERENCES issues(id) ON DELETE CASCADE")
             && sql.contains("label_id TEXT NOT NULL REFERENCES labels(id) ON DELETE CASCADE"),
@@ -344,15 +430,34 @@ pub fn undo_v5_schema(after: &mut Dump, before: &mut Dump) {
 /// integrity-check.
 pub fn undo_v6_schema(after: &mut Dump) {
     let t = |s: &str| Value::Text(s.into());
-    let fts = after.schema.iter().find(|r| r["name"] == t("comments_fts")).expect("comments_fts");
-    assert_eq!(fts["sql"], t("CREATE VIRTUAL TABLE comments_fts USING fts5(body, content='comments', content_rowid='rowid')"));
+    let fts = after
+        .schema
+        .iter()
+        .find(|r| r["name"] == t("comments_fts"))
+        .expect("comments_fts");
+    assert_eq!(
+        fts["sql"],
+        t(
+            "CREATE VIRTUAL TABLE comments_fts USING fts5(body, content='comments', content_rowid='rowid')"
+        )
+    );
     for trigger in ["comments_ai", "comments_ad", "comments_au"] {
-        let row = after.schema.iter().find(|r| r["name"] == t(trigger)).unwrap_or_else(|| panic!("trigger {trigger}"));
-        assert_eq!((&row["type"], &row["tbl_name"]), (&t("trigger"), &t("comments")), "{trigger}");
+        let row = after
+            .schema
+            .iter()
+            .find(|r| r["name"] == t(trigger))
+            .unwrap_or_else(|| panic!("trigger {trigger}"));
+        assert_eq!(
+            (&row["type"], &row["tbl_name"]),
+            (&t("trigger"), &t("comments")),
+            "{trigger}"
+        );
     }
     let ours = |name: &Value| matches!(name, Value::Text(n) if n.starts_with("comments_fts") || ["comments_ai", "comments_ad", "comments_au"].contains(&n.as_str()));
     after.schema.retain(|r| !ours(&r["name"]));
-    after.tables.retain(|name, _| !name.starts_with("comments_fts"));
+    after
+        .tables
+        .retain(|name, _| !name.starts_with("comments_fts"));
 }
 
 /// Undoes migration 7's schema changes on an upgraded dump, after checking
@@ -360,8 +465,14 @@ pub fn undo_v6_schema(after: &mut Dump) {
 /// index, its reverse index, and the one-duplicate-target index.
 pub fn undo_v7_schema(after: &mut Dump) {
     let t = |s: &str| Value::Text(s.into());
-    let table = after.schema.iter().find(|r| r["name"] == t("issue_relations")).expect("issue_relations");
-    let Value::Text(sql) = &table["sql"] else { panic!("{table:?}") };
+    let table = after
+        .schema
+        .iter()
+        .find(|r| r["name"] == t("issue_relations"))
+        .expect("issue_relations");
+    let Value::Text(sql) = &table["sql"] else {
+        panic!("{table:?}")
+    };
     for part in [
         "issue_id TEXT NOT NULL REFERENCES issues(id) ON DELETE CASCADE",
         "related_id TEXT NOT NULL REFERENCES issues(id) ON DELETE CASCADE",
@@ -371,11 +482,31 @@ pub fn undo_v7_schema(after: &mut Dump) {
     ] {
         assert!(sql.contains(part), "{part} missing from {sql}");
     }
-    let index = after.schema.iter().find(|r| r["name"] == t("issue_relations_related")).expect("issue_relations_related");
-    assert_eq!(index["sql"], t("CREATE INDEX issue_relations_related ON issue_relations(related_id, kind)"));
-    let one = after.schema.iter().find(|r| r["name"] == t("issue_relations_one_duplicate")).expect("issue_relations_one_duplicate");
-    assert_eq!(one["sql"], t("CREATE UNIQUE INDEX issue_relations_one_duplicate ON issue_relations(issue_id) WHERE kind = 'duplicate'"));
-    assert_eq!(after.tables.get("issue_relations").map(Vec::len), Some(0), "an upgrade adds no relations");
+    let index = after
+        .schema
+        .iter()
+        .find(|r| r["name"] == t("issue_relations_related"))
+        .expect("issue_relations_related");
+    assert_eq!(
+        index["sql"],
+        t("CREATE INDEX issue_relations_related ON issue_relations(related_id, kind)")
+    );
+    let one = after
+        .schema
+        .iter()
+        .find(|r| r["name"] == t("issue_relations_one_duplicate"))
+        .expect("issue_relations_one_duplicate");
+    assert_eq!(
+        one["sql"],
+        t(
+            "CREATE UNIQUE INDEX issue_relations_one_duplicate ON issue_relations(issue_id) WHERE kind = 'duplicate'"
+        )
+    );
+    assert_eq!(
+        after.tables.get("issue_relations").map(Vec::len),
+        Some(0),
+        "an upgrade adds no relations"
+    );
     let ours = |name: &Value| matches!(name, Value::Text(n) if n.starts_with("issue_relations") || n.starts_with("sqlite_autoindex_issue_relations"));
     after.schema.retain(|r| !ours(&r["name"]));
     after.tables.remove("issue_relations");
@@ -427,7 +558,8 @@ END"),
 
 /// What migration 8's two ADD COLUMNs append to the issues table's CREATE
 /// statement, before its closing parenthesis.
-pub const V8_ISSUE_COLUMNS: &str = ", project_id TEXT REFERENCES projects(id), milestone_id TEXT REFERENCES milestones(id))";
+pub const V8_ISSUE_COLUMNS: &str =
+    ", project_id TEXT REFERENCES projects(id), milestone_id TEXT REFERENCES milestones(id))";
 
 /// Undoes migration 8's schema changes on an upgraded dump, after checking
 /// them: the exact SQL of every table, index and trigger it adds (and the
@@ -437,32 +569,59 @@ pub const V8_ISSUE_COLUMNS: &str = ", project_id TEXT REFERENCES projects(id), m
 pub fn undo_v8_schema(after: &mut Dump) {
     let t = |s: &str| Value::Text(s.into());
     for (name, sql) in V8_SCHEMA {
-        let row = after.schema.iter().find(|r| r["name"] == t(name)).unwrap_or_else(|| panic!("{name} missing"));
+        let row = after
+            .schema
+            .iter()
+            .find(|r| r["name"] == t(name))
+            .unwrap_or_else(|| panic!("{name} missing"));
         assert_eq!(row["sql"], t(sql), "{name}");
     }
-    for (name, table) in [("sqlite_autoindex_projects_1", "projects"), ("sqlite_autoindex_milestones_1", "milestones"), ("sqlite_autoindex_milestones_2", "milestones")] {
-        let row = after.schema.iter().find(|r| r["name"] == t(name)).unwrap_or_else(|| panic!("{name} missing"));
-        assert_eq!((&row["type"], &row["tbl_name"], &row["sql"]), (&t("index"), &t(table), &Value::Null), "{name}");
+    for (name, table) in [
+        ("sqlite_autoindex_projects_1", "projects"),
+        ("sqlite_autoindex_milestones_1", "milestones"),
+        ("sqlite_autoindex_milestones_2", "milestones"),
+    ] {
+        let row = after
+            .schema
+            .iter()
+            .find(|r| r["name"] == t(name))
+            .unwrap_or_else(|| panic!("{name} missing"));
+        assert_eq!(
+            (&row["type"], &row["tbl_name"], &row["sql"]),
+            (&t("index"), &t(table), &Value::Null),
+            "{name}"
+        );
     }
-    let ours = |name: &Value| {
-        matches!(name, Value::Text(n) if V8_SCHEMA.iter().any(|(v8, _)| v8 == n) || n.starts_with("sqlite_autoindex_projects") || n.starts_with("sqlite_autoindex_milestones"))
-    };
+    let ours = |name: &Value| matches!(name, Value::Text(n) if V8_SCHEMA.iter().any(|(v8, _)| v8 == n) || n.starts_with("sqlite_autoindex_projects") || n.starts_with("sqlite_autoindex_milestones"));
     after.schema.retain(|r| !ours(&r["name"]));
     for table in ["projects", "milestones"] {
-        assert_eq!(after.tables.remove(table).map(|rows| rows.len()), Some(0), "an upgrade adds no {table}");
+        assert_eq!(
+            after.tables.remove(table).map(|rows| rows.len()),
+            Some(0),
+            "an upgrade adds no {table}"
+        );
     }
     for row in after.tables.get_mut("issues").expect("issues table") {
         assert_eq!(row.remove("project_id"), Some(Value::Null), "{row:?}");
         assert_eq!(row.remove("milestone_id"), Some(Value::Null), "{row:?}");
     }
-    let issues = after.schema.iter_mut().find(|r| r["name"] == t("issues")).expect("issues");
-    let Value::Text(sql) = &issues["sql"] else { panic!("{issues:?}") };
-    let v7 = sql.strip_suffix(V8_ISSUE_COLUMNS).unwrap_or_else(|| panic!("the v8 columns aren't at the end of {sql}"));
+    let issues = after
+        .schema
+        .iter_mut()
+        .find(|r| r["name"] == t("issues"))
+        .expect("issues");
+    let Value::Text(sql) = &issues["sql"] else {
+        panic!("{issues:?}")
+    };
+    let v7 = sql
+        .strip_suffix(V8_ISSUE_COLUMNS)
+        .unwrap_or_else(|| panic!("the v8 columns aren't at the end of {sql}"));
     issues.insert("sql".into(), Value::Text(format!("{v7})")));
 }
 
 /// Migration 9's index, as sqlite_master keeps it.
-pub const V9_REF_INDEX: &str = "CREATE UNIQUE INDEX issues_ref ON issues(ref COLLATE NOCASE) WHERE ref IS NOT NULL";
+pub const V9_REF_INDEX: &str =
+    "CREATE UNIQUE INDEX issues_ref ON issues(ref COLLATE NOCASE) WHERE ref IS NOT NULL";
 
 /// What migration 9's two ADD COLUMNs append to the issues table's CREATE
 /// statement, before its closing parenthesis.
@@ -475,16 +634,31 @@ pub const V9_ISSUE_COLUMNS: &str = ", ref TEXT, creator TEXT)";
 /// these.
 pub fn undo_v9_schema(after: &mut Dump) {
     let t = |s: &str| Value::Text(s.into());
-    let index = after.schema.iter().find(|r| r["name"] == t("issues_ref")).expect("issues_ref missing");
-    assert_eq!((&index["type"], &index["tbl_name"], &index["sql"]), (&t("index"), &t("issues"), &t(V9_REF_INDEX)));
+    let index = after
+        .schema
+        .iter()
+        .find(|r| r["name"] == t("issues_ref"))
+        .expect("issues_ref missing");
+    assert_eq!(
+        (&index["type"], &index["tbl_name"], &index["sql"]),
+        (&t("index"), &t("issues"), &t(V9_REF_INDEX))
+    );
     after.schema.retain(|r| r["name"] != t("issues_ref"));
     for row in after.tables.get_mut("issues").expect("issues table") {
         assert_eq!(row.remove("ref"), Some(Value::Null), "{row:?}");
         assert_eq!(row.remove("creator"), Some(Value::Null), "{row:?}");
     }
-    let issues = after.schema.iter_mut().find(|r| r["name"] == t("issues")).expect("issues");
-    let Value::Text(sql) = &issues["sql"] else { panic!("{issues:?}") };
-    let v8 = sql.strip_suffix(V9_ISSUE_COLUMNS).unwrap_or_else(|| panic!("the v9 columns aren't at the end of {sql}"));
+    let issues = after
+        .schema
+        .iter_mut()
+        .find(|r| r["name"] == t("issues"))
+        .expect("issues");
+    let Value::Text(sql) = &issues["sql"] else {
+        panic!("{issues:?}")
+    };
+    let v8 = sql
+        .strip_suffix(V9_ISSUE_COLUMNS)
+        .unwrap_or_else(|| panic!("the v9 columns aren't at the end of {sql}"));
     issues.insert("sql".into(), Value::Text(format!("{v8})")));
 }
 
@@ -496,6 +670,83 @@ pub fn undo_v9_schema(after: &mut Dump) {
 /// migration it undoes. Call it before `undo_v9_schema`.
 pub fn undo_v10_schema(_after: &mut Dump) {}
 
+/// Undoes migration 11's schema changes on an upgraded dump, after checking
+/// them. v11 rebuilds `issues`, `comments`, `docs` and `issue_cycles` and
+/// keeps their rowids, indexes and triggers. This puts the four CREATE
+/// statements back: comments, docs and issue_cycles as `before` has them,
+/// and issues as `before` has them plus the ADD COLUMN tails v3, v8 and v9
+/// would have left, which `undo_v9_schema` and `undo_v8_schema` then strip.
+/// Call it before `undo_v10_schema`.
+pub fn undo_v11_schema(after: &mut Dump, before: &Dump) {
+    let t = |s: &str| Value::Text(s.into());
+    let sql_of = |dump: &Dump, name: &str| -> String {
+        let row = dump
+            .schema
+            .iter()
+            .find(|r| r["name"] == t(name))
+            .unwrap_or_else(|| panic!("{name} missing"));
+        match &row["sql"] {
+            Value::Text(s) => s.clone(),
+            other => panic!("{name} sql is {other:?}"),
+        }
+    };
+    let issues = sql_of(after, "issues");
+    for part in [
+        "CHECK (status IN ('Backlog', 'Todo', 'InProgress', 'InReview', 'Done', 'Canceled', 'Duplicate'))",
+        "parent_id TEXT REFERENCES issues(id) ON DELETE RESTRICT",
+    ] {
+        assert!(issues.contains(part), "{part} missing from {issues}");
+    }
+    let comments = sql_of(after, "comments");
+    assert!(
+        comments.contains("issue_id TEXT NOT NULL REFERENCES issues(id) ON DELETE CASCADE"),
+        "{comments}"
+    );
+    let docs = sql_of(after, "docs");
+    assert!(
+        docs.contains("parent_id TEXT REFERENCES docs(id) ON DELETE RESTRICT"),
+        "{docs}"
+    );
+    let cycles = sql_of(after, "issue_cycles");
+    assert!(
+        cycles.contains("REFERENCES issues(id) ON DELETE CASCADE")
+            && cycles.contains("REFERENCES cycles(id) ON DELETE RESTRICT"),
+        "{cycles}"
+    );
+
+    let insert_before_paren = |sql: &str, addition: &str| {
+        let end = sql
+            .rfind(')')
+            .unwrap_or_else(|| panic!("no closing parenthesis in {sql}"));
+        format!("{}{addition}{}", &sql[..end], &sql[end..])
+    };
+    let mut restored = sql_of(before, "issues");
+    if !restored.contains("started_at") {
+        restored = insert_before_paren(&restored, ", started_at INTEGER, canceled_at INTEGER");
+    }
+    if !restored.contains("project_id") {
+        restored = insert_before_paren(
+            &restored,
+            ", project_id TEXT REFERENCES projects(id), milestone_id TEXT REFERENCES milestones(id)",
+        );
+    }
+    if !restored.contains(", ref TEXT") {
+        restored = insert_before_paren(&restored, ", ref TEXT, creator TEXT");
+    }
+    let set_sql = |dump: &mut Dump, name: &str, sql: String| {
+        let row = dump
+            .schema
+            .iter_mut()
+            .find(|r| r["name"] == t(name))
+            .unwrap_or_else(|| panic!("{name} missing"));
+        row.insert("sql".into(), Value::Text(sql));
+    };
+    set_sql(after, "issues", restored);
+    for name in ["comments", "docs", "issue_cycles"] {
+        set_sql(after, name, sql_of(before, name));
+    }
+}
+
 /// The schema plus every row of every table, for before/after comparisons.
 #[derive(Debug, PartialEq)]
 pub struct Dump {
@@ -505,10 +756,17 @@ pub struct Dump {
 
 pub fn dump(db: &Path) -> Dump {
     let conn = rusqlite::Connection::open(db).expect("open db");
-    let schema = rows(&conn, "SELECT type, name, tbl_name, sql FROM sqlite_master ORDER BY name");
+    let schema = rows(
+        &conn,
+        "SELECT type, name, tbl_name, sql FROM sqlite_master ORDER BY name",
+    );
     let mut tables = BTreeMap::new();
     for entry in &schema {
-        let (Value::Text(kind), Value::Text(name), Value::Text(sql)) = (&entry["type"], &entry["name"], &entry["sql"]) else { continue };
+        let (Value::Text(kind), Value::Text(name), Value::Text(sql)) =
+            (&entry["type"], &entry["name"], &entry["sql"])
+        else {
+            continue;
+        };
         if kind != "table" || name.starts_with("sqlite_") {
             continue;
         }
@@ -516,11 +774,20 @@ pub fn dump(db: &Path) -> Dump {
         // changed rowid is a real change. WITHOUT ROWID tables (FTS5's
         // _config and _idx) are ordered by every column instead.
         let data = if sql.contains("WITHOUT ROWID") {
-            let n = conn.prepare(&format!("SELECT * FROM \"{name}\"")).expect("prepare").column_count();
+            let n = conn
+                .prepare(&format!("SELECT * FROM \"{name}\""))
+                .expect("prepare")
+                .column_count();
             let order: Vec<String> = (1..=n).map(|i| i.to_string()).collect();
-            rows(&conn, &format!("SELECT * FROM \"{name}\" ORDER BY {}", order.join(",")))
+            rows(
+                &conn,
+                &format!("SELECT * FROM \"{name}\" ORDER BY {}", order.join(",")),
+            )
         } else {
-            rows(&conn, &format!("SELECT rowid AS \"(rowid)\", * FROM \"{name}\" ORDER BY rowid"))
+            rows(
+                &conn,
+                &format!("SELECT rowid AS \"(rowid)\", * FROM \"{name}\" ORDER BY rowid"),
+            )
         };
         tables.insert(name.clone(), data);
     }

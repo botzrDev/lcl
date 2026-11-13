@@ -18,27 +18,47 @@ fn invalid(msg: impl Into<String>) -> InvalidValue {
 /// 2026-2-3 are both refused.
 pub fn date(s: &str) -> Result<NaiveDate, InvalidValue> {
     let b = s.as_bytes();
-    let shaped = b.len() == 10 && b.iter().enumerate().all(|(i, c)| if i == 4 || i == 7 { *c == b'-' } else { c.is_ascii_digit() });
+    let shaped = b.len() == 10
+        && b.iter().enumerate().all(|(i, c)| {
+            if i == 4 || i == 7 {
+                *c == b'-'
+            } else {
+                c.is_ascii_digit()
+            }
+        });
     shaped
         .then(|| NaiveDate::parse_from_str(s, "%Y-%m-%d").ok())
         .flatten()
-        .ok_or_else(|| invalid(format!("invalid date \"{s}\"; expected a real calendar date as YYYY-MM-DD")))
+        .ok_or_else(|| {
+            invalid(format!(
+                "invalid date \"{s}\"; expected a real calendar date as YYYY-MM-DD"
+            ))
+        })
 }
 
 /// `#rgb` or `#rrggbb`.
 pub fn color(s: &str) -> Result<String, InvalidValue> {
     let hex = s.strip_prefix('#').unwrap_or("");
-    if s.starts_with('#') && matches!(hex.len(), 3 | 6) && hex.chars().all(|c| c.is_ascii_hexdigit()) {
+    if s.starts_with('#')
+        && matches!(hex.len(), 3 | 6)
+        && hex.chars().all(|c| c.is_ascii_hexdigit())
+    {
         Ok(s.to_string())
     } else {
-        Err(invalid(format!("invalid color \"{s}\"; expected #rgb or #rrggbb")))
+        Err(invalid(format!(
+            "invalid color \"{s}\"; expected #rgb or #rrggbb"
+        )))
     }
 }
 
 /// Trimmed; blank is refused with `blank`.
 fn non_blank(s: &str, blank: &str) -> Result<String, InvalidValue> {
     let s = s.trim();
-    if s.is_empty() { Err(invalid(blank)) } else { Ok(s.to_string()) }
+    if s.is_empty() {
+        Err(invalid(blank))
+    } else {
+        Ok(s.to_string())
+    }
 }
 
 /// A label name, trimmed; blank is refused.
@@ -63,13 +83,19 @@ pub fn cycle_name(s: &str) -> Result<String, InvalidValue> {
 
 /// An assignee, trimmed; blank is refused. Unassigning is its own flag.
 pub fn assignee(s: &str) -> Result<String, InvalidValue> {
-    non_blank(s, "an assignee can't be empty; to unassign, use `issue update --no-assignee`")
+    non_blank(
+        s,
+        "an assignee can't be empty; to unassign, use `issue update --no-assignee`",
+    )
 }
 
 /// An issue's creator or a comment's author, trimmed; blank is refused
 /// (leaving it out means LCL_AUTHOR, else USER, on the command line).
 pub fn author(s: &str) -> Result<String, InvalidValue> {
-    non_blank(s, "an author can't be empty; leave --author out to use LCL_AUTHOR or USER")
+    non_blank(
+        s,
+        "an author can't be empty; leave --author out to use LCL_AUTHOR or USER",
+    )
 }
 
 /// An issue's ref: trimmed; at most 100 characters, none of them whitespace
@@ -80,11 +106,17 @@ pub fn issue_ref(s: &str) -> Result<String, InvalidValue> {
     let s = s.trim();
     let chars = s.chars().count();
     if s.is_empty() {
-        Err(invalid("a ref can't be empty; to remove one, use issue update --no-ref"))
+        Err(invalid(
+            "a ref can't be empty; to remove one, use issue update --no-ref",
+        ))
     } else if chars > 100 {
-        Err(invalid(format!("a ref can be at most 100 characters; this one has {chars}")))
+        Err(invalid(format!(
+            "a ref can be at most 100 characters; this one has {chars}"
+        )))
     } else if s.chars().any(|c| c.is_whitespace() || c.is_control()) {
-        Err(invalid(format!("ref {s:?} contains whitespace or a control character")))
+        Err(invalid(format!(
+            "ref {s:?} contains whitespace or a control character"
+        )))
     } else {
         Ok(s.to_string())
     }
@@ -92,7 +124,11 @@ pub fn issue_ref(s: &str) -> Result<String, InvalidValue> {
 
 /// An estimate: zero or more.
 pub fn estimate(n: i64) -> Result<i64, InvalidValue> {
-    if n < 0 { Err(invalid(format!("an estimate can't be negative; got {n}"))) } else { Ok(n) }
+    if n < 0 {
+        Err(invalid(format!("an estimate can't be negative; got {n}")))
+    } else {
+        Ok(n)
+    }
 }
 
 /// A UUID as lcl reads one (36 characters, hyphenated, either case), in the
@@ -112,15 +148,30 @@ mod tests {
     #[test]
     fn dates_must_be_real_and_exactly_shaped() {
         assert!(date("2026-02-28").is_ok());
-        for bad in ["2026-02-30", "2026-2-3", "tomorrow", "2026-13-01", " 2026-02-28", ""] {
+        for bad in [
+            "2026-02-30",
+            "2026-2-3",
+            "tomorrow",
+            "2026-13-01",
+            " 2026-02-28",
+            "",
+        ] {
             assert!(date(bad).is_err(), "{bad:?}");
         }
     }
 
     #[test]
     fn uuids_are_lowercased() {
-        assert_eq!(uuid("0F8FAD5B-D9CB-469F-A165-70867728950E").unwrap(), "0f8fad5b-d9cb-469f-a165-70867728950e");
-        for bad in ["0f8fad5bd9cb469fa16570867728950e", "{0f8fad5b-d9cb-469f-a165-70867728950e}", "nope", ""] {
+        assert_eq!(
+            uuid("0F8FAD5B-D9CB-469F-A165-70867728950E").unwrap(),
+            "0f8fad5b-d9cb-469f-a165-70867728950e"
+        );
+        for bad in [
+            "0f8fad5bd9cb469fa16570867728950e",
+            "{0f8fad5b-d9cb-469f-a165-70867728950e}",
+            "nope",
+            "",
+        ] {
             assert!(uuid(bad).is_err(), "{bad:?}");
         }
     }

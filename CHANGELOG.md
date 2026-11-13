@@ -19,9 +19,9 @@ Before you upgrade:
 
 Each workspace:
 
-- The first command that opens a 0.1.0 workspace upgrades it to schema 10.
+- The first command that opens a 0.1.0 workspace upgrades it to schema 11.
 - If the upgrade changed stored values, it prints one line on stderr saying what it changed. A later command prints nothing.
-- The line reads like `lcl: upgraded workspace "old" to schema 10: moved 1 unreadable due date into a description, …`.
+- The line reads like `lcl: upgraded workspace "old" to schema 11: moved 1 unreadable due date into a description, …`.
 - A workspace with nothing to repair upgrades silently.
 - A due date that isn't a real date written as `YYYY-MM-DD` is cleared.
 - Its text moves to the end of the issue's description, as the line `Due (from 0.1.0): next week`.
@@ -58,6 +58,14 @@ If you go back to 0.1.0:
 - `--project NAME` still opens a global workspace that 0.2.0 created, by its slug.
 - Values 0.1.0 writes, such as a due date of `tomorrow`, aren't repaired again when you return to 0.2.0.
 - `lcl export` then refuses such a value, naming the command that fixes it.
+
+Schema 11, applied on that same open:
+
+- An issue status is stored as one of Backlog, Todo, InProgress, InReview, Done, Canceled, Duplicate.
+- A parent, a comment, a doc parent and a cycle membership name a row that exists.
+- Deleting an issue deletes its comments and its cycle memberships.
+- Deleting an issue or a doc that still has children is refused. Deleting a cycle that still has issues is refused.
+- Opening a workspace checks that the search indexes match their rows. `VACUUM` can break that; lcl does not run it.
 
 ### Changed
 

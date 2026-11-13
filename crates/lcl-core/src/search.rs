@@ -34,7 +34,11 @@ impl SearchQuery {
         if words.is_empty() {
             return Err(LclError::EmptyQuery);
         }
-        let phrases: Vec<String> = words.iter().filter(|w| has_token_chars(w)).map(|w| phrase(w)).collect();
+        let phrases: Vec<String> = words
+            .iter()
+            .filter(|w| has_token_chars(w))
+            .map(|w| phrase(w))
+            .collect();
         if phrases.is_empty() {
             return Err(LclError::NothingToSearch(q.to_string()));
         }
@@ -47,7 +51,11 @@ impl SearchQuery {
             },
             _ => None,
         };
-        Ok(Self { raw: q.to_string(), phrases, identifier })
+        Ok(Self {
+            raw: q.to_string(),
+            phrases,
+            identifier,
+        })
     }
 
     /// The query as typed.
@@ -149,21 +157,55 @@ mod tests {
         assert_eq!(q(r#"say "hi"#).unwrap(), r#""say" """hi""#);
         assert_eq!(q("AND OR NOT NEAR").unwrap(), r#""AND" "OR" "NOT" "NEAR""#);
         assert_eq!(q("writ* x").unwrap(), r#""writ"* "x""#);
-        assert_eq!(q("(x, x) a:b ^x +x -x").unwrap(), r#""(x," "x)" "a:b" "^x" "+x" "-x""#);
-        assert_eq!(q("foo -- *").unwrap(), r#""foo""#, "words with nothing to search for are dropped");
+        assert_eq!(
+            q("(x, x) a:b ^x +x -x").unwrap(),
+            r#""(x," "x)" "a:b" "^x" "+x" "-x""#
+        );
+        assert_eq!(
+            q("foo -- *").unwrap(),
+            r#""foo""#,
+            "words with nothing to search for are dropped"
+        );
         assert!(matches!(SearchQuery::parse(""), Err(LclError::EmptyQuery)));
-        assert!(matches!(SearchQuery::parse(" \t\n"), Err(LclError::EmptyQuery)));
+        assert!(matches!(
+            SearchQuery::parse(" \t\n"),
+            Err(LclError::EmptyQuery)
+        ));
         for nothing in ["--", "*", "\"", "-- * \"\""] {
-            assert!(matches!(SearchQuery::parse(nothing), Err(LclError::NothingToSearch(_))), "{nothing}");
+            assert!(
+                matches!(
+                    SearchQuery::parse(nothing),
+                    Err(LclError::NothingToSearch(_))
+                ),
+                "{nothing}"
+            );
         }
     }
 
     #[test]
     fn only_key_n_and_hash_n_name_an_issue() {
         let id = |s: &str| SearchQuery::parse(s).unwrap().identifier;
-        assert!(matches!(id("DREA-3"), Some(IssueRef::Number { key: Some(_), number: 3 })));
-        assert!(matches!(id("#3"), Some(IssueRef::Number { key: None, number: 3 })));
-        for text in ["3", "DREA-3 x", "0f8fad5b-d9cb-469f-a165-70867728950e", "DREA-", "writ*"] {
+        assert!(matches!(
+            id("DREA-3"),
+            Some(IssueRef::Number {
+                key: Some(_),
+                number: 3
+            })
+        ));
+        assert!(matches!(
+            id("#3"),
+            Some(IssueRef::Number {
+                key: None,
+                number: 3
+            })
+        ));
+        for text in [
+            "3",
+            "DREA-3 x",
+            "0f8fad5b-d9cb-469f-a165-70867728950e",
+            "DREA-",
+            "writ*",
+        ] {
             assert!(id(text).is_none(), "{text}");
         }
     }

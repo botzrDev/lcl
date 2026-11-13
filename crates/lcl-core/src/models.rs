@@ -1,6 +1,64 @@
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 
+/// An issue's id, the text stored as `issues.id`. Minted with `new`, parsed
+/// from a UUID a person typed, or taken from a row with `from_stored`.
+/// A label name or a title does not satisfy this type.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct IssueId(String);
+
+impl IssueId {
+    /// A new random id, the form lcl stores. There is no `Default`: it
+    /// would mint a different id every time.
+    #[allow(clippy::new_without_default)]
+    pub fn new() -> Self {
+        Self(uuid::Uuid::new_v4().to_string())
+    }
+
+    /// A hyphenated UUID, in the lowercase form lcl stores.
+    pub fn parse(s: &str) -> Result<Self, InvalidValue> {
+        crate::parse::uuid(s).map(Self)
+    }
+
+    /// An id already stored. The table's primary key is the check; this does
+    /// not re-parse. Tests that build a view without a database use it too.
+    pub fn from_stored(s: impl Into<String>) -> Self {
+        Self(s.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for IssueId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl AsRef<str> for IssueId {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<IssueId> for String {
+    fn from(id: IssueId) -> String {
+        id.0
+    }
+}
+
+/// The comparison key for a status a person typed: case folded, and spaces,
+/// `_` and `-` dropped. Issue statuses and project statuses share it.
+pub(crate) fn loose_key(s: &str) -> String {
+    s.chars()
+        .filter(|c| !matches!(c, ' ' | '_' | '-'))
+        .collect::<String>()
+        .to_lowercase()
+}
+
 /// A value from the command line that names no known status, priority, etc.
 /// Its message is the whole explanation; clap prints it and exits 2.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -34,7 +92,7 @@ impl Status {
     /// case and drops spaces, '_' and '-', so "In Progress", "in_progress" and
     /// "IN-PROGRESS" all work. "cancelled" is accepted for Canceled.
     pub fn parse(s: &str) -> Option<Self> {
-        let key: String = s.chars().filter(|c| !matches!(c, ' ' | '_' | '-')).collect::<String>().to_lowercase();
+        let key = loose_key(s);
         match key.as_str() {
             "backlog" => Some(Status::Backlog),
             "todo" => Some(Status::Todo),
@@ -47,7 +105,15 @@ impl Status {
         }
     }
     pub fn all() -> &'static [Status] {
-        &[Status::Backlog, Status::Todo, Status::InProgress, Status::InReview, Status::Done, Status::Canceled, Status::Duplicate]
+        &[
+            Status::Backlog,
+            Status::Todo,
+            Status::InProgress,
+            Status::InReview,
+            Status::Done,
+            Status::Canceled,
+            Status::Duplicate,
+        ]
     }
 }
 impl FromStr for Status {
@@ -55,12 +121,17 @@ impl FromStr for Status {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         Status::parse(s).ok_or_else(|| {
             let expected: Vec<&str> = Status::all().iter().map(Status::as_str).collect();
-            InvalidValue(format!("invalid status \"{s}\"; expected one of: {}", expected.join(", ")))
+            InvalidValue(format!(
+                "invalid status \"{s}\"; expected one of: {}",
+                expected.join(", ")
+            ))
         })
     }
 }
 impl std::fmt::Display for Status {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { write!(f, "{}", self.as_str()) }
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -72,14 +143,29 @@ pub enum Priority {
     Low = 4,
 }
 impl Priority {
-    pub fn as_i64(&self) -> i64 { *self as i64 }
+    pub fn as_i64(&self) -> i64 {
+        *self as i64
+    }
     /// The priority stored as `v`, or None for a value outside 0-4. There is
     /// deliberately no fallback: a value we can't read is not ours to guess.
     pub fn from_stored(v: i64) -> Option<Self> {
-        match v { 0 => Some(Priority::None), 1 => Some(Priority::Urgent), 2 => Some(Priority::High), 3 => Some(Priority::Medium), 4 => Some(Priority::Low), _ => None }
+        match v {
+            0 => Some(Priority::None),
+            1 => Some(Priority::Urgent),
+            2 => Some(Priority::High),
+            3 => Some(Priority::Medium),
+            4 => Some(Priority::Low),
+            _ => None,
+        }
     }
     pub fn label(&self) -> &'static str {
-        match self { Priority::None => "None", Priority::Urgent => "Urgent", Priority::High => "High", Priority::Medium => "Medium", Priority::Low => "Low" }
+        match self {
+            Priority::None => "None",
+            Priority::Urgent => "Urgent",
+            Priority::High => "High",
+            Priority::Medium => "Medium",
+            Priority::Low => "Low",
+        }
     }
 }
 /// Accepts 0-4 or a name (none, urgent, high, medium, low), ignoring case.
@@ -92,13 +178,19 @@ impl FromStr for Priority {
             "2" | "high" => Ok(Priority::High),
             "3" | "medium" => Ok(Priority::Medium),
             "4" | "low" => Ok(Priority::Low),
-            _ => Err(InvalidValue(format!("invalid priority \"{s}\"; expected 0-4 or one of: none, urgent, high, medium, low"))),
+            _ => Err(InvalidValue(format!(
+                "invalid priority \"{s}\"; expected 0-4 or one of: none, urgent, high, medium, low"
+            ))),
         }
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Label { pub id: String, pub name: String, pub color: String }
+pub struct Label {
+    pub id: String,
+    pub name: String,
+    pub color: String,
+}
 
 /// An issue as a user names it: parsed, but not yet looked up. Resolving it
 /// against a workspace (`Store::resolve`) checks the key and finds the issue.
@@ -123,26 +215,39 @@ impl FromStr for IssueRef {
             }
             digits.parse::<i64>().ok().filter(|n| *n > 0)
         }
-        let number = |key: Option<&str>, n: i64| IssueRef::Number { key: key.map(String::from), number: n };
+        let number = |key: Option<&str>, n: i64| IssueRef::Number {
+            key: key.map(String::from),
+            number: n,
+        };
         let parsed = if let Some(rest) = s.strip_prefix('#') {
             positive(rest).map(|n| number(None, n))
         } else if let Some(n) = positive(s) {
             Some(number(None, n))
-        } else if let Some(id) = (s.len() == 36).then(|| uuid::Uuid::parse_str(s).ok()).flatten() {
+        } else if let Some(id) = (s.len() == 36)
+            .then(|| uuid::Uuid::parse_str(s).ok())
+            .flatten()
+        {
             Some(IssueRef::Id(id.hyphenated().to_string()))
         } else {
             s.rsplit_once('-')
                 .filter(|(key, _)| !key.is_empty() && !key.chars().any(char::is_whitespace))
                 .and_then(|(key, n)| positive(n).map(|n| number(Some(key), n)))
         };
-        parsed.ok_or_else(|| InvalidValue(format!("invalid issue id \"{s}\"; expected KEY-N, #N, N or an issue UUID")))
+        parsed.ok_or_else(|| {
+            InvalidValue(format!(
+                "invalid issue id \"{s}\"; expected KEY-N, #N, N or an issue UUID"
+            ))
+        })
     }
 }
 
 impl std::fmt::Display for IssueRef {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            IssueRef::Number { key: Some(key), number } => write!(f, "{key}-{number}"),
+            IssueRef::Number {
+                key: Some(key),
+                number,
+            } => write!(f, "{key}-{number}"),
             IssueRef::Number { key: None, number } => write!(f, "#{number}"),
             IssueRef::Id(id) => f.write_str(id),
         }
@@ -151,12 +256,16 @@ impl std::fmt::Display for IssueRef {
 
 /// How an issue is shown to people: `KEY-N`, or `#N` in a workspace with no key.
 pub fn identifier(key: &str, number: i64) -> String {
-    if key.is_empty() { format!("#{number}") } else { format!("{key}-{number}") }
+    if key.is_empty() {
+        format!("#{number}")
+    } else {
+        format!("{key}-{number}")
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Issue {
-    pub id: String,
+    pub id: IssueId,
     pub number: i64,
     /// `KEY-N`. Derived when the issue is read; ignored on write.
     pub identifier: String,
@@ -165,8 +274,8 @@ pub struct Issue {
     pub status: Status,
     pub priority: Priority,
     pub assignee: Option<String>,
-    /// The parent's UUID.
-    pub parent_id: Option<String>,
+    /// The parent's id.
+    pub parent_id: Option<IssueId>,
     /// The parent's `KEY-N`. Derived when the issue is read; ignored on write.
     pub parent_identifier: Option<String>,
     /// The project's UUID. Set through `db::Placement`, not directly.
@@ -224,7 +333,9 @@ impl Issue {
         }
         let closed = |s: Status| matches!(s, Canceled | Duplicate);
         match to {
-            InProgress | InReview => { self.started_at.get_or_insert(at); }
+            InProgress | InReview => {
+                self.started_at.get_or_insert(at);
+            }
             Backlog | Todo => self.started_at = None,
             Done | Canceled | Duplicate => {}
         }
@@ -268,13 +379,15 @@ impl RelationKind {
 impl FromStr for RelationKind {
     type Err = InvalidValue;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let key: String = s.chars().filter(|c| !matches!(c, ' ' | '_' | '-')).collect::<String>().to_lowercase();
+        let key = loose_key(s);
         match key.as_str() {
             "blocks" => Ok(RelationKind::Blocks),
             "blockedby" => Ok(RelationKind::BlockedBy),
             "related" => Ok(RelationKind::Related),
             "duplicateof" => Ok(RelationKind::DuplicateOf),
-            _ => Err(InvalidValue(format!("invalid relation \"{s}\"; expected one of: blocks, blocked-by, related, duplicate-of"))),
+            _ => Err(InvalidValue(format!(
+                "invalid relation \"{s}\"; expected one of: blocks, blocked-by, related, duplicate-of"
+            ))),
         }
     }
 }
@@ -338,7 +451,7 @@ impl ProjectStatus {
     /// Ignores ASCII case and spaces. "In Progress", Linear's name for
     /// Started in its UI, is Started.
     pub fn parse(s: &str) -> Option<Self> {
-        let key: String = s.chars().filter(|c| *c != ' ').collect::<String>().to_ascii_lowercase();
+        let key = loose_key(s);
         match key.as_str() {
             "backlog" => Some(ProjectStatus::Backlog),
             "planned" => Some(ProjectStatus::Planned),
@@ -359,12 +472,17 @@ impl FromStr for ProjectStatus {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         ProjectStatus::parse(s).ok_or_else(|| {
             let expected: Vec<&str> = ProjectStatus::all().iter().map(|s| s.as_str()).collect();
-            InvalidValue(format!("invalid project status \"{s}\"; expected one of: {}", expected.join(", ")))
+            InvalidValue(format!(
+                "invalid project status \"{s}\"; expected one of: {}",
+                expected.join(", ")
+            ))
         })
     }
 }
 impl std::fmt::Display for ProjectStatus {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str(self.as_str()) }
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 /// A Linear project inside a workspace.
@@ -402,13 +520,20 @@ pub struct Milestone {
 /// Done; one that names no status is `unreadable`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct ByStatus {
-    #[serde(rename = "Backlog")] pub backlog: i64,
-    #[serde(rename = "Todo")] pub todo: i64,
-    #[serde(rename = "InProgress")] pub in_progress: i64,
-    #[serde(rename = "InReview")] pub in_review: i64,
-    #[serde(rename = "Done")] pub done: i64,
-    #[serde(rename = "Canceled")] pub canceled: i64,
-    #[serde(rename = "Duplicate")] pub duplicate: i64,
+    #[serde(rename = "Backlog")]
+    pub backlog: i64,
+    #[serde(rename = "Todo")]
+    pub todo: i64,
+    #[serde(rename = "InProgress")]
+    pub in_progress: i64,
+    #[serde(rename = "InReview")]
+    pub in_review: i64,
+    #[serde(rename = "Done")]
+    pub done: i64,
+    #[serde(rename = "Canceled")]
+    pub canceled: i64,
+    #[serde(rename = "Duplicate")]
+    pub duplicate: i64,
     pub unreadable: i64,
 }
 impl ByStatus {
@@ -529,7 +654,10 @@ pub struct WorkspaceMeta {
 
 pub fn now() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -586,25 +714,57 @@ mod tests {
         (Some(Duplicate), Duplicate, K, K, K),
     ];
 
-    fn issue(status: Status, started: Option<i64>, completed: Option<i64>, canceled: Option<i64>) -> Issue {
+    fn issue(
+        status: Status,
+        started: Option<i64>,
+        completed: Option<i64>,
+        canceled: Option<i64>,
+    ) -> Issue {
         Issue {
-            id: "id".into(), number: 1, identifier: String::new(), title: "t".into(), description: String::new(), status,
-            priority: Priority::None, assignee: None, parent_id: None, parent_identifier: None,
-            project_id: None, project: None, milestone_id: None, milestone: None, r#ref: None, creator: None, estimate: None, due_date: None,
-            labels: vec![], cycles: vec![], created_at: 1, updated_at: 1,
-            completed_at: completed, started_at: started, canceled_at: canceled,
+            id: IssueId::from_stored("id"),
+            number: 1,
+            identifier: String::new(),
+            title: "t".into(),
+            description: String::new(),
+            status,
+            priority: Priority::None,
+            assignee: None,
+            parent_id: None,
+            parent_identifier: None,
+            project_id: None,
+            project: None,
+            milestone_id: None,
+            milestone: None,
+            r#ref: None,
+            creator: None,
+            estimate: None,
+            due_date: None,
+            labels: vec![],
+            cycles: vec![],
+            created_at: 1,
+            updated_at: 1,
+            completed_at: completed,
+            started_at: started,
+            canceled_at: canceled,
         }
     }
 
     fn expect(fx: Fx, before: Option<i64>, at: i64) -> Option<i64> {
-        match fx { K => before, S => before.or(Some(at)), C => None }
+        match fx {
+            K => before,
+            S => before.or(Some(at)),
+            C => None,
+        }
     }
 
     #[test]
     fn the_table_covers_every_pair_once() {
         let mut seen = Vec::new();
         for &(from, to, ..) in TABLE {
-            assert!(!seen.contains(&(from, to)), "duplicate row {from:?} -> {to:?}");
+            assert!(
+                !seen.contains(&(from, to)),
+                "duplicate row {from:?} -> {to:?}"
+            );
             seen.push((from, to));
         }
         let all = Status::all();
@@ -612,7 +772,10 @@ mod tests {
         for &to in all {
             assert!(seen.contains(&(None, to)), "missing create -> {to:?}");
             for &from in all {
-                assert!(seen.contains(&(Some(from), to)), "missing {from:?} -> {to:?}");
+                assert!(
+                    seen.contains(&(Some(from), to)),
+                    "missing {from:?} -> {to:?}"
+                );
             }
         }
         assert_eq!(seen.len(), 7 + 7 * 7);
@@ -620,7 +783,10 @@ mod tests {
 
     #[test]
     fn issue_ref_forms() {
-        let num = |key: Option<&str>, n: i64| IssueRef::Number { key: key.map(String::from), number: n };
+        let num = |key: Option<&str>, n: i64| IssueRef::Number {
+            key: key.map(String::from),
+            number: n,
+        };
         let u = "0f8fad5b-d9cb-469f-a165-70867728950e";
         for (s, want) in [
             ("7", num(None, 7)),
@@ -630,13 +796,40 @@ mod tests {
             ("MY-KEY-7", num(Some("MY-KEY"), 7)),
             ("007", num(None, 7)),
             (u, IssueRef::Id(u.into())),
-            ("0F8FAD5B-D9CB-469F-A165-70867728950E", IssueRef::Id(u.into())),
+            (
+                "0F8FAD5B-D9CB-469F-A165-70867728950E",
+                IssueRef::Id(u.into()),
+            ),
         ] {
             assert_eq!(s.parse::<IssueRef>(), Ok(want), "{s:?}");
         }
-        for bad in ["", "0", "#0", "-3", "#-3", "+3", "#", "#x", "abc", "DREA-", "DREA-x", "DREA-0", "-7", "DREA 7-1", " 7", "7 ", "1.5",
-                    "99999999999999999999", "0f8fad5bd9cb469fa16570867728950e", "{0f8fad5b-d9cb-469f-a165-70867728950e}"] {
-            assert!(bad.parse::<IssueRef>().is_err(), "{bad:?} parsed as {:?}", bad.parse::<IssueRef>());
+        for bad in [
+            "",
+            "0",
+            "#0",
+            "-3",
+            "#-3",
+            "+3",
+            "#",
+            "#x",
+            "abc",
+            "DREA-",
+            "DREA-x",
+            "DREA-0",
+            "-7",
+            "DREA 7-1",
+            " 7",
+            "7 ",
+            "1.5",
+            "99999999999999999999",
+            "0f8fad5bd9cb469fa16570867728950e",
+            "{0f8fad5b-d9cb-469f-a165-70867728950e}",
+        ] {
+            assert!(
+                bad.parse::<IssueRef>().is_err(),
+                "{bad:?} parsed as {:?}",
+                bad.parse::<IssueRef>()
+            );
         }
     }
 
@@ -652,9 +845,18 @@ mod tests {
                 i.apply_lifecycle(from, AT);
                 let got = (i.started_at, i.completed_at, i.canceled_at);
                 let want = (expect(fs, st, AT), expect(fc, co, AT), expect(fx, ca, AT));
-                assert_eq!(got, want, "{from:?} -> {to:?} starting from {:?}", (st, co, ca));
+                assert_eq!(
+                    got,
+                    want,
+                    "{from:?} -> {to:?} starting from {:?}",
+                    (st, co, ca)
+                );
                 assert_eq!(i.status, to, "apply_lifecycle must not change the status");
-                assert_eq!((i.created_at, i.updated_at), (1, 1), "apply_lifecycle must not touch other timestamps");
+                assert_eq!(
+                    (i.created_at, i.updated_at),
+                    (1, 1),
+                    "apply_lifecycle must not touch other timestamps"
+                );
             }
         }
     }

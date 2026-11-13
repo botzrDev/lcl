@@ -19,14 +19,19 @@
 
 mod common;
 
-use common::{dump, foreign_key_violations, fts_integrity, FTS_TABLES, set_user_version, undo_v5_schema, undo_v6_schema, undo_v7_schema, undo_v8_schema, undo_v10_schema, undo_v9_schema, user_version, Env, Out, V0_FIXTURE};
+use common::{
+    Env, FTS_TABLES, Out, V0_FIXTURE, dump, foreign_key_violations, fts_integrity,
+    set_user_version, undo_v5_schema, undo_v6_schema, undo_v7_schema, undo_v8_schema,
+    undo_v9_schema, undo_v10_schema, undo_v11_schema, user_version,
+};
 use lcl_core::SCHEMA_VERSION;
 use rusqlite::types::Value as SqlValue;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::sync::Barrier;
 
 fn issue(list: &Value, number: i64) -> &Value {
-    list["issues"].as_array()
+    list["issues"]
+        .as_array()
         .and_then(|a| a.iter().find(|i| i["number"] == number))
         .unwrap_or_else(|| panic!("issue {number} missing from {list:#}"))
 }
@@ -35,7 +40,11 @@ fn issue(list: &Value, number: i64) -> &Value {
 fn upgrades_a_0_1_0_database() {
     let env = Env::new();
     let db = env.install_db(V0_FIXTURE);
-    assert_eq!(user_version(&db), 0, "the fixture should be an unversioned 0.1.0 database");
+    assert_eq!(
+        user_version(&db),
+        0,
+        "the fixture should be an unversioned 0.1.0 database"
+    );
     let mut before = dump(&db);
 
     let list = env.lcl(&["issue", "list", "--json"]).assert_ok().json();
@@ -47,12 +56,18 @@ fn upgrades_a_0_1_0_database() {
     let two = issue(&list, 2);
     assert_eq!(two["title"], "Shipped thing");
     assert_eq!(two["status"], "Done");
-    assert_eq!(two["completed_at"], two["updated_at"], "v3 backfills completed_at from updated_at: {two:#}");
+    assert_eq!(
+        two["completed_at"], two["updated_at"],
+        "v3 backfills completed_at from updated_at: {two:#}"
+    );
     let three = issue(&list, 3);
     assert_eq!(three["title"], "Needs a human");
     assert_eq!(three["labels"], json!(["hitl"]));
 
-    let show = env.lcl(&["issue", "show", "1", "--json"]).assert_ok().json();
+    let show = env
+        .lcl(&["issue", "show", "1", "--json"])
+        .assert_ok()
+        .json();
     let comments = show["comments"].as_array().expect("comments array");
     assert_eq!(comments.len(), 1, "{show:#}");
     assert_eq!(comments[0]["body"], "first comment");
@@ -66,8 +81,16 @@ fn upgrades_a_0_1_0_database() {
     assert_eq!(docs[0]["title"], "Handbook");
     assert_eq!(docs[0]["content"], "doc body");
 
-    let found = env.lcl(&["search", "zebrafish", "--json"]).assert_ok().json();
-    let numbers: Vec<_> = found["issues"].as_array().expect("issues array").iter().map(|i| &i["number"]).collect();
+    let found = env
+        .lcl(&["search", "zebrafish", "--json"])
+        .assert_ok()
+        .json();
+    let numbers: Vec<_> = found["issues"]
+        .as_array()
+        .expect("issues array")
+        .iter()
+        .map(|i| &i["number"])
+        .collect();
     assert_eq!(numbers, [1], "{found:#}");
 
     let project = env.lcl(&["workspace", "show", "--json"]).assert_ok().json();
@@ -82,28 +105,47 @@ fn upgrades_a_0_1_0_database() {
     let mut after = dump(&db);
     // v2: the number mark, seeded one past the highest number.
     let meta = after.tables.get_mut("meta").expect("meta table");
-    let seeded = meta.iter().position(|r| r["key"] == text("next_issue_number")).expect("next_issue_number seeded");
-    assert_eq!(meta.remove(seeded)["value"], text("4"), "seeded one past the highest number");
+    let seeded = meta
+        .iter()
+        .position(|r| r["key"] == text("next_issue_number"))
+        .expect("next_issue_number seeded");
+    assert_eq!(
+        meta.remove(seeded)["value"],
+        text("4"),
+        "seeded one past the highest number"
+    );
     // v3: two new columns, unset (the fixture has no Canceled issue), and the
     // Done issue's completed_at backfilled from its updated_at.
     for row in after.tables.get_mut("issues").expect("issues table") {
         assert_eq!(row.remove("started_at"), Some(SqlValue::Null), "{row:?}");
         assert_eq!(row.remove("canceled_at"), Some(SqlValue::Null), "{row:?}");
         if row["status"] == text("Done") {
-            assert_eq!(row["completed_at"], row["updated_at"], "Done issue not backfilled: {row:?}");
+            assert_eq!(
+                row["completed_at"], row["updated_at"],
+                "Done issue not backfilled: {row:?}"
+            );
             row.insert("completed_at".into(), SqlValue::Null); // as 0.1.0 left it
         }
     }
     // v5: issue_labels rebuilt with foreign keys, and 0.1.0's raw name "hitl"
     // mapped to the hitl label's id. No assignee was blank.
-    let hitl = after.tables["labels"].iter().find(|r| r["name"] == text("hitl")).expect("hitl label")["id"].clone();
-    for row in after.tables.get_mut("issue_labels").expect("issue_labels table") {
+    let hitl = after.tables["labels"]
+        .iter()
+        .find(|r| r["name"] == text("hitl"))
+        .expect("hitl label")["id"]
+        .clone();
+    for row in after
+        .tables
+        .get_mut("issue_labels")
+        .expect("issue_labels table")
+    {
         assert_eq!(row["label_id"], hitl, "{row:?}");
         row.insert("label_id".into(), text("hitl")); // as 0.1.0 left it
     }
     undo_v5_schema(&mut after, &mut before);
     undo_v6_schema(&mut after);
     undo_v7_schema(&mut after);
+    undo_v11_schema(&mut after, &before);
     undo_v10_schema(&mut after);
     undo_v9_schema(&mut after);
     undo_v8_schema(&mut after);
@@ -111,8 +153,17 @@ fn upgrades_a_0_1_0_database() {
     // v3's ADD COLUMN rewrote the issues table's CREATE statement, and its
     // backfill UPDATE fired the FTS trigger, which rewrote that row's index
     // entries. Check those with FTS5's own integrity-check instead.
-    let issues_sql = after.schema.iter().find(|r| r["name"] == text("issues")).map(|r| format!("{:?}", r["sql"]));
-    assert!(issues_sql.as_deref().is_some_and(|s| s.contains("started_at") && s.contains("canceled_at")), "{issues_sql:?}");
+    let issues_sql = after
+        .schema
+        .iter()
+        .find(|r| r["name"] == text("issues"))
+        .map(|r| format!("{:?}", r["sql"]));
+    assert!(
+        issues_sql
+            .as_deref()
+            .is_some_and(|s| s.contains("started_at") && s.contains("canceled_at")),
+        "{issues_sql:?}"
+    );
     for d in [&mut before, &mut after] {
         d.schema.retain(|r| r["name"] != text("issues"));
         d.tables.retain(|t, _| !t.starts_with("issues_fts"));
@@ -141,10 +192,16 @@ fn refuses_a_newer_schema() {
     let out = env.lcl(&["issue", "list"]);
     assert_ne!(out.code, 0, "{out:#?}");
     assert!(out.stderr.contains("v99"), "{out:#?}");
-    assert!(out.stderr.contains(&format!("v{SCHEMA_VERSION}")), "{out:#?}");
+    assert!(
+        out.stderr.contains(&format!("v{SCHEMA_VERSION}")),
+        "{out:#?}"
+    );
 
     // assert! rather than assert_eq!: a mismatch would print both files byte by byte.
-    assert!(std::fs::read(&db).expect("read db") == bytes, "lcl wrote to a newer-schema database");
+    assert!(
+        std::fs::read(&db).expect("read db") == bytes,
+        "lcl wrote to a newer-schema database"
+    );
     assert_eq!(user_version(&db), 99);
 }
 
@@ -158,10 +215,14 @@ fn refuses_a_newer_schema_without_touching_a_rollback_journal_db() {
             .pragma_update_and_check(None, "journal_mode", "DELETE", |r| r.get(0))
             .expect("set journal_mode");
         assert_eq!(mode, "delete");
-        conn.pragma_update(None, "user_version", 99).expect("set user_version");
+        conn.pragma_update(None, "user_version", 99)
+            .expect("set user_version");
     }
     let sidecar = |ext: &str| db.with_file_name(format!("data.sqlite-{ext}"));
-    assert!(!sidecar("wal").exists() && !sidecar("shm").exists(), "setup left a -wal or -shm file");
+    assert!(
+        !sidecar("wal").exists() && !sidecar("shm").exists(),
+        "setup left a -wal or -shm file"
+    );
     let bytes = std::fs::read(&db).expect("read db");
 
     let out = env.lcl(&["issue", "list"]);
@@ -169,7 +230,10 @@ fn refuses_a_newer_schema_without_touching_a_rollback_journal_db() {
     assert!(out.stderr.contains("v99"), "{out:#?}");
 
     // assert! rather than assert_eq!: a mismatch would print both files byte by byte.
-    assert!(std::fs::read(&db).expect("read db") == bytes, "lcl wrote to a newer-schema database");
+    assert!(
+        std::fs::read(&db).expect("read db") == bytes,
+        "lcl wrote to a newer-schema database"
+    );
     assert!(!sidecar("wal").exists(), "lcl left a -wal file");
     assert!(!sidecar("shm").exists(), "lcl left a -shm file");
 }
@@ -190,12 +254,19 @@ fn concurrent_first_open_migrates_once() {
                 })
             })
             .collect();
-        handles.into_iter().map(|h| h.join().expect("thread panicked")).collect()
+        handles
+            .into_iter()
+            .map(|h| h.join().expect("thread panicked"))
+            .collect()
     });
 
     for (i, out) in outs.iter().enumerate() {
         assert_eq!(out.code, 0, "process {i} failed: {out:#?}");
-        assert_eq!(out.json()["issues"].as_array().map(Vec::len), Some(3), "process {i}: {out:#?}");
+        assert_eq!(
+            out.json()["issues"].as_array().map(Vec::len),
+            Some(3),
+            "process {i}: {out:#?}"
+        );
     }
     assert_eq!(user_version(&db), SCHEMA_VERSION);
 }

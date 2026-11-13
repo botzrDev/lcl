@@ -1,10 +1,12 @@
 use crate::error::{LclError, Result};
-use crate::migrations::{Migration, MIGRATIONS, SCHEMA_VERSION};
+use crate::migrations::{MIGRATIONS, Migration, SCHEMA_VERSION};
 use crate::models::*;
 use crate::search::{Field, IssueHit, SearchQuery, SearchResults};
-use rusqlite::functions::FunctionFlags;
-use rusqlite::types::{Value, ValueRef};
-use rusqlite::{params, params_from_iter, Connection, ErrorCode, OptionalExtension, ToSql, Transaction, TransactionBehavior};
+use rusqlite::types::{ToSqlOutput, Value};
+use rusqlite::{
+    Connection, ErrorCode, OptionalExtension, ToSql, Transaction, TransactionBehavior, params,
+    params_from_iter,
+};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
@@ -29,7 +31,9 @@ pub(crate) fn use_wal(conn: &Connection) -> Result<()> {
     let deadline = Instant::now() + BUSY_TIMEOUT;
     loop {
         match conn.pragma_update_and_check(None, "journal_mode", "WAL", |_| Ok(())) {
-            Err(rusqlite::Error::SqliteFailure(e, _)) if e.code == ErrorCode::DatabaseBusy && Instant::now() < deadline => {
+            Err(rusqlite::Error::SqliteFailure(e, _))
+                if e.code == ErrorCode::DatabaseBusy && Instant::now() < deadline =>
+            {
                 std::thread::sleep(Duration::from_millis(5));
             }
             done => return Ok(done?),
@@ -43,7 +47,7 @@ pub(crate) fn use_wal(conn: &Connection) -> Result<()> {
 pub(crate) const NEXT_ISSUE_NUMBER: &str = "next_issue_number";
 
 pub struct Store {
-    pub conn: Connection,
+    pub(crate) conn: Connection,
     upgrade_note: Option<String>,
 }
 
@@ -51,9 +55,10 @@ pub struct Store {
 /// (they AND); an empty or `None` part doesn't narrow it.
 #[derive(Debug, Clone, Default)]
 pub struct IssueFilter {
-    /// Any of these statuses (they OR). A stored status is read by the same
-    /// rule as everywhere else (`Status::parse`), so a hand-edited "done" is
-    /// Done here too.
+    /// Any of these statuses (they OR). The query compares the stored text
+    /// with the canonical spelling. The schema's CHECK admits only that
+    /// spelling, so a hand edit has to get past the CHECK before it can
+    /// disagree with the filter.
     pub statuses: Vec<Status>,
     pub assignee: Option<AssigneeFilter>,
     /// Every one of these labels (they AND), each named ignoring case. An
@@ -91,6 +96,68 @@ pub enum Change<T> {
     Keep,
     Clear,
     Set(T),
+}
+
+/// The columns `create_issue` inserts. The id, number and timestamps are
+/// minted inside the write. Labels are names, matched ignoring case.
+#[derive(Debug, Clone)]
+pub struct NewIssue {
+    pub title: String,
+    pub description: String,
+    pub status: Status,
+    pub priority: Priority,
+    pub assignee: Option<String>,
+    /// Resolved inside the write transaction.
+    pub parent: Option<IssueRef>,
+    pub r#ref: Option<String>,
+    pub creator: Option<String>,
+    pub estimate: Option<i64>,
+    pub due_date: Option<String>,
+    pub labels: Vec<String>,
+}
+
+impl Default for NewIssue {
+    fn default() -> Self {
+        Self {
+            title: String::new(),
+            description: String::new(),
+            status: Status::Backlog,
+            priority: Priority::None,
+            assignee: None,
+            parent: None,
+            r#ref: None,
+            creator: None,
+            estimate: None,
+            due_date: None,
+            labels: Vec::new(),
+        }
+    }
+}
+
+/// What `update_issue` does to the issue's labels, applied to the set read
+/// inside the write transaction: replace, then clear, then remove, then add.
+/// Every name in `remove` must name a label, even when the issue lacks it.
+#[derive(Debug, Clone, Default)]
+pub struct LabelUpdate {
+    pub replace: Option<Vec<String>>,
+    pub add: Vec<String>,
+    pub remove: Vec<String>,
+    pub clear: bool,
+}
+
+/// The columns `update_issue` changes. `Keep` leaves a field as it was read.
+#[derive(Debug, Clone, Default)]
+pub struct IssueUpdate {
+    pub title: Option<String>,
+    pub description: Option<String>,
+    pub status: Option<Status>,
+    pub priority: Option<Priority>,
+    pub assignee: Change<String>,
+    pub parent: Change<IssueRef>,
+    pub estimate: Change<i64>,
+    pub due_date: Change<String>,
+    pub r#ref: Change<String>,
+    pub labels: LabelUpdate,
 }
 
 /// Where `create_issue` and `update_issue` put an issue. The project and the
@@ -168,7 +235,9 @@ impl IssueSort {
             IssueSort::Created => "i.created_at DESC, i.number DESC",
             IssueSort::Updated => "i.updated_at DESC, i.number DESC",
             // Stored: None 0, Urgent 1 .. Low 4. None goes after Low.
-            IssueSort::Priority => "CASE i.priority WHEN 0 THEN 5 ELSE i.priority END, i.number DESC",
+            IssueSort::Priority => {
+                "CASE i.priority WHEN 0 THEN 5 ELSE i.priority END, i.number DESC"
+            }
         }
     }
 }
@@ -181,7 +250,9 @@ impl FromStr for IssueSort {
             "created" => Ok(IssueSort::Created),
             "updated" => Ok(IssueSort::Updated),
             "priority" => Ok(IssueSort::Priority),
-            _ => Err(InvalidValue(format!("invalid sort \"{s}\"; expected one of: number, created, updated, priority"))),
+            _ => Err(InvalidValue(format!(
+                "invalid sort \"{s}\"; expected one of: number, created, updated, priority"
+            ))),
         }
     }
 }
@@ -196,7 +267,10 @@ pub struct Page {
 }
 
 impl Page {
-    pub const ALL: Page = Page { limit: None, offset: 0 };
+    pub const ALL: Page = Page {
+        limit: None,
+        offset: 0,
+    };
 }
 
 /// One page of `issue list`, and where it sits in the whole list.
@@ -235,13 +309,13 @@ impl Store {
         check_supported(user_version(&conn)?)?;
         use_wal(&conn)?;
         conn.pragma_update(None, "foreign_keys", true)?;
-        register_lcl_status(&conn)?;
         let upgrade_note = migrate(&mut conn)?;
+        check_fts(&conn)?;
         Ok(Store { conn, upgrade_note })
     }
 
     /// When this open upgraded the file and the upgrade changed values, one
-    /// line saying so: `upgraded workspace "prob" to schema 10: named 1 blank
+    /// line saying so: `upgraded workspace "prob" to schema 11: named 1 blank
     /// label, …`. Else None. It is there only for the open that upgraded,
     /// so it is shown once. lcl-core prints nothing itself: whoever opens a
     /// workspace for a person shows it, on stderr.
@@ -261,7 +335,9 @@ impl Store {
     /// the lock for up to BUSY_TIMEOUT instead of failing. An error drops the
     /// transaction, which rolls all of it back.
     pub(crate) fn write<T>(&mut self, f: impl FnOnce(&Transaction<'_>) -> Result<T>) -> Result<T> {
-        let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let out = f(&tx)?;
         tx.commit()?;
         Ok(out)
@@ -282,7 +358,9 @@ impl Store {
     /// Sets every `(key, value)` pair in one transaction.
     pub fn set_meta(&mut self, entries: &[(&str, &str)]) -> Result<()> {
         self.write(|tx| {
-            for (key, value) in entries { put_meta(tx, key, value)?; }
+            for (key, value) in entries {
+                put_meta(tx, key, value)?;
+            }
             Ok(())
         })
     }
@@ -296,15 +374,29 @@ impl Store {
     pub fn create_label(&mut self, l: &Label) -> Result<()> {
         self.write(|tx| {
             if let Some(existing) = label_by_name(tx, &l.name)? {
-                return Err(LclError::LabelExists { name: l.name.clone(), existing: existing.name });
+                return Err(LclError::LabelExists {
+                    name: l.name.clone(),
+                    existing: existing.name,
+                });
             }
-            tx.execute("INSERT INTO labels(id,name,color) VALUES(?1,?2,?3)", params![l.id, l.name, l.color])?;
+            tx.execute(
+                "INSERT INTO labels(id,name,color) VALUES(?1,?2,?3)",
+                params![l.id, l.name, l.color],
+            )?;
             Ok(())
         })
     }
     pub fn list_labels(&self) -> Result<Vec<Label>> {
-        let mut stmt = self.conn.prepare("SELECT id,name,color FROM labels ORDER BY name COLLATE NOCASE, name")?;
-        let rows = stmt.query_map([], |r| Ok(Label { id: r.get(0)?, name: r.get(1)?, color: r.get(2)? }))?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id,name,color FROM labels ORDER BY name COLLATE NOCASE, name")?;
+        let rows = stmt.query_map([], |r| {
+            Ok(Label {
+                id: r.get(0)?,
+                name: r.get(1)?,
+                color: r.get(2)?,
+            })
+        })?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
     /// Fails with `UnknownLabel` unless every name names a label.
@@ -320,35 +412,82 @@ impl Store {
     pub fn delete_label(&mut self, name_or_id: &str) -> Result<(Label, i64)> {
         self.write(|tx| {
             let by_id = tx
-                .query_row("SELECT id,name,color FROM labels WHERE id=?1", params![name_or_id], |r| Ok(Label { id: r.get(0)?, name: r.get(1)?, color: r.get(2)? }))
+                .query_row(
+                    "SELECT id,name,color FROM labels WHERE id=?1",
+                    params![name_or_id],
+                    |r| {
+                        Ok(Label {
+                            id: r.get(0)?,
+                            name: r.get(1)?,
+                            color: r.get(2)?,
+                        })
+                    },
+                )
                 .optional()?;
             let label = match by_id {
                 Some(l) => l,
-                None => label_by_name(tx, name_or_id)?.ok_or_else(|| LclError::LabelNotFound(name_or_id.to_string()))?,
+                None => label_by_name(tx, name_or_id)?
+                    .ok_or_else(|| LclError::LabelNotFound(name_or_id.to_string()))?,
             };
-            let issues: i64 = tx.query_row("SELECT count(*) FROM issue_labels WHERE label_id=?1", params![label.id], |r| r.get(0))?;
+            let issues: i64 = tx.query_row(
+                "SELECT count(*) FROM issue_labels WHERE label_id=?1",
+                params![label.id],
+                |r| r.get(0),
+            )?;
             tx.execute("DELETE FROM labels WHERE id=?1", params![label.id])?;
             Ok((label, issues))
         })
     }
 
     // ----- issues -----
-    /// Inserts `issue` and returns it as stored. A zero `number` is allocated
-    /// from the high-water mark; either way the mark ends up past the number
-    /// used. A `parent_id` must be the UUID of an existing issue.
-    pub fn create_issue(&mut self, mut issue: Issue, placement: &Placement) -> Result<Issue> {
+    /// Inserts `issue` and returns it as stored. The id, the number and the
+    /// timestamps are minted here. A parent is resolved inside this
+    /// transaction, and must be an existing issue.
+    pub fn create_issue(&mut self, new: NewIssue, placement: &Placement) -> Result<Issue> {
         self.write(|tx| {
             let key = read_key(tx)?;
-            if let Some(parent) = &issue.parent_id { check_parent(tx, &key, None, parent)?; }
-            (issue.project_id, issue.milestone_id) = (None, None);
+            let mut issue = Issue {
+                id: IssueId::new(),
+                number: 0,
+                identifier: String::new(),
+                title: new.title,
+                description: new.description,
+                status: new.status,
+                priority: new.priority,
+                assignee: new.assignee,
+                parent_id: None,
+                parent_identifier: None,
+                project_id: None,
+                project: None,
+                milestone_id: None,
+                milestone: None,
+                r#ref: new.r#ref,
+                creator: new.creator,
+                estimate: new.estimate,
+                due_date: new.due_date,
+                labels: new.labels,
+                cycles: vec![],
+                created_at: 0,
+                updated_at: 0,
+                completed_at: None,
+                started_at: None,
+                canceled_at: None,
+            };
+            if let Some(parent) = &new.parent {
+                let parent = resolve_issue(tx, parent)?;
+                let id = parent.id.clone();
+                check_parent(tx, &key, None, id.as_str())?;
+                issue.parent_id = Some(id);
+            }
             place(tx, &mut issue, placement)?;
-            if let Some(r) = &issue.r#ref { check_ref(tx, &key, r, None)?; }
-            if issue.id.is_empty() { issue.id = uuid::Uuid::new_v4().to_string(); }
+            if let Some(r) = &issue.r#ref {
+                check_ref(tx, &key, r, None)?;
+            }
             let next = next_issue_number(tx)?;
-            if issue.number == 0 { issue.number = next; }
+            issue.number = next;
             let now = crate::models::now();
-            if issue.created_at == 0 { issue.created_at = now; }
-            if issue.updated_at == 0 { issue.updated_at = now; }
+            issue.created_at = now;
+            issue.updated_at = now;
             issue.apply_lifecycle(None, issue.created_at);
             let status = issue.status.as_str();
             let priority = issue.priority.as_i64();
@@ -356,10 +495,10 @@ impl Store {
                 "INSERT INTO issues(id,number,title,description,status,priority,assignee,parent_id,estimate,due_date,created_at,updated_at,completed_at,started_at,canceled_at,project_id,milestone_id,ref,creator) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)",
                 params![issue.id, issue.number, issue.title, issue.description, status, priority, issue.assignee, issue.parent_id, issue.estimate, issue.due_date, issue.created_at, issue.updated_at, issue.completed_at, issue.started_at, issue.canceled_at, issue.project_id, issue.milestone_id, issue.r#ref, issue.creator],
             )?;
-            set_labels(tx, &issue.id, &issue.labels)?;
-            place_cycle(tx, &issue.id, &placement.cycle)?;
-            put_meta(tx, NEXT_ISSUE_NUMBER, &next.max(issue.number + 1).to_string())?;
-            reread(tx, &key, &issue.id)
+            set_labels(tx, issue.id.as_str(), &issue.labels)?;
+            place_cycle(tx, issue.id.as_str(), &placement.cycle)?;
+            put_meta(tx, NEXT_ISSUE_NUMBER, &(next + 1).to_string())?;
+            reread(tx, &key, issue.id.as_str())
         })
     }
     /// The issue `r` names. This is the one resolver: every command that
@@ -370,20 +509,29 @@ impl Store {
     }
     /// The issues directly under the issue with UUID `parent_id`, by number.
     pub fn children(&self, parent_id: &str) -> Result<Vec<Issue>> {
-        let mut stmt = self.conn.prepare("SELECT id FROM issues WHERE parent_id=?1 ORDER BY number")?;
-        let ids = stmt.query_map(params![parent_id], |r| r.get(0))?.collect::<std::result::Result<Vec<String>, _>>()?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id FROM issues WHERE parent_id=?1 ORDER BY number")?;
+        let ids = stmt
+            .query_map(params![parent_id], |r| r.get(0))?
+            .collect::<std::result::Result<Vec<String>, _>>()?;
         fetch_issues(&self.conn, &ids)
     }
     /// The issues `filter` selects, in `sort` order, cut to `page`. Every
     /// filter is in SQL, before LIMIT, and the total and the page come from
     /// one read transaction, so they agree.
-    pub fn list_issues(&self, filter: &IssueFilter, sort: IssueSort, page: Page) -> Result<IssueList> {
+    pub fn list_issues(
+        &self,
+        filter: &IssueFilter,
+        sort: IssueSort,
+        page: Page,
+    ) -> Result<IssueList> {
         self.read(|conn| {
             let key = read_key(conn)?;
             let mut conds: Vec<String> = vec![];
             let mut args: Vec<Value> = vec![];
             if !filter.statuses.is_empty() {
-                conds.push(format!("lcl_status(i.status) IN ({})", vec!["?"; filter.statuses.len()].join(",")));
+                conds.push(format!("i.status IN ({})", vec!["?"; filter.statuses.len()].join(",")));
                 args.extend(filter.statuses.iter().map(|s| Value::Text(s.as_str().to_string())));
             }
             match &filter.assignee {
@@ -406,13 +554,13 @@ impl Store {
             }
             if let Some(parent) = &filter.parent {
                 conds.push("i.parent_id = ?".into());
-                args.push(Value::Text(resolve_issue(conn, parent)?.id));
+                args.push(Value::Text(resolve_issue(conn, parent)?.id.to_string()));
             }
             if let Some(blocked) = filter.blocked {
                 // A blocker whose status can't be read isn't known to be
                 // resolved, so it still blocks.
                 let open_blocker = "EXISTS (SELECT 1 FROM issue_relations r JOIN issues b ON b.id = r.issue_id
-                    WHERE r.related_id = i.id AND r.kind = 'blocks' AND coalesce(lcl_status(b.status), '') NOT IN ('Done', 'Canceled', 'Duplicate'))";
+                    WHERE r.related_id = i.id AND r.kind = 'blocks' AND b.status NOT IN ('Done', 'Canceled', 'Duplicate'))";
                 conds.push(if blocked { open_blocker.to_string() } else { format!("NOT {open_blocker}") });
             }
             let project = match &filter.project {
@@ -450,30 +598,75 @@ impl Store {
             attach_labels(conn, &mut issues)?;
             attach_cycles(conn, &mut issues)?;
 
-            let total = usize::try_from(total).map_err(|_| LclError::Msg(format!("count(*) returned {total}")))?;
+            let total = usize::try_from(total).map_err(|_| LclError::CountOverflow(total))?;
             let truncated = page.offset as usize + issues.len() < total;
             Ok(IssueList { issues, total, limit: page.limit, offset: page.offset, truncated })
         })
     }
-    /// Reads the issue, applies `f` and writes it back, all under the write
-    /// lock, so a concurrent update can't be overwritten with a stale copy.
-    /// A changed `parent_id` must be the UUID of an existing issue that is
-    /// neither this one nor below it. `placement` moves it between projects
-    /// and milestones (see `place`); a milestone it loses because it left the
-    /// milestone's project is returned, for the caller to report. A changed
-    /// ref is checked as on create; the creator is never written.
-    pub fn update_issue(&mut self, r: &IssueRef, placement: &Placement, f: impl FnOnce(&mut Issue)) -> Result<(Issue, Option<ClearedMilestone>)> {
+    /// Reads the issue, applies `update` and writes it back, all under the
+    /// write lock, so a concurrent update can't be overwritten with a stale
+    /// copy. A parent is resolved here, and must be an existing issue that
+    /// is neither this one nor below it. `placement` moves it between
+    /// projects and milestones (see `place`); a milestone it loses because
+    /// it left the milestone's project is returned, for the caller to report.
+    /// A ref is checked as on create. The creator is never written. The id
+    /// and the number are not fields of `update`.
+    pub fn update_issue(
+        &mut self,
+        r: &IssueRef,
+        placement: &Placement,
+        update: &IssueUpdate,
+    ) -> Result<(Issue, Option<ClearedMilestone>)> {
         self.write(|tx| {
             let key = read_key(tx)?;
             let mut issue = resolve_issue(tx, r)?;
-            let (from, old_parent, old_ref) = (issue.status, issue.parent_id.clone(), issue.r#ref.clone());
-            f(&mut issue);
-            if issue.r#ref != old_ref && let Some(r) = &issue.r#ref {
-                check_ref(tx, &key, r, Some(&issue.id))?;
+            let from = issue.status;
+            if let Some(title) = &update.title {
+                issue.title.clone_from(title);
             }
-            if issue.parent_id != old_parent && let Some(parent) = &issue.parent_id {
-                check_parent(tx, &key, Some(&issue), parent)?;
+            if let Some(description) = &update.description {
+                issue.description.clone_from(description);
             }
+            if let Some(status) = update.status {
+                issue.status = status;
+            }
+            if let Some(priority) = update.priority {
+                issue.priority = priority;
+            }
+            match &update.assignee {
+                Change::Keep => {}
+                Change::Clear => issue.assignee = None,
+                Change::Set(name) => issue.assignee = Some(name.clone()),
+            }
+            match &update.estimate {
+                Change::Keep => {}
+                Change::Clear => issue.estimate = None,
+                Change::Set(n) => issue.estimate = Some(*n),
+            }
+            match &update.due_date {
+                Change::Keep => {}
+                Change::Clear => issue.due_date = None,
+                Change::Set(d) => issue.due_date = Some(d.clone()),
+            }
+            match &update.r#ref {
+                Change::Keep => {}
+                Change::Clear => issue.r#ref = None,
+                Change::Set(r) => {
+                    check_ref(tx, &key, r, Some(issue.id.as_str()))?;
+                    issue.r#ref = Some(r.clone());
+                }
+            }
+            match &update.parent {
+                Change::Keep => {}
+                Change::Clear => issue.parent_id = None,
+                Change::Set(parent) => {
+                    let parent = resolve_issue(tx, parent)?;
+                    let id = parent.id.clone();
+                    check_parent(tx, &key, Some(&issue), id.as_str())?;
+                    issue.parent_id = Some(id);
+                }
+            }
+            apply_labels(tx, &mut issue.labels, &update.labels)?;
             let cleared = place(tx, &mut issue, placement)?;
             issue.updated_at = crate::models::now();
             issue.apply_lifecycle(Some(from), issue.updated_at);
@@ -483,9 +676,9 @@ impl Store {
                 "UPDATE issues SET title=?1,description=?2,status=?3,priority=?4,assignee=?5,parent_id=?6,estimate=?7,due_date=?8,updated_at=?9,completed_at=?10,started_at=?11,canceled_at=?12,project_id=?13,milestone_id=?14,ref=?15 WHERE id=?16",
                 params![issue.title, issue.description, status, priority, issue.assignee, issue.parent_id, issue.estimate, issue.due_date, issue.updated_at, issue.completed_at, issue.started_at, issue.canceled_at, issue.project_id, issue.milestone_id, issue.r#ref, issue.id],
             )?;
-            set_labels(tx, &issue.id, &issue.labels)?;
-            place_cycle(tx, &issue.id, &placement.cycle)?;
-            Ok((reread(tx, &key, &issue.id)?, cleared))
+            set_labels(tx, issue.id.as_str(), &issue.labels)?;
+            place_cycle(tx, issue.id.as_str(), &placement.cycle)?;
+            Ok((reread(tx, &key, issue.id.as_str())?, cleared))
         })
     }
     /// Deletes the issue and its comments, labels and cycle links, and returns
@@ -496,15 +689,28 @@ impl Store {
         self.write(|tx| {
             let key = read_key(tx)?;
             let issue = resolve_issue(tx, r)?;
-            let mut stmt = tx.prepare("SELECT number FROM issues WHERE parent_id=?1 ORDER BY number")?;
-            let children = stmt.query_map(params![issue.id], |r| r.get(0))?.collect::<std::result::Result<Vec<i64>, _>>()?;
+            let mut stmt =
+                tx.prepare("SELECT number FROM issues WHERE parent_id=?1 ORDER BY number")?;
+            let children = stmt
+                .query_map(params![issue.id], |r| r.get(0))?
+                .collect::<std::result::Result<Vec<i64>, _>>()?;
             if !children.is_empty() {
-                let children: Vec<String> = children.into_iter().map(|n| identifier(&key, n)).collect();
-                return Err(LclError::HasChildren { issue: issue.identifier, children: children.join(", ") });
+                let children: Vec<String> =
+                    children.into_iter().map(|n| identifier(&key, n)).collect();
+                return Err(LclError::HasChildren {
+                    issue: issue.identifier,
+                    children: children.join(", "),
+                });
             }
             tx.execute("DELETE FROM comments WHERE issue_id=?1", params![issue.id])?;
-            tx.execute("DELETE FROM issue_labels WHERE issue_id=?1", params![issue.id])?;
-            tx.execute("DELETE FROM issue_cycles WHERE issue_id=?1", params![issue.id])?;
+            tx.execute(
+                "DELETE FROM issue_labels WHERE issue_id=?1",
+                params![issue.id],
+            )?;
+            tx.execute(
+                "DELETE FROM issue_cycles WHERE issue_id=?1",
+                params![issue.id],
+            )?;
             tx.execute("DELETE FROM issues WHERE id=?1", params![issue.id])?;
             Ok(issue)
         })
@@ -517,7 +723,12 @@ impl Store {
     /// `blocks` row that would close a cycle, a second duplicate-of target,
     /// and a duplicate-of cycle. duplicate-of also sets `a`'s status to
     /// Duplicate, with the lifecycle that goes with it.
-    pub fn relate(&mut self, a: &IssueRef, kind: RelationKind, b: &IssueRef) -> Result<(Relation, bool)> {
+    pub fn relate(
+        &mut self,
+        a: &IssueRef,
+        kind: RelationKind,
+        b: &IssueRef,
+    ) -> Result<(Relation, bool)> {
         self.write(|tx| {
             let key = read_key(tx)?;
             let edge = resolve_edge(tx, a, kind, b)?;
@@ -595,7 +806,13 @@ impl Store {
 
     // ----- projects -----
     /// Creates a project. Its name must be free, ignoring ASCII case.
-    pub fn create_project(&mut self, name: &str, description: &str, status: ProjectStatus, target_date: Option<&str>) -> Result<Project> {
+    pub fn create_project(
+        &mut self,
+        name: &str,
+        description: &str,
+        status: ProjectStatus,
+        target_date: Option<&str>,
+    ) -> Result<Project> {
         self.write(|tx| {
             if let Some(existing) = project_named(tx, name, None)? {
                 return Err(LclError::ProjectExists { name: name.to_string(), existing: existing.name });
@@ -670,10 +887,22 @@ impl Store {
     pub fn delete_project(&mut self, r: &str) -> Result<Project> {
         self.write(|tx| {
             let project = resolve_project(tx, r)?;
-            let issues: i64 = tx.query_row("SELECT count(*) FROM issues WHERE project_id = ?1", params![project.id], |r| r.get(0))?;
-            let milestones: i64 = tx.query_row("SELECT count(*) FROM milestones WHERE project_id = ?1", params![project.id], |r| r.get(0))?;
+            let issues: i64 = tx.query_row(
+                "SELECT count(*) FROM issues WHERE project_id = ?1",
+                params![project.id],
+                |r| r.get(0),
+            )?;
+            let milestones: i64 = tx.query_row(
+                "SELECT count(*) FROM milestones WHERE project_id = ?1",
+                params![project.id],
+                |r| r.get(0),
+            )?;
             if issues + milestones > 0 {
-                return Err(LclError::ProjectInUse { name: project.name, issues, milestones });
+                return Err(LclError::ProjectInUse {
+                    name: project.name,
+                    issues,
+                    milestones,
+                });
             }
             tx.execute("DELETE FROM projects WHERE id = ?1", params![project.id])?;
             Ok(project)
@@ -683,7 +912,14 @@ impl Store {
     // ----- milestones -----
     /// Creates a milestone in the project `project` names. Its name must be
     /// free in that project, ignoring ASCII case.
-    pub fn create_milestone(&mut self, name: &str, project: &str, description: &str, target_date: Option<&str>, sort_order: i64) -> Result<Milestone> {
+    pub fn create_milestone(
+        &mut self,
+        name: &str,
+        project: &str,
+        description: &str,
+        target_date: Option<&str>,
+        sort_order: i64,
+    ) -> Result<Milestone> {
         self.write(|tx| {
             let project = resolve_project(tx, project)?;
             if let Some(existing) = milestone_named(tx, &project, name, None)? {
@@ -721,7 +957,12 @@ impl Store {
     }
     /// Applies `u` to the milestone `r` names. A new name must be free in its
     /// project, ignoring ASCII case, except for its own.
-    pub fn update_milestone(&mut self, r: &str, project: Option<&str>, u: &MilestoneUpdate) -> Result<Milestone> {
+    pub fn update_milestone(
+        &mut self,
+        r: &str,
+        project: Option<&str>,
+        u: &MilestoneUpdate,
+    ) -> Result<Milestone> {
         self.write(|tx| {
             let project = project.map(|p| resolve_project(tx, p)).transpose()?;
             let mut m = resolve_milestone(tx, r, project.as_ref())?;
@@ -752,9 +993,16 @@ impl Store {
         self.write(|tx| {
             let project = project.map(|p| resolve_project(tx, p)).transpose()?;
             let m = resolve_milestone(tx, r, project.as_ref())?;
-            let issues: i64 = tx.query_row("SELECT count(*) FROM issues WHERE milestone_id = ?1", params![m.id], |r| r.get(0))?;
+            let issues: i64 = tx.query_row(
+                "SELECT count(*) FROM issues WHERE milestone_id = ?1",
+                params![m.id],
+                |r| r.get(0),
+            )?;
             if issues > 0 {
-                return Err(LclError::MilestoneInUse { name: m.name, issues });
+                return Err(LclError::MilestoneInUse {
+                    name: m.name,
+                    issues,
+                });
             }
             tx.execute("DELETE FROM milestones WHERE id = ?1", params![m.id])?;
             Ok(m)
@@ -764,11 +1012,25 @@ impl Store {
     // ----- comments -----
     /// Resolves the issue and adds the comment in one transaction, so the
     /// issue can't be deleted in between.
-    pub fn add_comment(&mut self, r: &IssueRef, body: String, author: Option<String>) -> Result<Comment> {
+    pub fn add_comment(
+        &mut self,
+        r: &IssueRef,
+        body: String,
+        author: Option<String>,
+    ) -> Result<Comment> {
         self.write(|tx| {
             let target = resolve_issue(tx, r)?;
-            let c = Comment { id: uuid::Uuid::new_v4().to_string(), issue_id: target.id, body, author, created_at: crate::models::now() };
-            tx.execute("INSERT INTO comments(id,issue_id,body,author,created_at) VALUES(?1,?2,?3,?4,?5)", params![c.id, c.issue_id, c.body, c.author, c.created_at])?;
+            let c = Comment {
+                id: uuid::Uuid::new_v4().to_string(),
+                issue_id: target.id.to_string(),
+                body,
+                author,
+                created_at: crate::models::now(),
+            };
+            tx.execute(
+                "INSERT INTO comments(id,issue_id,body,author,created_at) VALUES(?1,?2,?3,?4,?5)",
+                params![c.id, c.issue_id, c.body, c.author, c.created_at],
+            )?;
             Ok(c)
         })
     }
@@ -778,7 +1040,13 @@ impl Store {
     pub fn edit_comment(&mut self, id: &str, body: String) -> Result<Comment> {
         self.write(|tx| {
             let mut c = find_comment(tx, id)?;
-            one_comment_row(tx.execute("UPDATE comments SET body=?1 WHERE id=?2", params![body, c.id])?, &c.id)?;
+            one_comment_row(
+                tx.execute(
+                    "UPDATE comments SET body=?1 WHERE id=?2",
+                    params![body, c.id],
+                )?,
+                &c.id,
+            )?;
             c.body = body;
             Ok(c)
         })
@@ -790,25 +1058,48 @@ impl Store {
         self.write(|tx| {
             let c = find_comment(tx, id)?;
             let key = read_key(tx)?;
-            let number: Option<i64> = tx.query_row("SELECT number FROM issues WHERE id=?1", params![c.issue_id], |r| r.get(0)).optional()?;
-            one_comment_row(tx.execute("DELETE FROM comments WHERE id=?1", params![c.id])?, &c.id)?;
+            let number: Option<i64> = tx
+                .query_row(
+                    "SELECT number FROM issues WHERE id=?1",
+                    params![c.issue_id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            one_comment_row(
+                tx.execute("DELETE FROM comments WHERE id=?1", params![c.id])?,
+                &c.id,
+            )?;
             Ok((c, number.map(|n| identifier(&key, n))))
         })
     }
     pub fn list_comments(&self, issue_id: &str) -> Result<Vec<Comment>> {
         // Oldest first; same-second comments in the order they were added.
         let mut stmt = self.conn.prepare("SELECT id,issue_id,body,author,created_at FROM comments WHERE issue_id=?1 ORDER BY created_at, rowid")?;
-        let rows = stmt.query_map(params![issue_id], |r| Ok(Comment { id: r.get(0)?, issue_id: r.get(1)?, body: r.get(2)?, author: r.get(3)?, created_at: r.get(4)? }))?;
-        Ok(rows.collect::<std::result::Result<Vec<_>,_>>()?)
+        let rows = stmt.query_map(params![issue_id], |r| {
+            Ok(Comment {
+                id: r.get(0)?,
+                issue_id: r.get(1)?,
+                body: r.get(2)?,
+                author: r.get(3)?,
+                created_at: r.get(4)?,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
     // ----- docs -----
     /// Adds the doc. A parent must be an existing doc (see `check_doc_parent`).
     pub fn create_doc(&mut self, mut d: Doc) -> Result<Doc> {
-        if d.id.is_empty() { d.id = uuid::Uuid::new_v4().to_string(); }
+        if d.id.is_empty() {
+            d.id = uuid::Uuid::new_v4().to_string();
+        }
         let now = crate::models::now();
-        if d.created_at == 0 { d.created_at = now; }
-        if d.updated_at == 0 { d.updated_at = now; }
+        if d.created_at == 0 {
+            d.created_at = now;
+        }
+        if d.updated_at == 0 {
+            d.updated_at = now;
+        }
         self.write(|tx| {
             if let Some(p) = &d.parent_id { d.parent_id = Some(check_doc_parent(tx, None, p)?); }
             tx.execute("INSERT INTO docs(id,title,content,parent_id,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6)", params![d.id, d.title, d.content, d.parent_id, d.created_at, d.updated_at])?;
@@ -820,44 +1111,84 @@ impl Store {
     }
     pub fn list_docs(&self) -> Result<Vec<Doc>> {
         let mut stmt = self.conn.prepare("SELECT id,title,content,parent_id,created_at,updated_at FROM docs ORDER BY updated_at DESC")?;
-        let rows = stmt.query_map([], |r| Ok(Doc { id: r.get(0)?, title: r.get(1)?, content: r.get(2)?, parent_id: r.get(3)?, created_at: r.get(4)?, updated_at: r.get(5)? }))?;
-        Ok(rows.collect::<std::result::Result<Vec<_>,_>>()?)
+        let rows = stmt.query_map([], |r| {
+            Ok(Doc {
+                id: r.get(0)?,
+                title: r.get(1)?,
+                content: r.get(2)?,
+                parent_id: r.get(3)?,
+                created_at: r.get(4)?,
+                updated_at: r.get(5)?,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
     /// Changes what is given. A new parent is checked as on create, and may
     /// not be the doc itself or below it.
-    pub fn update_doc(&mut self, id: &str, title: Option<String>, content: Option<String>, parent: Change<String>) -> Result<Doc> {
+    pub fn update_doc(
+        &mut self,
+        id: &str,
+        title: Option<String>,
+        content: Option<String>,
+        parent: Change<String>,
+    ) -> Result<Doc> {
         self.write(|tx| {
             let mut d = read_doc(tx, id)?.ok_or_else(|| LclError::NotFound(id.to_string()))?;
-            if let Some(t) = title { d.title = t; }
-            if let Some(c) = content { d.content = c; }
+            if let Some(t) = title {
+                d.title = t;
+            }
+            if let Some(c) = content {
+                d.content = c;
+            }
             match parent {
                 Change::Keep => {}
                 Change::Clear => d.parent_id = None,
                 Change::Set(p) => d.parent_id = Some(check_doc_parent(tx, Some(&d.id), &p)?),
             }
             d.updated_at = crate::models::now();
-            tx.execute("UPDATE docs SET title=?1,content=?2,parent_id=?3,updated_at=?4 WHERE id=?5", params![d.title, d.content, d.parent_id, d.updated_at, d.id])?;
+            tx.execute(
+                "UPDATE docs SET title=?1,content=?2,parent_id=?3,updated_at=?4 WHERE id=?5",
+                params![d.title, d.content, d.parent_id, d.updated_at, d.id],
+            )?;
             Ok(d)
         })
     }
     pub fn delete_doc(&mut self, id: &str) -> Result<()> {
         self.write(|tx| {
-            if tx.execute("DELETE FROM docs WHERE id=?1", params![id])? == 0 {
+            if read_doc(tx, id)?.is_none() {
                 return Err(LclError::DocNotFound(id.to_string()));
             }
+            let mut stmt = tx.prepare("SELECT id FROM docs WHERE parent_id = ?1 ORDER BY id")?;
+            let children: Vec<String> = stmt
+                .query_map(params![id], |r| r.get(0))?
+                .collect::<std::result::Result<_, _>>()?;
+            if !children.is_empty() {
+                return Err(LclError::DocHasChildren {
+                    doc: id.to_string(),
+                    children: children.join(", "),
+                });
+            }
+            tx.execute("DELETE FROM docs WHERE id=?1", params![id])?;
             Ok(())
         })
     }
 
     // ----- cycles -----
     pub fn create_cycle(&mut self, mut c: Cycle) -> Result<Cycle> {
-        if c.id.is_empty() { c.id = uuid::Uuid::new_v4().to_string(); }
-        if c.created_at == 0 { c.created_at = crate::models::now(); }
+        if c.id.is_empty() {
+            c.id = uuid::Uuid::new_v4().to_string();
+        }
+        if c.created_at == 0 {
+            c.created_at = crate::models::now();
+        }
         self.write(|tx| {
             // No unique index (names stored twice before this check stay):
             // the check and the insert share the write lock instead.
             check_cycle_name(tx, &c.name, None)?;
-            tx.execute("INSERT INTO cycles(id,name,starts_at,ends_at,created_at) VALUES(?1,?2,?3,?4,?5)", params![c.id, c.name, c.starts_at, c.ends_at, c.created_at])?;
+            tx.execute(
+                "INSERT INTO cycles(id,name,starts_at,ends_at,created_at) VALUES(?1,?2,?3,?4,?5)",
+                params![c.id, c.name, c.starts_at, c.ends_at, c.created_at],
+            )?;
             Ok(c)
         })
     }
@@ -866,8 +1197,13 @@ impl Store {
         let mut stmt = self.conn.prepare(
             "SELECT c.id,c.name,c.starts_at,c.ends_at,c.created_at,(SELECT count(*) FROM issue_cycles ic WHERE ic.cycle_id = c.id) FROM cycles c ORDER BY c.created_at DESC",
         )?;
-        let rows = stmt.query_map([], |r| Ok(CycleListing { cycle: row_to_cycle(r)?, issues: r.get(5)? }))?;
-        Ok(rows.collect::<std::result::Result<Vec<_>,_>>()?)
+        let rows = stmt.query_map([], |r| {
+            Ok(CycleListing {
+                cycle: row_to_cycle(r)?,
+                issues: r.get(5)?,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
     /// Renames the cycle (a name no other cycle has) and sets or clears its
     /// dates. The end may not come before the start, as they will be stored.
@@ -878,7 +1214,10 @@ impl Store {
                 check_cycle_name(tx, name, Some(&c.id))?;
                 c.name = name.clone();
             }
-            for (date, change) in [(&mut c.starts_at, &u.starts_at), (&mut c.ends_at, &u.ends_at)] {
+            for (date, change) in [
+                (&mut c.starts_at, &u.starts_at),
+                (&mut c.ends_at, &u.ends_at),
+            ] {
                 match change {
                     Change::Keep => {}
                     Change::Clear => *date = None,
@@ -889,9 +1228,16 @@ impl Store {
                 && let (Ok(s), Ok(e)) = (crate::parse::date(start), crate::parse::date(end))
                 && e < s
             {
-                return Err(LclError::CycleEndBeforeStart { name: c.name.clone(), start: start.clone(), end: end.clone() });
+                return Err(LclError::CycleEndBeforeStart {
+                    name: c.name.clone(),
+                    start: start.clone(),
+                    end: end.clone(),
+                });
             }
-            tx.execute("UPDATE cycles SET name=?1, starts_at=?2, ends_at=?3 WHERE id=?4", params![c.name, c.starts_at, c.ends_at, c.id])?;
+            tx.execute(
+                "UPDATE cycles SET name=?1, starts_at=?2, ends_at=?3 WHERE id=?4",
+                params![c.name, c.starts_at, c.ends_at, c.id],
+            )?;
             Ok(c)
         })
     }
@@ -899,9 +1245,16 @@ impl Store {
     pub fn delete_cycle(&mut self, r: &str) -> Result<Cycle> {
         self.write(|tx| {
             let c = resolve_cycle(tx, r)?;
-            let issues: i64 = tx.query_row("SELECT count(*) FROM issue_cycles WHERE cycle_id=?1", params![c.id], |r| r.get(0))?;
+            let issues: i64 = tx.query_row(
+                "SELECT count(*) FROM issue_cycles WHERE cycle_id=?1",
+                params![c.id],
+                |r| r.get(0),
+            )?;
             if issues > 0 {
-                return Err(LclError::CycleInUse { name: c.name, issues });
+                return Err(LclError::CycleInUse {
+                    name: c.name,
+                    issues,
+                });
             }
             tx.execute("DELETE FROM cycles WHERE id=?1", params![c.id])?;
             Ok(c)
@@ -1001,7 +1354,7 @@ impl Store {
             let mut fields: HashMap<String, Vec<Field>> = page.into_iter().map(|(id, hit)| (id, hit.fields)).collect();
             let issues: Vec<IssueHit> = fetch_issues(conn, &ids)?
                 .into_iter()
-                .map(|issue| IssueHit { matched_in: fields.remove(&issue.id).unwrap_or_default(), issue })
+                .map(|issue| IssueHit { matched_in: fields.remove(issue.id.as_str()).unwrap_or_default(), issue })
                 .collect();
 
             let mut stmt = conn.prepare(
@@ -1036,7 +1389,11 @@ impl Store {
 pub(crate) fn read_meta(conn: &Connection, key: &str) -> Result<Option<String>> {
     let mut stmt = conn.prepare("SELECT value FROM meta WHERE key=?1")?;
     let mut rows = stmt.query(params![key])?;
-    if let Some(r) = rows.next()? { Ok(Some(r.get(0)?)) } else { Ok(None) }
+    if let Some(r) = rows.next()? {
+        Ok(Some(r.get(0)?))
+    } else {
+        Ok(None)
+    }
 }
 
 pub(crate) fn put_meta(conn: &Connection, key: &str, value: &str) -> Result<()> {
@@ -1050,10 +1407,16 @@ pub(crate) fn put_meta(conn: &Connection, key: &str, value: &str) -> Result<()> 
 /// Must run inside the create's write transaction.
 pub(crate) fn next_issue_number(conn: &Connection) -> Result<i64> {
     let mark = match read_meta(conn, NEXT_ISSUE_NUMBER)? {
-        Some(v) => v.parse::<i64>().map_err(|_| LclError::Msg(format!("meta {NEXT_ISSUE_NUMBER} is not a number: {v:?}")))?,
+        Some(v) => v.parse::<i64>().map_err(|_| LclError::BadMetaNumber {
+            key: NEXT_ISSUE_NUMBER,
+            value: v,
+        })?,
         None => 1,
     };
-    let past_max: i64 = conn.query_row("SELECT COALESCE(MAX(number),0)+1 FROM issues", [], |r| r.get(0))?;
+    let past_max: i64 =
+        conn.query_row("SELECT COALESCE(MAX(number),0)+1 FROM issues", [], |r| {
+            r.get(0)
+        })?;
     Ok(mark.max(past_max))
 }
 
@@ -1061,18 +1424,52 @@ pub(crate) fn next_issue_number(conn: &Connection) -> Result<i64> {
 /// unique index on labels(name COLLATE NOCASE), so at most one matches.
 fn label_by_name(conn: &Connection, name: &str) -> Result<Option<Label>> {
     Ok(conn
-        .query_row("SELECT id,name,color FROM labels WHERE name=?1 COLLATE NOCASE", params![name], |r| Ok(Label { id: r.get(0)?, name: r.get(1)?, color: r.get(2)? }))
+        .query_row(
+            "SELECT id,name,color FROM labels WHERE name=?1 COLLATE NOCASE",
+            params![name],
+            |r| {
+                Ok(Label {
+                    id: r.get(0)?,
+                    name: r.get(1)?,
+                    color: r.get(2)?,
+                })
+            },
+        )
         .optional()?)
+}
+
+/// Applies `update` to the label names read with the issue. Every name in
+/// `remove` must name a label, looked up here, inside the write.
+fn apply_labels(conn: &Connection, labels: &mut Vec<String>, update: &LabelUpdate) -> Result<()> {
+    if let Some(names) = &update.replace {
+        *labels = names.clone();
+    }
+    if update.clear {
+        labels.clear();
+    }
+    for name in &update.remove {
+        label_by_name(conn, name)?.ok_or_else(|| LclError::UnknownLabel(name.clone()))?;
+    }
+    labels.retain(|n| !update.remove.iter().any(|r| r.eq_ignore_ascii_case(n)));
+    labels.extend(update.add.iter().cloned());
+    Ok(())
 }
 
 /// Makes the issue's labels exactly `names` (each matched ignoring case;
 /// repeats collapse). Must run inside the write transaction that reads the
 /// issue, so a concurrent add can't be lost.
 fn set_labels(conn: &Connection, issue_id: &str, names: &[String]) -> Result<()> {
-    conn.execute("DELETE FROM issue_labels WHERE issue_id=?1", params![issue_id])?;
+    conn.execute(
+        "DELETE FROM issue_labels WHERE issue_id=?1",
+        params![issue_id],
+    )?;
     for name in names {
-        let label = label_by_name(conn, name)?.ok_or_else(|| LclError::UnknownLabel(name.clone()))?;
-        conn.execute("INSERT OR IGNORE INTO issue_labels(issue_id,label_id) VALUES(?1,?2)", params![issue_id, label.id])?;
+        let label =
+            label_by_name(conn, name)?.ok_or_else(|| LclError::UnknownLabel(name.clone()))?;
+        conn.execute(
+            "INSERT OR IGNORE INTO issue_labels(issue_id,label_id) VALUES(?1,?2)",
+            params![issue_id, label.id],
+        )?;
     }
     Ok(())
 }
@@ -1089,19 +1486,28 @@ fn resolve_issue(conn: &Connection, r: &IssueRef) -> Result<Issue> {
     let key = read_key(conn)?;
     match r {
         IssueRef::Number { key: typed, number } => {
-            if let Some(typed) = typed && !own_key(typed, &key) {
+            if let Some(typed) = typed
+                && !own_key(typed, &key)
+            {
                 // Never resolved through a ref; an issue whose ref it is is
                 // only named in the error.
                 let given = r.to_string();
                 let holder = conn
-                    .query_row("SELECT number, ref FROM issues WHERE ref = ?1 COLLATE NOCASE", params![given], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))
+                    .query_row(
+                        "SELECT number, ref FROM issues WHERE ref = ?1 COLLATE NOCASE",
+                        params![given],
+                        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+                    )
                     .optional()?
                     .map(|(n, stored)| (identifier(&key, n), stored));
                 return Err(LclError::WrongWorkspace { given, key, holder });
             }
-            fetch_issue_by(conn, &key, "number", number)?.ok_or_else(|| LclError::IssueNotFound(identifier(&key, *number)))
+            fetch_issue_by(conn, &key, "number", number)?
+                .ok_or_else(|| LclError::IssueNotFound(identifier(&key, *number)))
         }
-        IssueRef::Id(id) => fetch_issue_by(conn, &key, "id", id)?.ok_or_else(|| LclError::IssueNotFound(id.clone())),
+        IssueRef::Id(id) => {
+            fetch_issue_by(conn, &key, "id", id)?.ok_or_else(|| LclError::IssueNotFound(id.clone()))
+        }
     }
 }
 
@@ -1121,10 +1527,17 @@ fn check_ref(conn: &Connection, key: &str, r: &str, issue_id: Option<&str>) -> R
         return Err(LclError::RefLooksOwn(r.to_string()));
     }
     let holder: Option<i64> = conn
-        .query_row("SELECT number FROM issues WHERE ref = ?1 COLLATE NOCASE AND id IS NOT ?2", params![r, issue_id], |row| row.get(0))
+        .query_row(
+            "SELECT number FROM issues WHERE ref = ?1 COLLATE NOCASE AND id IS NOT ?2",
+            params![r, issue_id],
+            |row| row.get(0),
+        )
         .optional()?;
     match holder {
-        Some(n) => Err(LclError::RefTaken { given: r.to_string(), holder: identifier(key, n) }),
+        Some(n) => Err(LclError::RefTaken {
+            given: r.to_string(),
+            holder: identifier(key, n),
+        }),
         None => Ok(()),
     }
 }
@@ -1133,7 +1546,9 @@ fn check_ref(conn: &Connection, key: &str, r: &str, issue_id: Option<&str>) -> R
 /// workspace with key `key`: `N`, `#N`, its `KEY-N`, or any UUID.
 pub(crate) fn ref_looks_own(key: &str, r: &str) -> bool {
     match r.parse::<IssueRef>() {
-        Ok(IssueRef::Number { key: Some(typed), .. }) => !key.is_empty() && own_key(&typed, key),
+        Ok(IssueRef::Number {
+            key: Some(typed), ..
+        }) => !key.is_empty() && own_key(&typed, key),
         Ok(IssueRef::Number { key: None, .. } | IssueRef::Id(_)) => true,
         Err(_) => false,
     }
@@ -1143,7 +1558,11 @@ pub(crate) fn ref_looks_own(key: &str, r: &str) -> bool {
 /// either case), checked as a parent for `doc` (None: a doc being created):
 /// it must exist, and must be neither the doc itself nor below it.
 fn check_doc_parent(conn: &Connection, doc: Option<&str>, parent: &str) -> Result<String> {
-    let find = |id: &str| -> Result<Option<String>> { Ok(conn.query_row("SELECT id FROM docs WHERE id=?1", params![id], |r| r.get(0)).optional()?) };
+    let find = |id: &str| -> Result<Option<String>> {
+        Ok(conn
+            .query_row("SELECT id FROM docs WHERE id=?1", params![id], |r| r.get(0))
+            .optional()?)
+    };
     let found = match find(parent)? {
         Some(id) => Some(id),
         None => match crate::parse::uuid(parent) {
@@ -1158,17 +1577,32 @@ fn check_doc_parent(conn: &Connection, doc: Option<&str>, parent: &str) -> Resul
     }
     let mut path = vec![doc.to_string(), parent_id.clone()];
     let mut seen = HashSet::from([parent_id.clone()]);
-    let mut next: Option<String> = conn.query_row("SELECT parent_id FROM docs WHERE id=?1", params![parent_id], |r| r.get(0))?;
+    let mut next: Option<String> = conn.query_row(
+        "SELECT parent_id FROM docs WHERE id=?1",
+        params![parent_id],
+        |r| r.get(0),
+    )?;
     while let Some(id) = next {
         if id == doc {
             path.push(doc.to_string());
-            return Err(LclError::DocParentCycle { doc: doc.to_string(), parent: parent_id, path: path.join(" -> ") });
+            return Err(LclError::DocParentCycle {
+                doc: doc.to_string(),
+                parent: parent_id,
+                path: path.join(" -> "),
+            });
         }
         // A dangling link, or a loop above that doesn't pass through this
         // doc (only a hand edit could make one), ends the walk.
-        if !seen.insert(id.clone()) { break; }
+        if !seen.insert(id.clone()) {
+            break;
+        }
         path.push(id.clone());
-        next = conn.query_row("SELECT parent_id FROM docs WHERE id=?1", params![id], |r| r.get(0)).optional()?.flatten();
+        next = conn
+            .query_row("SELECT parent_id FROM docs WHERE id=?1", params![id], |r| {
+                r.get(0)
+            })
+            .optional()?
+            .flatten();
     }
     Ok(parent_id)
 }
@@ -1176,27 +1610,47 @@ fn check_doc_parent(conn: &Connection, doc: Option<&str>, parent: &str) -> Resul
 /// Checks a parent link before it is written. The parent must exist, and for
 /// an existing issue (`child`) it must be neither the issue itself nor below
 /// it: walking up from the new parent must never reach the issue.
-fn check_parent(conn: &Connection, key: &str, child: Option<&Issue>, parent_id: &str) -> Result<()> {
+fn check_parent(
+    conn: &Connection,
+    key: &str,
+    child: Option<&Issue>,
+    parent_id: &str,
+) -> Result<()> {
     let up = |id: &str| -> Result<Option<(i64, Option<String>)>> {
-        Ok(conn.query_row("SELECT number, parent_id FROM issues WHERE id=?1", params![id], |r| Ok((r.get(0)?, r.get(1)?))).optional()?)
+        Ok(conn
+            .query_row(
+                "SELECT number, parent_id FROM issues WHERE id=?1",
+                params![id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?)
     };
-    let (parent_number, mut next) = up(parent_id)?.ok_or_else(|| LclError::IssueNotFound(parent_id.to_string()))?;
+    let (parent_number, mut next) =
+        up(parent_id)?.ok_or_else(|| LclError::IssueNotFound(parent_id.to_string()))?;
     let Some(child) = child else { return Ok(()) };
-    if parent_id == child.id {
+    if parent_id == child.id.as_str() {
         return Err(LclError::SelfParent(identifier(key, child.number)));
     }
     let mut path = vec![child.number, parent_number];
     let mut seen = HashSet::from([parent_id.to_string()]);
     while let Some(id) = next {
-        if id == child.id {
+        if id == child.id.as_str() {
             path.push(child.number);
             let path: Vec<String> = path.into_iter().map(|n| identifier(key, n)).collect();
-            return Err(LclError::ParentCycle { issue: identifier(key, child.number), parent: identifier(key, parent_number), path: path.join(" -> ") });
+            return Err(LclError::ParentCycle {
+                issue: identifier(key, child.number),
+                parent: identifier(key, parent_number),
+                path: path.join(" -> "),
+            });
         }
         // A dangling link, or a loop above that doesn't pass through this
         // issue (only a 0.1.0 binary could write one now), ends the walk.
-        if !seen.insert(id.clone()) { break; }
-        let Some((number, above)) = up(&id)? else { break };
+        if !seen.insert(id.clone()) {
+            break;
+        }
+        let Some((number, above)) = up(&id)? else {
+            break;
+        };
         path.push(number);
         next = above;
     }
@@ -1219,7 +1673,11 @@ fn resolve_edge(conn: &Connection, a: &IssueRef, kind: RelationKind, b: &IssueRe
     if a.id == b.id {
         return Err(LclError::SelfRelation(a.identifier));
     }
-    let typed = Relation { issue: a.identifier.clone(), kind, related: b.identifier.clone() };
+    let typed = Relation {
+        issue: a.identifier.clone(),
+        kind,
+        related: b.identifier.clone(),
+    };
     let (from, to, stored) = match kind {
         RelationKind::Blocks => (a, b, "blocks"),
         RelationKind::BlockedBy => (b, a, "blocks"),
@@ -1228,12 +1686,21 @@ fn resolve_edge(conn: &Connection, a: &IssueRef, kind: RelationKind, b: &IssueRe
         RelationKind::Related => (b, a, "related"),
         RelationKind::DuplicateOf => (a, b, "duplicate"),
     };
-    Ok(Edge { typed, from, to, stored })
+    Ok(Edge {
+        typed,
+        from,
+        to,
+        stored,
+    })
 }
 
 fn edge_exists(conn: &Connection, e: &Edge) -> Result<bool> {
     Ok(conn
-        .query_row("SELECT 1 FROM issue_relations WHERE issue_id=?1 AND related_id=?2 AND kind=?3", params![e.from.id, e.to.id, e.stored], |_| Ok(()))
+        .query_row(
+            "SELECT 1 FROM issue_relations WHERE issue_id=?1 AND related_id=?2 AND kind=?3",
+            params![e.from.id, e.to.id, e.stored],
+            |_| Ok(()),
+        )
         .optional()?
         .is_some())
 }
@@ -1246,9 +1713,16 @@ fn check_edge(conn: &Connection, key: &str, e: &Edge) -> Result<()> {
     match e.stored {
         "blocks" => {
             // from -> to closes a cycle if `to` already reaches `from`.
-            if let Some(path) = blocks_path(conn, &e.to, &e.from.id)? {
-                let names: Vec<String> = std::iter::once(e.from.number).chain(path).map(|n| identifier(key, n)).collect();
-                return Err(LclError::BlocksCycle { blocker: e.from.identifier.clone(), blocked: e.to.identifier.clone(), path: names.join(" blocks ") });
+            if let Some(path) = blocks_path(conn, &e.to, e.from.id.as_str())? {
+                let names: Vec<String> = std::iter::once(e.from.number)
+                    .chain(path)
+                    .map(|n| identifier(key, n))
+                    .collect();
+                return Err(LclError::BlocksCycle {
+                    blocker: e.from.identifier.clone(),
+                    blocked: e.to.identifier.clone(),
+                    path: names.join(" blocks "),
+                });
             }
         }
         "duplicate" => {
@@ -1261,19 +1735,26 @@ fn check_edge(conn: &Connection, key: &str, e: &Edge) -> Result<()> {
                     )
                     .optional()?)
             };
-            if let Some((_, current)) = target(&e.from.id)? {
-                return Err(LclError::AlreadyDuplicate { issue: e.from.identifier.clone(), current: identifier(key, current) });
+            if let Some((_, current)) = target(e.from.id.as_str())? {
+                return Err(LclError::AlreadyDuplicate {
+                    issue: e.from.identifier.clone(),
+                    current: identifier(key, current),
+                });
             }
             // Each issue has at most one target, so the chain from `to` is a
             // line; reaching `from` closes a cycle.
             let mut path = vec![e.from.number, e.to.number];
-            let mut seen = HashSet::from([e.to.id.clone()]);
-            let mut next = target(&e.to.id)?;
+            let mut seen = HashSet::from([e.to.id.as_str().to_string()]);
+            let mut next = target(e.to.id.as_str())?;
             while let Some((id, number)) = next {
                 path.push(number);
-                if id == e.from.id {
+                if id == e.from.id.as_str() {
                     let path: Vec<String> = path.into_iter().map(|n| identifier(key, n)).collect();
-                    return Err(LclError::DuplicateCycle { issue: e.from.identifier.clone(), target: e.to.identifier.clone(), path: path.join(" -> ") });
+                    return Err(LclError::DuplicateCycle {
+                        issue: e.from.identifier.clone(),
+                        target: e.to.identifier.clone(),
+                        path: path.join(" -> "),
+                    });
                 }
                 // A loop that doesn't pass through `from` (only a hand edit
                 // could make one) ends the walk.
@@ -1293,10 +1774,16 @@ fn check_edge(conn: &Connection, key: &str, e: &Edge) -> Result<()> {
 fn blocks_path(conn: &Connection, start: &Issue, goal: &str) -> Result<Option<Vec<i64>>> {
     let mut stmt = conn.prepare("SELECT r.related_id, i.number FROM issue_relations r JOIN issues i ON i.id = r.related_id WHERE r.issue_id = ?1 AND r.kind = 'blocks'")?;
     // Each issue reached, with the issue it was reached from and its number.
-    let mut came_from: HashMap<String, (Option<String>, i64)> = HashMap::from([(start.id.clone(), (None, start.number))]);
-    let mut queue = VecDeque::from([start.id.clone()]);
+    let start_id = start.id.as_str().to_string();
+    let mut came_from: HashMap<String, (Option<String>, i64)> =
+        HashMap::from([(start_id.clone(), (None, start.number))]);
+    let mut queue = VecDeque::from([start_id]);
     while let Some(id) = queue.pop_front() {
-        let blocked = stmt.query_map(params![id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?.collect::<std::result::Result<Vec<_>, _>>()?;
+        let blocked = stmt
+            .query_map(params![id], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
         for (next, number) in blocked {
             if came_from.contains_key(&next) {
                 continue;
@@ -1319,13 +1806,23 @@ fn blocks_path(conn: &Connection, start: &Issue, goal: &str) -> Result<Option<Ve
     Ok(None)
 }
 
-const PROJECT_SELECT: &str = "SELECT id, name, description, status, target_date, created_at, updated_at FROM projects";
+const PROJECT_SELECT: &str =
+    "SELECT id, name, description, status, target_date, created_at, updated_at FROM projects";
 
 fn row_to_project(r: &rusqlite::Row) -> Result<Project> {
     let status: String = r.get(3)?;
     // The schema's CHECK admits only the canonical six.
-    let status = ProjectStatus::parse(&status).ok_or_else(|| LclError::Msg(format!("project status {status:?} is unknown")))?;
-    Ok(Project { id: r.get(0)?, name: r.get(1)?, description: r.get(2)?, status, target_date: r.get(4)?, created_at: r.get(5)?, updated_at: r.get(6)? })
+    let status = ProjectStatus::parse(&status)
+        .ok_or_else(|| LclError::UnknownProjectStatus { value: status })?;
+    Ok(Project {
+        id: r.get(0)?,
+        name: r.get(1)?,
+        description: r.get(2)?,
+        status,
+        target_date: r.get(4)?,
+        created_at: r.get(5)?,
+        updated_at: r.get(6)?,
+    })
 }
 
 /// A milestone with its project's name: `milestones m` joined to `projects p`.
@@ -1346,27 +1843,50 @@ fn row_to_milestone(r: &rusqlite::Row) -> Result<Milestone> {
 }
 
 fn project_by_id(conn: &Connection, id: &str) -> Result<Project> {
-    conn.query_row(&format!("{PROJECT_SELECT} WHERE id = ?1"), params![id], |r| Ok(row_to_project(r)))
-        .optional()?
-        .ok_or_else(|| LclError::Msg(format!("project {id} vanished inside its own transaction")))?
+    conn.query_row(
+        &format!("{PROJECT_SELECT} WHERE id = ?1"),
+        params![id],
+        |r| Ok(row_to_project(r)),
+    )
+    .optional()?
+    .ok_or_else(|| LclError::Vanished {
+        what: "project",
+        id: id.to_string(),
+    })?
 }
 
 fn milestone_by_id(conn: &Connection, id: &str) -> Result<Milestone> {
-    conn.query_row(&format!("{MILESTONE_SELECT} WHERE m.id = ?1"), params![id], |r| Ok(row_to_milestone(r)))
-        .optional()?
-        .ok_or_else(|| LclError::Msg(format!("milestone {id} vanished inside its own transaction")))?
+    conn.query_row(
+        &format!("{MILESTONE_SELECT} WHERE m.id = ?1"),
+        params![id],
+        |r| Ok(row_to_milestone(r)),
+    )
+    .optional()?
+    .ok_or_else(|| LclError::Vanished {
+        what: "milestone",
+        id: id.to_string(),
+    })?
 }
 
 /// The project named `name` ignoring ASCII case, other than `except`.
 fn project_named(conn: &Connection, name: &str, except: Option<&str>) -> Result<Option<Project>> {
-    conn.query_row(&format!("{PROJECT_SELECT} WHERE name = ?1 COLLATE NOCASE AND id IS NOT ?2"), params![name, except], |r| Ok(row_to_project(r)))
-        .optional()?
-        .transpose()
+    conn.query_row(
+        &format!("{PROJECT_SELECT} WHERE name = ?1 COLLATE NOCASE AND id IS NOT ?2"),
+        params![name, except],
+        |r| Ok(row_to_project(r)),
+    )
+    .optional()?
+    .transpose()
 }
 
 /// The milestone of `project` named `name` ignoring ASCII case, other than
 /// `except`.
-fn milestone_named(conn: &Connection, project: &Project, name: &str, except: Option<&str>) -> Result<Option<Milestone>> {
+fn milestone_named(
+    conn: &Connection,
+    project: &Project,
+    name: &str,
+    except: Option<&str>,
+) -> Result<Option<Milestone>> {
     conn.query_row(
         &format!("{MILESTONE_SELECT} WHERE m.project_id = ?1 AND m.name = ?2 COLLATE NOCASE AND m.id IS NOT ?3"),
         params![project.id, name, except],
@@ -1407,15 +1927,24 @@ fn resolve_milestone(conn: &Connection, r: &str, project: Option<&Project>) -> R
         return all
             .into_iter()
             .find(|m| m.project_id == project.id)
-            .ok_or_else(|| LclError::MilestoneNotFound { name: r.to_string(), project: Some(project.name.clone()) });
+            .ok_or_else(|| LclError::MilestoneNotFound {
+                name: r.to_string(),
+                project: Some(project.name.clone()),
+            });
     }
     if let Some(m) = all.iter().find(|m| m.id == r) {
         return Ok(m.clone());
     }
     match all.as_slice() {
-        [] => Err(LclError::MilestoneNotFound { name: r.to_string(), project: None }),
+        [] => Err(LclError::MilestoneNotFound {
+            name: r.to_string(),
+            project: None,
+        }),
         [one] => Ok(one.clone()),
-        several => Err(LclError::MilestoneAmbiguous { name: r.to_string(), projects: several.iter().map(|m| m.project.clone()).collect() }),
+        several => Err(LclError::MilestoneAmbiguous {
+            name: r.to_string(),
+            projects: several.iter().map(|m| m.project.clone()).collect(),
+        }),
     }
 }
 
@@ -1428,11 +1957,18 @@ fn milestone_for_issue(conn: &Connection, r: &str, project: &Project) -> Result<
         return Ok(m.clone());
     }
     if all.is_empty() {
-        return Err(LclError::MilestoneNotFound { name: r.to_string(), project: Some(project.name.clone()) });
+        return Err(LclError::MilestoneNotFound {
+            name: r.to_string(),
+            project: Some(project.name.clone()),
+        });
     }
     let mut elsewhere: Vec<String> = all.into_iter().map(|m| m.project).collect();
     elsewhere.dedup();
-    Err(LclError::MilestoneElsewhere { name: r.to_string(), project: project.name.clone(), elsewhere })
+    Err(LclError::MilestoneElsewhere {
+        name: r.to_string(),
+        project: project.name.clone(),
+        elsewhere,
+    })
 }
 
 /// Sets `issue`'s project and milestone from `p`, inside the caller's write
@@ -1443,7 +1979,11 @@ fn milestone_for_issue(conn: &Connection, r: &str, project: &Project) -> Result<
 ///   all projects) is cleared and returned.
 fn place(conn: &Connection, issue: &mut Issue, p: &Placement) -> Result<Option<ClearedMilestone>> {
     let project = match &p.project {
-        Change::Keep => issue.project_id.as_deref().map(|id| project_by_id(conn, id)).transpose()?,
+        Change::Keep => issue
+            .project_id
+            .as_deref()
+            .map(|id| project_by_id(conn, id))
+            .transpose()?,
         Change::Clear => None,
         Change::Set(r) => Some(resolve_project(conn, r)?),
     };
@@ -1451,7 +1991,9 @@ fn place(conn: &Connection, issue: &mut Issue, p: &Placement) -> Result<Option<C
     let milestone_id = match &p.milestone {
         Change::Clear => None,
         Change::Set(r) => {
-            let Some(project) = &project else { return Err(LclError::MilestoneWithoutProject(r.clone())) };
+            let Some(project) = &project else {
+                return Err(LclError::MilestoneWithoutProject(r.clone()));
+            };
             Some(milestone_for_issue(conn, r, project)?.id)
         }
         Change::Keep => match issue.milestone_id.as_deref() {
@@ -1461,7 +2003,10 @@ fn place(conn: &Connection, issue: &mut Issue, p: &Placement) -> Result<Option<C
                 if project.as_ref().is_some_and(|p| p.id == m.project_id) {
                     Some(m.id)
                 } else {
-                    cleared = Some(ClearedMilestone { milestone: m.name, project: m.project });
+                    cleared = Some(ClearedMilestone {
+                        milestone: m.name,
+                        project: m.project,
+                    });
                     None
                 }
             }
@@ -1473,16 +2018,18 @@ fn place(conn: &Connection, issue: &mut Issue, p: &Placement) -> Result<Option<C
 }
 
 /// How many issues have `col` (project_id or milestone_id) = `id`, by
-/// status. lcl_status() reads each stored status as every read does; what
-/// it can't read is counted as unreadable.
+/// status. The schema's CHECK admits only the canonical spellings; one it
+/// doesn't is counted as unreadable rather than failing the whole read.
 fn issue_counts(conn: &Connection, col: &str, id: &str) -> Result<IssueCounts> {
-    let mut stmt = conn.prepare(&format!("SELECT lcl_status(status), count(*) FROM issues WHERE {col} = ?1 GROUP BY 1"))?;
+    let mut stmt = conn.prepare(&format!(
+        "SELECT status, count(*) FROM issues WHERE {col} = ?1 GROUP BY 1"
+    ))?;
     let mut counts = IssueCounts::default();
-    for row in stmt.query_map(params![id], |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, i64>(1)?)))? {
+    for row in stmt.query_map(params![id], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+    })? {
         let (status, n) = row?;
-        // lcl_status answers with a canonical spelling, or NULL.
-        let status = status.and_then(|s| Status::all().iter().copied().find(|st| st.as_str() == s));
-        counts.by_status.add(status, n);
+        counts.by_status.add(Status::parse(&status), n);
         counts.total += n;
     }
     Ok(counts)
@@ -1491,7 +2038,10 @@ fn issue_counts(conn: &Connection, col: &str, id: &str) -> Result<IssueCounts> {
 /// The issue as just written, read back inside the same transaction so the
 /// caller gets the derived fields (identifiers) too.
 fn reread(conn: &Connection, key: &str, id: &str) -> Result<Issue> {
-    fetch_issue_by(conn, key, "id", &id)?.ok_or_else(|| LclError::Msg(format!("issue {id} vanished inside its own transaction")))
+    fetch_issue_by(conn, key, "id", &id)?.ok_or_else(|| LclError::Vanished {
+        what: "issue",
+        id: id.to_string(),
+    })
 }
 
 /// An issue row as `row_to_issue` reads it: `issues i`, with its parent's
@@ -1505,12 +2055,14 @@ fn fetch_issues(conn: &Connection, ids: &[String]) -> Result<Vec<Issue>> {
         return Ok(vec![]);
     }
     let key = read_key(conn)?;
-    let mut stmt = conn.prepare(&format!("{ISSUE_SELECT} WHERE i.id IN (SELECT value FROM json_each(?1))"))?;
+    let mut stmt = conn.prepare(&format!(
+        "{ISSUE_SELECT} WHERE i.id IN (SELECT value FROM json_each(?1))"
+    ))?;
     let mut rows = stmt.query(params![json_array(ids)?])?;
     let mut by_id: HashMap<String, Issue> = HashMap::with_capacity(ids.len());
     while let Some(r) = rows.next()? {
         let issue = row_to_issue(r, &key)?;
-        by_id.insert(issue.id.clone(), issue);
+        by_id.insert(issue.id.as_str().to_string(), issue);
     }
     let mut out: Vec<Issue> = ids.iter().filter_map(|id| by_id.remove(id)).collect();
     attach_labels(conn, &mut out)?;
@@ -1520,10 +2072,17 @@ fn fetch_issues(conn: &Connection, ids: &[String]) -> Result<Vec<Issue>> {
 
 /// The issue whose `col` (`id` or `number`) equals `val`, with its labels and
 /// its identifiers under workspace key `key`.
-fn fetch_issue_by(conn: &Connection, key: &str, col: &str, val: &dyn ToSql) -> Result<Option<Issue>> {
+fn fetch_issue_by(
+    conn: &Connection,
+    key: &str,
+    col: &str,
+    val: &dyn ToSql,
+) -> Result<Option<Issue>> {
     let mut stmt = conn.prepare(&format!("{ISSUE_SELECT} WHERE i.{col}=?1"))?;
     let mut rows = stmt.query(params![val])?;
-    let Some(r) = rows.next()? else { return Ok(None) };
+    let Some(r) = rows.next()? else {
+        return Ok(None);
+    };
     let mut issue = [row_to_issue(r, key)?];
     attach_labels(conn, &mut issue)?;
     attach_cycles(conn, &mut issue)?;
@@ -1543,12 +2102,14 @@ fn attach_labels(conn: &Connection, issues: &mut [Issue]) -> Result<()> {
          WHERE il.issue_id IN (SELECT value FROM json_each(?1)) ORDER BY l.name COLLATE NOCASE, l.name",
     )?;
     let mut by_issue: HashMap<String, Vec<String>> = HashMap::new();
-    for row in stmt.query_map(params![json_array(&ids)?], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))? {
+    for row in stmt.query_map(params![json_array(&ids)?], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+    })? {
         let (id, name) = row?;
         by_issue.entry(id).or_default().push(name);
     }
     for issue in issues {
-        issue.labels = by_issue.get(&issue.id).cloned().unwrap_or_default();
+        issue.labels = by_issue.get(issue.id.as_str()).cloned().unwrap_or_default();
     }
     Ok(())
 }
@@ -1566,12 +2127,20 @@ fn attach_cycles(conn: &Connection, issues: &mut [Issue]) -> Result<()> {
          ORDER BY c.starts_at IS NULL, c.starts_at, c.name COLLATE NOCASE, c.name, c.id",
     )?;
     let mut by_issue: HashMap<String, Vec<CycleRef>> = HashMap::new();
-    for row in stmt.query_map(params![json_array(&ids)?], |r| Ok((r.get::<_, String>(0)?, CycleRef { id: r.get(1)?, name: r.get(2)? })))? {
+    for row in stmt.query_map(params![json_array(&ids)?], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            CycleRef {
+                id: r.get(1)?,
+                name: r.get(2)?,
+            },
+        ))
+    })? {
         let (id, cycle) = row?;
         by_issue.entry(id).or_default().push(cycle);
     }
     for issue in issues {
-        issue.cycles = by_issue.remove(&issue.id).unwrap_or_default();
+        issue.cycles = by_issue.remove(issue.id.as_str()).unwrap_or_default();
     }
     Ok(())
 }
@@ -1584,20 +2153,34 @@ fn place_cycle(conn: &Connection, issue_id: &str, c: &Change<String>) -> Result<
         Change::Clear => None,
         Change::Set(r) => Some(resolve_cycle(conn, r)?),
     };
-    conn.execute("DELETE FROM issue_cycles WHERE issue_id=?1", params![issue_id])?;
+    conn.execute(
+        "DELETE FROM issue_cycles WHERE issue_id=?1",
+        params![issue_id],
+    )?;
     if let Some(cycle) = cycle {
-        conn.execute("INSERT INTO issue_cycles(issue_id,cycle_id) VALUES(?1,?2)", params![issue_id, cycle.id])?;
+        conn.execute(
+            "INSERT INTO issue_cycles(issue_id,cycle_id) VALUES(?1,?2)",
+            params![issue_id, cycle.id],
+        )?;
     }
     Ok(())
 }
 
 fn row_to_cycle(r: &rusqlite::Row<'_>) -> rusqlite::Result<Cycle> {
-    Ok(Cycle { id: r.get(0)?, name: r.get(1)?, starts_at: r.get(2)?, ends_at: r.get(3)?, created_at: r.get(4)? })
+    Ok(Cycle {
+        id: r.get(0)?,
+        name: r.get(1)?,
+        starts_at: r.get(2)?,
+        ends_at: r.get(3)?,
+        created_at: r.get(4)?,
+    })
 }
 
 /// Every cycle, oldest first.
 fn all_cycles(conn: &Connection) -> Result<Vec<Cycle>> {
-    let mut stmt = conn.prepare("SELECT id,name,starts_at,ends_at,created_at FROM cycles ORDER BY created_at, id")?;
+    let mut stmt = conn.prepare(
+        "SELECT id,name,starts_at,ends_at,created_at FROM cycles ORDER BY created_at, id",
+    )?;
     let rows = stmt.query_map([], row_to_cycle)?;
     Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
 }
@@ -1616,18 +2199,30 @@ fn resolve_cycle(conn: &Connection, r: &str) -> Result<Cycle> {
     if let Some(c) = all.iter().find(|c| c.id.eq_ignore_ascii_case(r)) {
         return Ok(c.clone());
     }
-    let mut named: Vec<Cycle> = all.into_iter().filter(|c| same_cycle_name(&c.name, r)).collect();
+    let mut named: Vec<Cycle> = all
+        .into_iter()
+        .filter(|c| same_cycle_name(&c.name, r))
+        .collect();
     match named.len() {
         0 => Err(LclError::CycleNotFound(r.to_string())),
         1 => Ok(named.remove(0)),
-        _ => Err(LclError::CycleAmbiguous { name: r.to_string(), ids: named.into_iter().map(|c| c.id).collect() }),
+        _ => Err(LclError::CycleAmbiguous {
+            name: r.to_string(),
+            ids: named.into_iter().map(|c| c.id).collect(),
+        }),
     }
 }
 
 /// Refuses `name` if a cycle other than `except` has it (see `same_cycle_name`).
 fn check_cycle_name(conn: &Connection, name: &str, except: Option<&str>) -> Result<()> {
-    match all_cycles(conn)?.into_iter().find(|c| Some(c.id.as_str()) != except && same_cycle_name(&c.name, name)) {
-        Some(c) => Err(LclError::CycleExists { name: name.to_string(), existing: c.name }),
+    match all_cycles(conn)?
+        .into_iter()
+        .find(|c| Some(c.id.as_str()) != except && same_cycle_name(&c.name, name))
+    {
+        Some(c) => Err(LclError::CycleExists {
+            name: name.to_string(),
+            existing: c.name,
+        }),
         None => Ok(()),
     }
 }
@@ -1636,7 +2231,14 @@ fn check_cycle_name(conn: &Connection, name: &str, except: Option<&str>) -> Resu
 /// transaction, changes exactly its row; anything else is a bug, and an
 /// error rather than a success that changed nothing.
 fn one_comment_row(changed: usize, id: &str) -> Result<()> {
-    if changed == 1 { Ok(()) } else { Err(LclError::Msg(format!("comment {id}: changed {changed} rows, not 1"))) }
+    if changed == 1 {
+        Ok(())
+    } else {
+        Err(LclError::CommentWriteCount {
+            id: id.to_string(),
+            changed,
+        })
+    }
 }
 
 /// The comment with this id, ignoring case (an exact match first).
@@ -1653,22 +2255,39 @@ fn find_comment(conn: &Connection, id: &str) -> Result<Comment> {
 /// `items` as a JSON array, for `json_each(?)`: one parameter however many
 /// items, where `IN (?, ?, …)` would hit SQLite's parameter limit.
 fn json_array<T: Serialize>(items: &[T]) -> Result<String> {
-    serde_json::to_string(items).map_err(|e| LclError::Msg(format!("can't encode ids: {e}")))
+    serde_json::to_string(items).map_err(|e| LclError::Encode(e.to_string()))
 }
 
-/// Registers `lcl_status(text)`: the stored status read by `Status::parse`,
-/// the rule every read uses, as its canonical spelling, or NULL for a value
-/// that names no status (that matches no status filter, and reading the
-/// issue reports it). `issue list --status` filters with it in SQL, so a
-/// hand-edited "done" is Done there as it is in `issue show`.
-fn register_lcl_status(conn: &Connection) -> Result<()> {
-    conn.create_scalar_function("lcl_status", 1, FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC, |ctx| {
-        Ok(match ctx.get_raw(0) {
-            ValueRef::Text(t) => std::str::from_utf8(t).ok().and_then(Status::parse).map(|s| s.as_str()),
-            _ => None,
-        })
-    })?;
+/// FTS5 external content is keyed by rowid. `VACUUM` can renumber those
+/// rowids and leave the index pointing at the wrong rows. This is the check
+/// the tests run, done on every open, with the content comparison turned on
+/// (`rank` 1). A mismatch is a schema error: search would lie.
+///
+/// The check is an `INSERT`, so SQLite refuses it on a file this process
+/// cannot write. That refusal is not a mismatch — the command that actually
+/// writes reports the read-only file — and the check is skipped.
+fn check_fts(conn: &Connection) -> Result<()> {
+    for table in ["issues_fts", "docs_fts", "comments_fts"] {
+        if let Err(e) = conn.execute(
+            &format!("INSERT INTO {table}({table}, rank) VALUES ('integrity-check', 1)"),
+            [],
+        ) {
+            if e.sqlite_error_code() == Some(rusqlite::ErrorCode::ReadOnly) {
+                return Ok(());
+            }
+            return Err(LclError::FtsMismatch {
+                table,
+                detail: e.to_string(),
+            });
+        }
+    }
     Ok(())
+}
+
+impl ToSql for IssueId {
+    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
+        self.as_str().to_sql()
+    }
 }
 
 fn row_to_issue(r: &rusqlite::Row, key: &str) -> Result<Issue> {
@@ -1677,12 +2296,18 @@ fn row_to_issue(r: &rusqlite::Row, key: &str) -> Result<Issue> {
     // Read leniently ("done" is Done), but never guess: a status parse rejects
     // (a hand edit, or a newer lcl) must not be read as something else and
     // then written back.
-    let status = Status::parse(&status_str).ok_or(LclError::UnknownStatus { number, value: status_str })?;
+    let status = Status::parse(&status_str).ok_or(LclError::UnknownStatus {
+        number,
+        value: status_str,
+    })?;
     let prio: i64 = r.get(5)?;
-    let priority = Priority::from_stored(prio).ok_or(LclError::UnknownPriority { number, value: prio })?;
+    let priority = Priority::from_stored(prio).ok_or(LclError::UnknownPriority {
+        number,
+        value: prio,
+    })?;
     let parent_number: Option<i64> = r.get(15)?;
     Ok(Issue {
-        id: r.get(0)?,
+        id: IssueId::from_stored(r.get::<_, String>(0)?),
         number,
         identifier: identifier(key, number),
         title: r.get(2)?,
@@ -1690,7 +2315,7 @@ fn row_to_issue(r: &rusqlite::Row, key: &str) -> Result<Issue> {
         status,
         priority,
         assignee: r.get(6)?,
-        parent_id: r.get(7)?,
+        parent_id: r.get::<_, Option<String>>(7)?.map(IssueId::from_stored),
         parent_identifier: parent_number.map(|n| identifier(key, n)),
         project_id: r.get(16)?,
         project: r.get(17)?,
@@ -1711,11 +2336,21 @@ fn row_to_issue(r: &rusqlite::Row, key: &str) -> Result<Issue> {
 }
 
 fn read_doc(conn: &Connection, id: &str) -> Result<Option<Doc>> {
-    let mut stmt = conn.prepare("SELECT id,title,content,parent_id,created_at,updated_at FROM docs WHERE id=?1")?;
+    let mut stmt = conn
+        .prepare("SELECT id,title,content,parent_id,created_at,updated_at FROM docs WHERE id=?1")?;
     let mut rows = stmt.query(params![id])?;
     if let Some(r) = rows.next()? {
-        Ok(Some(Doc { id: r.get(0)?, title: r.get(1)?, content: r.get(2)?, parent_id: r.get(3)?, created_at: r.get(4)?, updated_at: r.get(5)? }))
-    } else { Ok(None) }
+        Ok(Some(Doc {
+            id: r.get(0)?,
+            title: r.get(1)?,
+            content: r.get(2)?,
+            parent_id: r.get(3)?,
+            created_at: r.get(4)?,
+            updated_at: r.get(5)?,
+        }))
+    } else {
+        Ok(None)
+    }
 }
 
 fn user_version(conn: &Connection) -> Result<i64> {
@@ -1726,18 +2361,43 @@ fn user_version(conn: &Connection) -> Result<i64> {
 /// database from a newer lcl: we don't know what its invariants are.
 fn check_supported(found: i64) -> Result<usize> {
     if found > SCHEMA_VERSION {
-        return Err(LclError::SchemaTooNew { found, supported: SCHEMA_VERSION });
+        return Err(LclError::SchemaTooNew {
+            found,
+            supported: SCHEMA_VERSION,
+        });
     }
-    usize::try_from(found).map_err(|_| LclError::Msg(format!("database schema version {found} is invalid")))
+    usize::try_from(found).map_err(|_| LclError::BadSchemaVersion(found))
 }
 
 /// Brings the database up to `SCHEMA_VERSION`, all or nothing. Returns the
 /// line for `Store::upgrade_note` when a step changed values.
+///
+/// Foreign keys are off for the transaction. A table rebuild (v11) cannot
+/// turn them off from inside a transaction, and dropping a table other
+/// tables reference would cascade while they are on. `foreign_key_check`
+/// still runs before the commit. They are on again before this returns,
+/// including when the migration fails.
+///
+/// `legacy_alter_table` is on for the same window. Since SQLite 3.26,
+/// `ALTER TABLE RENAME` rewrites every other table's `REFERENCES` to the
+/// new name even when foreign keys are off. v11 renames `issues` to
+/// `issues_v10` and drops it; without the legacy behavior, `issue_labels`
+/// and `issue_relations` would be left pointing at a table that no longer
+/// exists.
 fn migrate(conn: &mut Connection) -> Result<Option<String>> {
     // Unlocked fast path: an up-to-date database takes no write lock.
     if check_supported(user_version(conn)?)? == MIGRATIONS.len() {
         return Ok(None);
     }
+    conn.pragma_update(None, "foreign_keys", false)?;
+    conn.pragma_update(None, "legacy_alter_table", true)?;
+    let result = migrate_locked(conn);
+    conn.pragma_update(None, "legacy_alter_table", false)?;
+    conn.pragma_update(None, "foreign_keys", true)?;
+    result
+}
+
+fn migrate_locked(conn: &mut Connection) -> Result<Option<String>> {
     // Take the write lock, then read again: another process may have migrated
     // between our read and acquiring the lock.
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -1754,11 +2414,30 @@ fn migrate(conn: &mut Connection) -> Result<Option<String>> {
         }
     }
     tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+    let mut violations = Vec::new();
+    {
+        let mut stmt = tx.prepare("PRAGMA foreign_key_check")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        for row in rows {
+            violations.push(row?);
+        }
+    }
+    if !violations.is_empty() {
+        return Err(LclError::ForeignKeyCheck(violations.join(", ")));
+    }
     let note = if changed.is_empty() {
         None
     } else {
-        let name: String = tx.query_row("SELECT value FROM meta WHERE key = 'name'", [], |r| r.get(0)).optional()?.unwrap_or_default();
-        Some(format!("upgraded workspace {name:?} to schema {SCHEMA_VERSION}: {}", changed.join(", ")))
+        let name: String = tx
+            .query_row("SELECT value FROM meta WHERE key = 'name'", [], |r| {
+                r.get(0)
+            })
+            .optional()?
+            .unwrap_or_default();
+        Some(format!(
+            "upgraded workspace {name:?} to schema {SCHEMA_VERSION}: {}",
+            changed.join(", ")
+        ))
     };
     // An early return above drops `tx`, which rolls back every migration.
     tx.commit()?;
@@ -1771,40 +2450,84 @@ mod tests {
 
     /// A write that lands between `list_issues`' count and its page doesn't
     /// split them: both read the snapshot their read transaction started
-    /// with. The write comes from a second connection, made from inside the
-    /// status filter while the count is running.
+    /// with. The write comes from a second connection, after the transaction's
+    /// first read has fixed that snapshot and before the count runs.
     #[test]
     fn a_list_reads_one_snapshot() {
-        let path = std::env::temp_dir().join(format!("lcl-snapshot-{}.sqlite", uuid::Uuid::new_v4()));
-        let store = Store::open(&path).expect("open");
-        let insert = |c: &Connection, n: i64| {
-            c.execute(
-                "INSERT INTO issues(id, number, title, description, status, priority, created_at, updated_at) VALUES (?1, ?2, 't', '', 'Done', 0, 1, 1)",
-                params![format!("issue-{n}"), n],
-            )
-        };
-        for n in 1..=3 {
-            insert(&store.conn, n).expect("seed");
+        use std::sync::Mutex;
+        use std::time::Duration;
+
+        struct Pending {
+            path: std::path::PathBuf,
+            wrote: bool,
         }
-        let writer = Connection::open(&path).expect("second connection");
-        let mut wrote = false;
-        store
-            .conn
-            .create_scalar_function("lcl_status", 1, FunctionFlags::SQLITE_UTF8, move |ctx| {
-                if !wrote {
-                    wrote = true;
-                    insert(&writer, 4)?;
+        static PENDING: Mutex<Option<Pending>> = Mutex::new(None);
+
+        fn after_statement(sql: &str, _: Duration) {
+            // The first SELECT is the key read. It has already fixed the
+            // transaction's snapshot; the count has not run yet.
+            if !sql.starts_with("SELECT") {
+                return;
+            }
+            let path = {
+                let mut slot = PENDING.lock().expect("snapshot slot");
+                let Some(pending) = slot.as_mut() else { return };
+                if pending.wrote {
+                    return;
                 }
-                ctx.get::<String>(0)
-            })
-            .expect("replace lcl_status");
+                pending.wrote = true;
+                pending.path.clone()
+            };
+            let writer = Connection::open(&path).expect("second connection");
+            writer
+                .execute(
+                    "INSERT INTO issues(id, number, title, description, status, priority, created_at, updated_at) VALUES ('issue-4', 4, 't', '', 'Done', 0, 1, 1)",
+                    [],
+                )
+                .expect("concurrent insert");
+        }
 
-        let filter = IssueFilter { statuses: vec![Status::Done], ..Default::default() };
-        let list = store.list_issues(&filter, IssueSort::Number, Page::ALL).expect("list");
-        assert_eq!((list.total, list.issues.len()), (3, 3), "the count and the page read different snapshots");
-        let after = store.list_issues(&filter, IssueSort::Number, Page::ALL).expect("list again");
-        assert_eq!((after.total, after.issues.len()), (4, 4), "the concurrent write did land");
+        let path =
+            std::env::temp_dir().join(format!("lcl-snapshot-{}.sqlite", uuid::Uuid::new_v4()));
+        let mut store = Store::open(&path).expect("open");
+        for n in 1..=3 {
+            store
+                .conn
+                .execute(
+                    "INSERT INTO issues(id, number, title, description, status, priority, created_at, updated_at) VALUES (?1, ?2, 't', '', 'Done', 0, 1, 1)",
+                    params![format!("issue-{n}"), n],
+                )
+                .expect("seed");
+        }
+        *PENDING.lock().expect("snapshot slot") = Some(Pending {
+            path: path.clone(),
+            wrote: false,
+        });
+        store.conn.profile(Some(after_statement));
 
+        let filter = IssueFilter {
+            statuses: vec![Status::Done],
+            ..Default::default()
+        };
+        let list = store
+            .list_issues(&filter, IssueSort::Number, Page::ALL)
+            .expect("list");
+        assert_eq!(
+            (list.total, list.issues.len()),
+            (3, 3),
+            "the count and the page read different snapshots"
+        );
+        let after = store
+            .list_issues(&filter, IssueSort::Number, Page::ALL)
+            .expect("list again");
+        assert_eq!(
+            (after.total, after.issues.len()),
+            (4, 4),
+            "the concurrent write did land"
+        );
+
+        store.conn.profile(None);
+        *PENDING.lock().expect("snapshot slot") = None;
         drop(store);
         for suffix in ["", "-wal", "-shm"] {
             let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));

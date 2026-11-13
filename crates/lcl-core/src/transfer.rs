@@ -18,11 +18,13 @@
 //! whole file is read and checked before anything is written, and the
 //! writes are one transaction: all of the file, or none of it.
 
-use crate::db::{next_issue_number, put_meta, read_key, read_meta, ref_looks_own, Store, NEXT_ISSUE_NUMBER};
+use crate::db::{
+    NEXT_ISSUE_NUMBER, Store, next_issue_number, put_meta, read_key, read_meta, ref_looks_own,
+};
 use crate::error::{LclError, Result};
-use crate::models::{identifier, now, InvalidValue, Priority, ProjectStatus, Status};
+use crate::models::{InvalidValue, Priority, ProjectStatus, Status, identifier, now};
 use crate::parse;
-use rusqlite::{params, Connection, TransactionBehavior};
+use rusqlite::{Connection, TransactionBehavior, params};
 use serde::Serialize;
 use serde_json::{Map, Value};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -46,7 +48,9 @@ pub struct Counts {
 impl Counts {
     /// "540 issues, 1210 comments, …, 1 doc".
     pub fn phrase(&self) -> String {
-        let n = |count: usize, noun: &str| format!("{count} {noun}{}", if count == 1 { "" } else { "s" });
+        let n = |count: usize, noun: &str| {
+            format!("{count} {noun}{}", if count == 1 { "" } else { "s" })
+        };
         [
             n(self.issues, "issue"),
             n(self.comments, "comment"),
@@ -218,19 +222,81 @@ struct DocLine {
 }
 
 // The keys each record type has, in the order export writes them.
-const WORKSPACE_KEYS: &[&str] = &["type", "format", "name", "key", "description", "created_at", "next_issue_number"];
+const WORKSPACE_KEYS: &[&str] = &[
+    "type",
+    "format",
+    "name",
+    "key",
+    "description",
+    "created_at",
+    "next_issue_number",
+];
 const LABEL_KEYS: &[&str] = &["type", "name", "color"];
-const PROJECT_KEYS: &[&str] = &["type", "name", "description", "status", "target_date", "created_at", "updated_at"];
-const MILESTONE_KEYS: &[&str] = &["type", "project", "name", "description", "target_date", "sort_order", "created_at", "updated_at"];
+const PROJECT_KEYS: &[&str] = &[
+    "type",
+    "name",
+    "description",
+    "status",
+    "target_date",
+    "created_at",
+    "updated_at",
+];
+const MILESTONE_KEYS: &[&str] = &[
+    "type",
+    "project",
+    "name",
+    "description",
+    "target_date",
+    "sort_order",
+    "created_at",
+    "updated_at",
+];
 const CYCLE_KEYS: &[&str] = &["type", "id", "name", "starts_at", "ends_at", "created_at"];
 const ISSUE_KEYS: &[&str] = &[
-    "type", "number", "title", "description", "status", "priority", "assignee", "creator", "ref", "parent", "project", "milestone", "labels",
-    "cycles", "estimate", "due_date", "created_at", "updated_at", "started_at", "completed_at", "canceled_at",
+    "type",
+    "number",
+    "title",
+    "description",
+    "status",
+    "priority",
+    "assignee",
+    "creator",
+    "ref",
+    "parent",
+    "project",
+    "milestone",
+    "labels",
+    "cycles",
+    "estimate",
+    "due_date",
+    "created_at",
+    "updated_at",
+    "started_at",
+    "completed_at",
+    "canceled_at",
 ];
 const COMMENT_KEYS: &[&str] = &["type", "issue", "body", "author", "created_at"];
 const RELATION_KEYS: &[&str] = &["type", "kind", "from", "to"];
-const DOC_KEYS: &[&str] = &["type", "id", "title", "content", "parent", "created_at", "updated_at"];
-const TYPES: &[&str] = &["workspace", "label", "project", "milestone", "cycle", "issue", "comment", "relation", "doc"];
+const DOC_KEYS: &[&str] = &[
+    "type",
+    "id",
+    "title",
+    "content",
+    "parent",
+    "created_at",
+    "updated_at",
+];
+const TYPES: &[&str] = &[
+    "workspace",
+    "label",
+    "project",
+    "milestone",
+    "cycle",
+    "issue",
+    "comment",
+    "relation",
+    "doc",
+];
 
 // What import reads, checked value by value.
 
@@ -356,19 +422,33 @@ impl File {
 // ---------------------------------------------------------------- reading a line
 
 fn bad(line: usize, what: impl Into<String>, msg: impl Into<String>) -> LclError {
-    LclError::ImportLine { line, what: what.into(), msg: msg.into() }
+    LclError::ImportLine {
+        line,
+        what: what.into(),
+        msg: msg.into(),
+    }
 }
 
 /// "an" before "issue", "a" before the other record types.
 fn article(kind: &str) -> &'static str {
-    if kind.starts_with(['a', 'e', 'i', 'o', 'u']) { "an" } else { "a" }
+    if kind.starts_with(['a', 'e', 'i', 'o', 'u']) {
+        "an"
+    } else {
+        "a"
+    }
 }
 
 /// `name` is already on line `at`: the message for a second label, project
 /// or milestone whose name matches one before it, ignoring case.
 fn taken(thing: &str, name: &str, existing: &str, at: usize, scope: &str) -> String {
-    let as_ = if name == existing { String::new() } else { format!(" as {existing:?}") };
-    format!("{thing} {name:?} is already on line {at}{as_}; {thing} names are unique{scope}, ignoring case")
+    let as_ = if name == existing {
+        String::new()
+    } else {
+        format!(" as {existing:?}")
+    };
+    format!(
+        "{thing} {name:?} is already on line {at}{as_}; {thing} names are unique{scope}, ignoring case"
+    )
 }
 
 fn kind_of(v: &Value) -> &'static str {
@@ -399,7 +479,15 @@ impl Rec {
     /// must fail, not be dropped.
     fn known(&self, keys: &[&str]) -> Result<()> {
         match self.map.keys().find(|k| !keys.contains(&k.as_str())) {
-            Some(k) => Err(self.bad(self.kind, format!("unknown key {k:?}; {} {} record has: {}", article(self.kind), self.kind, keys.join(", ")))),
+            Some(k) => Err(self.bad(
+                self.kind,
+                format!(
+                    "unknown key {k:?}; {} {} record has: {}",
+                    article(self.kind),
+                    self.kind,
+                    keys.join(", ")
+                ),
+            )),
             None => Ok(()),
         }
     }
@@ -407,7 +495,10 @@ impl Rec {
     /// The field, which must be there and not null.
     fn required(&mut self, key: &str) -> Result<Value> {
         match self.map.remove(key) {
-            None => Err(self.bad(key, format!("missing; every {} record needs one", self.kind))),
+            None => Err(self.bad(
+                key,
+                format!("missing; every {} record needs one", self.kind),
+            )),
             Some(Value::Null) => Err(self.bad(key, "can't be null")),
             Some(v) => Ok(v),
         }
@@ -418,7 +509,10 @@ impl Rec {
     /// default (`default`, named in the message).
     fn defaulted(&mut self, key: &str, default: &str) -> Result<Option<Value>> {
         match self.map.remove(key) {
-            Some(Value::Null) => Err(self.bad(key, format!("can't be null; leave the key out for the default ({default})"))),
+            Some(Value::Null) => Err(self.bad(
+                key,
+                format!("can't be null; leave the key out for the default ({default})"),
+            )),
             v => Ok(v),
         }
     }
@@ -437,18 +531,34 @@ impl Rec {
 
     fn int(&self, key: &str, v: Value) -> Result<i64> {
         match &v {
-            Value::Number(n) => n.as_i64().ok_or_else(|| self.bad(key, format!("expected a whole number that fits in 64 bits, got {n}"))),
+            Value::Number(n) => n.as_i64().ok_or_else(|| {
+                self.bad(
+                    key,
+                    format!("expected a whole number that fits in 64 bits, got {n}"),
+                )
+            }),
             v => Err(self.bad(key, format!("expected a whole number, got {}", kind_of(v)))),
         }
     }
 
     fn strings(&self, key: &str, v: Value) -> Result<Vec<String>> {
-        let Value::Array(items) = v else { return Err(self.bad(key, format!("expected a list of strings, got {}", kind_of(&v)))) };
+        let Value::Array(items) = v else {
+            return Err(self.bad(
+                key,
+                format!("expected a list of strings, got {}", kind_of(&v)),
+            ));
+        };
         items
             .into_iter()
             .map(|item| match item {
                 Value::String(s) => Ok(s),
-                other => Err(self.bad(key, format!("expected a list of strings, but one item is {}", kind_of(&other)))),
+                other => Err(self.bad(
+                    key,
+                    format!(
+                        "expected a list of strings, but one item is {}",
+                        kind_of(&other)
+                    ),
+                )),
             })
             .collect()
     }
@@ -488,18 +598,32 @@ impl Rec {
 
     /// A value checked by `rule`, which must not change it: the rules trim
     /// (as the command line does), and import stores the file as written.
-    fn exact(&self, key: &str, s: String, rule: fn(&str) -> std::result::Result<String, InvalidValue>) -> Result<String> {
+    fn exact(
+        &self,
+        key: &str,
+        s: String,
+        rule: fn(&str) -> std::result::Result<String, InvalidValue>,
+    ) -> Result<String> {
         match rule(&s) {
             Err(e) => Err(self.bad(key, e.0)),
-            Ok(t) if t != s => Err(self.bad(key, format!("{s:?} has leading or trailing whitespace; lcl stores it as {t:?}"))),
+            Ok(t) if t != s => Err(self.bad(
+                key,
+                format!("{s:?} has leading or trailing whitespace; lcl stores it as {t:?}"),
+            )),
             Ok(t) => Ok(t),
         }
     }
-    fn exact_opt(&self, key: &str, s: Option<String>, rule: fn(&str) -> std::result::Result<String, InvalidValue>) -> Result<Option<String>> {
+    fn exact_opt(
+        &self,
+        key: &str,
+        s: Option<String>,
+        rule: fn(&str) -> std::result::Result<String, InvalidValue>,
+    ) -> Result<Option<String>> {
         s.map(|s| self.exact(key, s, rule)).transpose()
     }
     fn date(&self, key: &str, s: Option<String>) -> Result<Option<String>> {
-        s.map(|s| parse::date(&s).map(|_| s).map_err(|e| self.bad(key, e.0))).transpose()
+        s.map(|s| parse::date(&s).map(|_| s).map_err(|e| self.bad(key, e.0)))
+            .transpose()
     }
 }
 
@@ -507,36 +631,90 @@ impl Rec {
 /// each as a JSON object with a known "type".
 fn records(input: &[u8]) -> Result<Vec<Rec>> {
     if input.is_empty() {
-        return Err(bad(1, "workspace", "the file is empty; the first line must be the workspace header"));
+        return Err(bad(
+            1,
+            "workspace",
+            "the file is empty; the first line must be the workspace header",
+        ));
     }
     // Some editors on Windows add one; as "not JSON at column 1" it hides the cause.
     if input.starts_with(b"\xEF\xBB\xBF") {
-        return Err(bad(1, "line", "the file starts with a UTF-8 byte order mark; save it without one"));
+        return Err(bad(
+            1,
+            "line",
+            "the file starts with a UTF-8 byte order mark; save it without one",
+        ));
     }
     let body = input.strip_suffix(b"\n").unwrap_or(input);
     let mut out = Vec::new();
     for (i, raw) in body.split(|b| *b == b'\n').enumerate() {
         let line = i + 1;
-        let text = std::str::from_utf8(raw).map_err(|e| bad(line, "line", format!("not UTF-8 (invalid byte at column {})", e.valid_up_to() + 1)))?;
+        let text = std::str::from_utf8(raw).map_err(|e| {
+            bad(
+                line,
+                "line",
+                format!("not UTF-8 (invalid byte at column {})", e.valid_up_to() + 1),
+            )
+        })?;
         if text.trim().is_empty() {
             return Err(bad(line, "line", "not JSON: the line is blank"));
         }
         let value: Value = serde_json::from_str(text).map_err(|e| {
             let msg = e.to_string();
-            let msg = msg.rsplit_once(" at line ").map_or(msg.as_str(), |(m, _)| m).to_string();
-            bad(line, "line", format!("not JSON at column {}: {msg}", e.column()))
+            let msg = msg
+                .rsplit_once(" at line ")
+                .map_or(msg.as_str(), |(m, _)| m)
+                .to_string();
+            bad(
+                line,
+                "line",
+                format!("not JSON at column {}: {msg}", e.column()),
+            )
         })?;
-        let Value::Object(mut map) = value else { return Err(bad(line, "line", format!("expected a JSON object, got {}", kind_of(&value)))) };
+        let Value::Object(mut map) = value else {
+            return Err(bad(
+                line,
+                "line",
+                format!("expected a JSON object, got {}", kind_of(&value)),
+            ));
+        };
         let kind = match map.remove("type") {
             None => return Err(bad(line, "type", "missing; every record has one")),
-            Some(Value::String(t)) => TYPES.iter().find(|k| **k == t).copied().ok_or_else(|| bad(line, "type", format!("unknown record type {t:?}; expected one of: {}", TYPES.join(", "))))?,
-            Some(v) => return Err(bad(line, "type", format!("expected a string, got {}", kind_of(&v)))),
+            Some(Value::String(t)) => {
+                TYPES.iter().find(|k| **k == t).copied().ok_or_else(|| {
+                    bad(
+                        line,
+                        "type",
+                        format!(
+                            "unknown record type {t:?}; expected one of: {}",
+                            TYPES.join(", ")
+                        ),
+                    )
+                })?
+            }
+            Some(v) => {
+                return Err(bad(
+                    line,
+                    "type",
+                    format!("expected a string, got {}", kind_of(&v)),
+                ));
+            }
         };
         if line == 1 && kind != "workspace" {
-            return Err(bad(1, "type", format!("the first line must be the workspace header (type \"workspace\"), not {kind:?}")));
+            return Err(bad(
+                1,
+                "type",
+                format!(
+                    "the first line must be the workspace header (type \"workspace\"), not {kind:?}"
+                ),
+            ));
         }
         if line > 1 && kind == "workspace" {
-            return Err(bad(line, "type", "the workspace header can only be the first line"));
+            return Err(bad(
+                line,
+                "type",
+                "the workspace header can only be the first line",
+            ));
         }
         // Restored so `known` sees the whole record.
         map.insert("type".into(), Value::String(kind.into()));
@@ -549,9 +727,21 @@ fn records(input: &[u8]) -> Result<Vec<Rec>> {
 /// between them. `now` is the import time, the default for timestamps.
 fn read_file(input: &[u8], now: i64) -> Result<File> {
     let mut recs = records(input)?.into_iter();
-    let mut first = recs.next().expect("records() returns the header line or an error");
+    let mut first = recs
+        .next()
+        .expect("records() returns the header line or an error");
     let header = read_header(&mut first)?;
-    let mut file = File { header, labels: vec![], projects: vec![], milestones: vec![], cycles: vec![], issues: vec![], comments: vec![], relations: vec![], docs: vec![] };
+    let mut file = File {
+        header,
+        labels: vec![],
+        projects: vec![],
+        milestones: vec![],
+        cycles: vec![],
+        issues: vec![],
+        comments: vec![],
+        relations: vec![],
+        docs: vec![],
+    };
     let mut comment_lines = vec![];
     for mut r in recs {
         r.map.remove("type");
@@ -579,8 +769,18 @@ fn read_header(r: &mut Rec) -> Result<Header> {
     match r.map.get("format") {
         None => return Err(r.bad("format", format!("missing; expected {FORMAT:?}"))),
         Some(Value::String(f)) if f == FORMAT => {}
-        Some(Value::String(f)) => return Err(r.bad("format", format!("unsupported format {f:?}; this lcl reads {FORMAT}"))),
-        Some(v) => return Err(r.bad("format", format!("expected the string {FORMAT:?}, got {}", kind_of(v)))),
+        Some(Value::String(f)) => {
+            return Err(r.bad(
+                "format",
+                format!("unsupported format {f:?}; this lcl reads {FORMAT}"),
+            ));
+        }
+        Some(v) => {
+            return Err(r.bad(
+                "format",
+                format!("expected the string {FORMAT:?}, got {}", kind_of(v)),
+            ));
+        }
     }
     r.known(WORKSPACE_KEYS)?;
     r.map.remove("type");
@@ -590,15 +790,29 @@ fn read_header(r: &mut Rec) -> Result<Header> {
         r.string("name", v)?;
     }
     let key = r.req_str("key")?;
-    let description = r.defaulted("description", "this workspace's description")?.map(|v| r.string("description", v)).transpose()?;
-    let created_at = r.defaulted("created_at", "this workspace's created_at")?.map(|v| r.int("created_at", v)).transpose()?;
-    let next_issue_number = r.defaulted("next_issue_number", "1")?.map(|v| r.int("next_issue_number", v)).transpose()?;
+    let description = r
+        .defaulted("description", "this workspace's description")?
+        .map(|v| r.string("description", v))
+        .transpose()?;
+    let created_at = r
+        .defaulted("created_at", "this workspace's created_at")?
+        .map(|v| r.int("created_at", v))
+        .transpose()?;
+    let next_issue_number = r
+        .defaulted("next_issue_number", "1")?
+        .map(|v| r.int("next_issue_number", v))
+        .transpose()?;
     if let Some(n) = next_issue_number
         && n < 1
     {
         return Err(r.bad("next_issue_number", format!("must be at least 1, not {n}")));
     }
-    Ok(Header { key, description, created_at, next_issue_number })
+    Ok(Header {
+        key,
+        description,
+        created_at,
+        next_issue_number,
+    })
 }
 
 fn read_label(r: &mut Rec) -> Result<LabelRec> {
@@ -607,7 +821,11 @@ fn read_label(r: &mut Rec) -> Result<LabelRec> {
     let name = r.exact("name", name, parse::label_name)?;
     let color = r.def_str("color", "#888888")?;
     let color = parse::color(&color).map_err(|e| r.bad("color", e.0))?;
-    Ok(LabelRec { line: r.line, name, color })
+    Ok(LabelRec {
+        line: r.line,
+        name,
+        color,
+    })
 }
 
 fn read_project(r: &mut Rec, now: i64) -> Result<ProjectRec> {
@@ -616,12 +834,22 @@ fn read_project(r: &mut Rec, now: i64) -> Result<ProjectRec> {
     let name = r.exact("name", name, parse::project_name)?;
     let description = r.def_str("description", "")?;
     let status = r.def_str("status", "Backlog")?;
-    let status = status.parse::<ProjectStatus>().map_err(|e| r.bad("status", e.0))?;
+    let status = status
+        .parse::<ProjectStatus>()
+        .map_err(|e| r.bad("status", e.0))?;
     let target_date = r.opt_str("target_date")?;
     let target_date = r.date("target_date", target_date)?;
     let created_at = r.def_int("created_at", now, "the import time")?;
     let updated_at = r.def_int("updated_at", created_at, "created_at")?;
-    Ok(ProjectRec { line: r.line, name, description, status, target_date, created_at, updated_at })
+    Ok(ProjectRec {
+        line: r.line,
+        name,
+        description,
+        status,
+        target_date,
+        created_at,
+        updated_at,
+    })
 }
 
 fn read_milestone(r: &mut Rec, now: i64) -> Result<MilestoneRec> {
@@ -636,34 +864,60 @@ fn read_milestone(r: &mut Rec, now: i64) -> Result<MilestoneRec> {
     let sort_order = r.def_int("sort_order", 0, "0")?;
     let created_at = r.def_int("created_at", now, "the import time")?;
     let updated_at = r.def_int("updated_at", created_at, "created_at")?;
-    Ok(MilestoneRec { line: r.line, project, name, description, target_date, sort_order, created_at, updated_at })
+    Ok(MilestoneRec {
+        line: r.line,
+        project,
+        name,
+        description,
+        target_date,
+        sort_order,
+        created_at,
+        updated_at,
+    })
 }
 
 fn read_cycle(r: &mut Rec, now: i64) -> Result<CycleRec> {
     r.known(CYCLE_KEYS)?;
-    let id = r.defaulted("id", "a new id")?.map(|v| r.string("id", v)).transpose()?;
-    let id = id.map(|id| parse::uuid(&id).map_err(|e| r.bad("id", e.0))).transpose()?;
+    let id = r
+        .defaulted("id", "a new id")?
+        .map(|v| r.string("id", v))
+        .transpose()?;
+    let id = id
+        .map(|id| parse::uuid(&id).map_err(|e| r.bad("id", e.0)))
+        .transpose()?;
     let name = r.req_str("name")?;
     let starts_at = r.opt_str("starts_at")?;
     let starts_at = r.date("starts_at", starts_at)?;
     let ends_at = r.opt_str("ends_at")?;
     let ends_at = r.date("ends_at", ends_at)?;
     let created_at = r.def_int("created_at", now, "the import time")?;
-    Ok(CycleRec { line: r.line, id, name, starts_at, ends_at, created_at })
+    Ok(CycleRec {
+        line: r.line,
+        id,
+        name,
+        starts_at,
+        ends_at,
+        created_at,
+    })
 }
 
 fn read_issue(r: &mut Rec, now: i64) -> Result<IssueRec> {
     r.known(ISSUE_KEYS)?;
     let number = r.req_int("number")?;
     if number < 1 || number == i64::MAX {
-        return Err(r.bad("number", format!("must be a positive number below {}, not {number}", i64::MAX)));
+        return Err(r.bad(
+            "number",
+            format!("must be a positive number below {}, not {number}", i64::MAX),
+        ));
     }
     let title = r.req_str("title")?;
     let description = r.def_str("description", "")?;
     let status = r.def_str("status", "Backlog")?;
     let status = status.parse::<Status>().map_err(|e| r.bad("status", e.0))?;
     let priority = r.def_str("priority", "None")?;
-    let priority = priority.parse::<Priority>().map_err(|e| r.bad("priority", e.0))?;
+    let priority = priority
+        .parse::<Priority>()
+        .map_err(|e| r.bad("priority", e.0))?;
     let assignee = r.opt_str("assignee")?;
     let assignee = r.exact_opt("assignee", assignee, parse::assignee)?;
     let creator = r.opt_str("creator")?;
@@ -676,11 +930,19 @@ fn read_issue(r: &mut Rec, now: i64) -> Result<IssueRec> {
     let milestone = r.opt_str("milestone")?;
     let milestone = r.exact_opt("milestone", milestone, parse::milestone_name)?;
     let labels = r.def_strs("labels")?;
-    let labels = labels.into_iter().map(|l| r.exact("labels", l, parse::label_name)).collect::<Result<Vec<_>>>()?;
+    let labels = labels
+        .into_iter()
+        .map(|l| r.exact("labels", l, parse::label_name))
+        .collect::<Result<Vec<_>>>()?;
     let cycles = r.def_strs("cycles")?;
-    let cycles = cycles.into_iter().map(|c| parse::uuid(&c).map_err(|e| r.bad("cycles", e.0))).collect::<Result<Vec<_>>>()?;
+    let cycles = cycles
+        .into_iter()
+        .map(|c| parse::uuid(&c).map_err(|e| r.bad("cycles", e.0)))
+        .collect::<Result<Vec<_>>>()?;
     let estimate = r.opt_int("estimate")?;
-    let estimate = estimate.map(|e| parse::estimate(e).map_err(|e| r.bad("estimate", e.0))).transpose()?;
+    let estimate = estimate
+        .map(|e| parse::estimate(e).map_err(|e| r.bad("estimate", e.0)))
+        .transpose()?;
     let due_date = r.opt_str("due_date")?;
     let due_date = r.date("due_date", due_date)?;
     let created_at = r.def_int("created_at", now, "the import time")?;
@@ -689,8 +951,27 @@ fn read_issue(r: &mut Rec, now: i64) -> Result<IssueRec> {
     let completed_at = r.opt_int("completed_at")?;
     let canceled_at = r.opt_int("canceled_at")?;
     Ok(IssueRec {
-        line: r.line, number, title, description, status, priority, assignee, creator, r#ref: issue_ref, parent, project, milestone,
-        labels, cycles, estimate, due_date, created_at, updated_at, started_at, completed_at, canceled_at,
+        line: r.line,
+        number,
+        title,
+        description,
+        status,
+        priority,
+        assignee,
+        creator,
+        r#ref: issue_ref,
+        parent,
+        project,
+        milestone,
+        labels,
+        cycles,
+        estimate,
+        due_date,
+        created_at,
+        updated_at,
+        started_at,
+        completed_at,
+        canceled_at,
     })
 }
 
@@ -701,29 +982,59 @@ fn read_comment(r: &mut Rec, now: i64) -> Result<CommentRec> {
     let author = r.opt_str("author")?;
     let author = r.exact_opt("author", author, parse::author)?;
     let created_at = r.def_int("created_at", now, "the import time")?;
-    Ok(CommentRec { issue, body, author, created_at })
+    Ok(CommentRec {
+        issue,
+        body,
+        author,
+        created_at,
+    })
 }
 
 fn read_relation(r: &mut Rec) -> Result<RelationRec> {
     r.known(RELATION_KEYS)?;
     let kind = r.req_str("kind")?;
-    let kind = Kind::parse(&kind).ok_or_else(|| r.bad("kind", format!("invalid relation kind {kind:?}; expected one of: blocks, related, duplicate")))?;
+    let kind = Kind::parse(&kind).ok_or_else(|| {
+        r.bad(
+            "kind",
+            format!("invalid relation kind {kind:?}; expected one of: blocks, related, duplicate"),
+        )
+    })?;
     let from = r.req_int("from")?;
     let to = r.req_int("to")?;
-    Ok(RelationRec { line: r.line, kind, from, to })
+    Ok(RelationRec {
+        line: r.line,
+        kind,
+        from,
+        to,
+    })
 }
 
 fn read_doc(r: &mut Rec, now: i64) -> Result<DocRec> {
     r.known(DOC_KEYS)?;
-    let id = r.defaulted("id", "a new id")?.map(|v| r.string("id", v)).transpose()?;
-    let id = id.map(|id| parse::uuid(&id).map_err(|e| r.bad("id", e.0))).transpose()?;
+    let id = r
+        .defaulted("id", "a new id")?
+        .map(|v| r.string("id", v))
+        .transpose()?;
+    let id = id
+        .map(|id| parse::uuid(&id).map_err(|e| r.bad("id", e.0)))
+        .transpose()?;
     let title = r.req_str("title")?;
     let content = r.def_str("content", "")?;
     let parent = r.opt_str("parent")?;
-    let parent = parent.map(|p| parse::uuid(&p).map_err(|e| r.bad("parent", e.0))).transpose()?;
+    let parent = parent
+        .map(|p| parse::uuid(&p).map_err(|e| r.bad("parent", e.0)))
+        .transpose()?;
     let created_at = r.def_int("created_at", now, "the import time")?;
     let updated_at = r.def_int("updated_at", created_at, "created_at")?;
-    Ok(DocRec { line: r.line, id, title, content, parent, created_at, updated_at })
+    Ok(DocRec {
+        line: r.line,
+        id,
+        title,
+        content,
+        parent,
+        created_at,
+        updated_at,
+    })
 }
 
 // ---------------------------------------------------------------- references
@@ -732,12 +1043,21 @@ fn read_doc(r: &mut Rec, now: i64) -> Result<DocRec> {
 enum EdgeError {
     SelfRelation,
     /// The same row already came, at `at`.
-    Twice { at: usize },
+    Twice {
+        at: usize,
+    },
     /// `path` runs from `from` back to it, as numbers.
-    BlocksCycle { path: Vec<i64> },
+    BlocksCycle {
+        path: Vec<i64>,
+    },
     /// `from` is already a duplicate of `current`, said at `at`.
-    SecondTarget { current: i64, at: usize },
-    DuplicateCycle { path: Vec<i64> },
+    SecondTarget {
+        current: i64,
+        at: usize,
+    },
+    DuplicateCycle {
+        path: Vec<i64>,
+    },
 }
 
 /// Relations added one at a time, each checked as `relate` checks it.
@@ -750,7 +1070,13 @@ struct Graph {
 }
 
 impl Graph {
-    fn add(&mut self, kind: Kind, from: i64, to: i64, at: usize) -> std::result::Result<(), EdgeError> {
+    fn add(
+        &mut self,
+        kind: Kind,
+        from: i64,
+        to: i64,
+        at: usize,
+    ) -> std::result::Result<(), EdgeError> {
         if from == to {
             return Err(EdgeError::SelfRelation);
         }
@@ -764,7 +1090,9 @@ impl Graph {
         match kind {
             Kind::Blocks => {
                 if let Some(path) = self.blocks_path(to, from) {
-                    return Err(EdgeError::BlocksCycle { path: std::iter::once(from).chain(path).collect() });
+                    return Err(EdgeError::BlocksCycle {
+                        path: std::iter::once(from).chain(path).collect(),
+                    });
                 }
                 self.blocks.entry(from).or_default().push(to);
             }
@@ -827,16 +1155,38 @@ fn edge_message(key: &str, e: &EdgeError, kind: Kind, from: i64, to: i64) -> Str
     let named = |path: &[i64], sep: &str| path.iter().map(|n| id(*n)).collect::<Vec<_>>().join(sep);
     match e {
         EdgeError::SelfRelation => LclError::SelfRelation(id(from)).to_string(),
-        EdgeError::Twice { at } => format!("{} {} {} is already on line {at}", id(from), kind.as_str(), id(to)),
-        EdgeError::BlocksCycle { path } => LclError::BlocksCycle { blocker: id(from), blocked: id(to), path: named(path, " blocks ") }.to_string(),
-        EdgeError::SecondTarget { current, at } => format!("{} is already a duplicate of {} (line {at})", id(from), id(*current)),
-        EdgeError::DuplicateCycle { path } => LclError::DuplicateCycle { issue: id(from), target: id(to), path: named(path, " -> ") }.to_string(),
+        EdgeError::Twice { at } => format!(
+            "{} {} {} is already on line {at}",
+            id(from),
+            kind.as_str(),
+            id(to)
+        ),
+        EdgeError::BlocksCycle { path } => LclError::BlocksCycle {
+            blocker: id(from),
+            blocked: id(to),
+            path: named(path, " blocks "),
+        }
+        .to_string(),
+        EdgeError::SecondTarget { current, at } => format!(
+            "{} is already a duplicate of {} (line {at})",
+            id(from),
+            id(*current)
+        ),
+        EdgeError::DuplicateCycle { path } => LclError::DuplicateCycle {
+            issue: id(from),
+            target: id(to),
+            path: named(path, " -> "),
+        }
+        .to_string(),
     }
 }
 
 /// Follows `up` from `start` and returns the path back to it, if the chain
 /// loops through `start`. Stops at a missing link or another loop.
-fn loop_through<T: Copy + Eq + std::hash::Hash>(start: T, up: impl Fn(T) -> Option<T>) -> Option<Vec<T>> {
+fn loop_through<T: Copy + Eq + std::hash::Hash>(
+    start: T,
+    up: impl Fn(T) -> Option<T>,
+) -> Option<Vec<T>> {
     let mut path = vec![start];
     let mut seen = HashSet::from([start]);
     let mut at = up(start);
@@ -863,7 +1213,11 @@ fn check_references(file: &File, comment_lines: &[usize]) -> Result<()> {
     let mut labels: HashMap<String, (&str, usize)> = HashMap::new();
     for l in &file.labels {
         if let Some((existing, at)) = labels.get(&l.name.to_ascii_lowercase()) {
-            return Err(bad(l.line, "name", taken("label", &l.name, existing, *at, "")));
+            return Err(bad(
+                l.line,
+                "name",
+                taken("label", &l.name, existing, *at, ""),
+            ));
         }
         labels.insert(l.name.to_ascii_lowercase(), (&l.name, l.line));
     }
@@ -871,7 +1225,11 @@ fn check_references(file: &File, comment_lines: &[usize]) -> Result<()> {
     let mut projects: HashMap<String, (&str, usize)> = HashMap::new();
     for p in &file.projects {
         if let Some((existing, at)) = projects.get(&p.name.to_ascii_lowercase()) {
-            return Err(bad(p.line, "name", taken("project", &p.name, existing, *at, "")));
+            return Err(bad(
+                p.line,
+                "name",
+                taken("project", &p.name, existing, *at, ""),
+            ));
         }
         projects.insert(p.name.to_ascii_lowercase(), (&p.name, p.line));
     }
@@ -880,11 +1238,19 @@ fn check_references(file: &File, comment_lines: &[usize]) -> Result<()> {
     let mut milestones: HashMap<(String, String), (&str, usize)> = HashMap::new();
     for m in &file.milestones {
         if !projects.contains_key(&m.project.to_ascii_lowercase()) {
-            return Err(bad(m.line, "project", format!("no project named {:?} in the file", m.project)));
+            return Err(bad(
+                m.line,
+                "project",
+                format!("no project named {:?} in the file", m.project),
+            ));
         }
         let k = (m.project.to_ascii_lowercase(), m.name.to_ascii_lowercase());
         if let Some((existing, at)) = milestones.get(&k) {
-            return Err(bad(m.line, "name", taken("milestone", &m.name, existing, *at, " in a project")));
+            return Err(bad(
+                m.line,
+                "name",
+                taken("milestone", &m.name, existing, *at, " in a project"),
+            ));
         }
         milestones.insert(k, (&m.name, m.line));
     }
@@ -893,7 +1259,11 @@ fn check_references(file: &File, comment_lines: &[usize]) -> Result<()> {
     for c in &file.cycles {
         if let Some(id) = &c.id {
             if let Some(at) = cycles.get(id.as_str()) {
-                return Err(bad(c.line, "id", format!("cycle {id} is already on line {at}")));
+                return Err(bad(
+                    c.line,
+                    "id",
+                    format!("cycle {id} is already on line {at}"),
+                ));
             }
             cycles.insert(id, c.line);
         }
@@ -903,7 +1273,11 @@ fn check_references(file: &File, comment_lines: &[usize]) -> Result<()> {
     for d in &file.docs {
         if let Some(id) = &d.id {
             if let Some((at, _)) = docs.get(id.as_str()) {
-                return Err(bad(d.line, "id", format!("doc {id} is already on line {at}")));
+                return Err(bad(
+                    d.line,
+                    "id",
+                    format!("doc {id} is already on line {at}"),
+                ));
             }
             docs.insert(id, (d.line, d.parent.as_deref()));
         }
@@ -911,14 +1285,26 @@ fn check_references(file: &File, comment_lines: &[usize]) -> Result<()> {
     for d in &file.docs {
         let Some(parent) = &d.parent else { continue };
         if !docs.contains_key(parent.as_str()) {
-            return Err(bad(d.line, "parent", format!("no doc with id {parent} in the file")));
+            return Err(bad(
+                d.line,
+                "parent",
+                format!("no doc with id {parent} in the file"),
+            ));
         }
         if let Some(id) = &d.id {
             if parent == id {
-                return Err(bad(d.line, "parent", LclError::DocSelfParent(id.clone()).to_string()));
+                return Err(bad(
+                    d.line,
+                    "parent",
+                    LclError::DocSelfParent(id.clone()).to_string(),
+                ));
             }
             if let Some(path) = loop_through(id.as_str(), |n| docs.get(n).and_then(|(_, p)| *p)) {
-                return Err(bad(d.line, "parent", format!("doc parents make a cycle: {}", path.join(" -> "))));
+                return Err(bad(
+                    d.line,
+                    "parent",
+                    format!("doc parents make a cycle: {}", path.join(" -> ")),
+                ));
             }
         }
     }
@@ -928,7 +1314,11 @@ fn check_references(file: &File, comment_lines: &[usize]) -> Result<()> {
     let mut refs: HashMap<String, (&str, i64)> = HashMap::new();
     for i in &file.issues {
         if let Some(at) = numbers.get(&i.number) {
-            return Err(bad(i.line, "number", format!("{} is already on line {at}", id(i.number))));
+            return Err(bad(
+                i.line,
+                "number",
+                format!("{} is already on line {at}", id(i.number)),
+            ));
         }
         numbers.insert(i.number, i.line);
         if let Some(p) = i.parent {
@@ -936,10 +1326,22 @@ fn check_references(file: &File, comment_lines: &[usize]) -> Result<()> {
         }
         if let Some(r) = &i.r#ref {
             if ref_looks_own(key, r) {
-                return Err(bad(i.line, "ref", LclError::RefLooksOwn(r.clone()).to_string()));
+                return Err(bad(
+                    i.line,
+                    "ref",
+                    LclError::RefLooksOwn(r.clone()).to_string(),
+                ));
             }
             if let Some((_, holder)) = refs.get(&r.to_ascii_lowercase()) {
-                return Err(bad(i.line, "ref", LclError::RefTaken { given: r.clone(), holder: id(*holder) }.to_string()));
+                return Err(bad(
+                    i.line,
+                    "ref",
+                    LclError::RefTaken {
+                        given: r.clone(),
+                        holder: id(*holder),
+                    }
+                    .to_string(),
+                ));
             }
             refs.insert(r.to_ascii_lowercase(), (r, i.number));
         }
@@ -947,31 +1349,65 @@ fn check_references(file: &File, comment_lines: &[usize]) -> Result<()> {
     for i in &file.issues {
         if let Some(p) = i.parent {
             if p == i.number {
-                return Err(bad(i.line, "parent", LclError::SelfParent(id(i.number)).to_string()));
+                return Err(bad(
+                    i.line,
+                    "parent",
+                    LclError::SelfParent(id(i.number)).to_string(),
+                ));
             }
             if !numbers.contains_key(&p) {
-                return Err(bad(i.line, "parent", format!("there is no issue {} in the file", id(p))));
+                return Err(bad(
+                    i.line,
+                    "parent",
+                    format!("there is no issue {} in the file", id(p)),
+                ));
             }
             if let Some(path) = loop_through(i.number, |n| parents.get(&n).copied()) {
                 let path: Vec<String> = path.into_iter().map(id).collect();
-                let e = LclError::ParentCycle { issue: id(i.number), parent: id(p), path: path.join(" -> ") };
+                let e = LclError::ParentCycle {
+                    issue: id(i.number),
+                    parent: id(p),
+                    path: path.join(" -> "),
+                };
                 return Err(bad(i.line, "parent", e.to_string()));
             }
         }
         match (&i.project, &i.milestone) {
-            (None, Some(m)) => return Err(bad(i.line, "milestone", format!("milestone {m:?} needs a project: the issue has none"))),
+            (None, Some(m)) => {
+                return Err(bad(
+                    i.line,
+                    "milestone",
+                    format!("milestone {m:?} needs a project: the issue has none"),
+                ));
+            }
             (Some(p), m) => {
                 if !projects.contains_key(&p.to_ascii_lowercase()) {
-                    return Err(bad(i.line, "project", format!("no project named {p:?} in the file")));
+                    return Err(bad(
+                        i.line,
+                        "project",
+                        format!("no project named {p:?} in the file"),
+                    ));
                 }
                 if let Some(m) = m
                     && !milestones.contains_key(&(p.to_ascii_lowercase(), m.to_ascii_lowercase()))
                 {
-                    let elsewhere: Vec<&str> = file.milestones.iter().filter(|x| x.name.eq_ignore_ascii_case(m)).map(|x| x.project.as_str()).collect();
+                    let elsewhere: Vec<&str> = file
+                        .milestones
+                        .iter()
+                        .filter(|x| x.name.eq_ignore_ascii_case(m))
+                        .map(|x| x.project.as_str())
+                        .collect();
                     let msg = if elsewhere.is_empty() {
                         format!("no milestone named {m:?} in project {p:?} in the file")
                     } else {
-                        format!("milestone {m:?} is not in project {p:?} (it is in {})", elsewhere.iter().map(|e| format!("{e:?}")).collect::<Vec<_>>().join(", "))
+                        format!(
+                            "milestone {m:?} is not in project {p:?} (it is in {})",
+                            elsewhere
+                                .iter()
+                                .map(|e| format!("{e:?}"))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        )
                     };
                     return Err(bad(i.line, "milestone", msg));
                 }
@@ -981,16 +1417,28 @@ fn check_references(file: &File, comment_lines: &[usize]) -> Result<()> {
         let mut seen = HashSet::new();
         for l in &i.labels {
             if !labels.contains_key(&l.to_ascii_lowercase()) {
-                return Err(bad(i.line, "labels", format!("no label named {l:?} in the file")));
+                return Err(bad(
+                    i.line,
+                    "labels",
+                    format!("no label named {l:?} in the file"),
+                ));
             }
             if !seen.insert(l.to_ascii_lowercase()) {
-                return Err(bad(i.line, "labels", format!("label {l:?} is listed twice (ignoring case)")));
+                return Err(bad(
+                    i.line,
+                    "labels",
+                    format!("label {l:?} is listed twice (ignoring case)"),
+                ));
             }
         }
         let mut seen = HashSet::new();
         for c in &i.cycles {
             if !cycles.contains_key(c.as_str()) {
-                return Err(bad(i.line, "cycles", format!("no cycle with id {c} in the file")));
+                return Err(bad(
+                    i.line,
+                    "cycles",
+                    format!("no cycle with id {c} in the file"),
+                ));
             }
             if !seen.insert(c) {
                 return Err(bad(i.line, "cycles", format!("cycle {c} is listed twice")));
@@ -1000,7 +1448,11 @@ fn check_references(file: &File, comment_lines: &[usize]) -> Result<()> {
 
     for (c, line) in file.comments.iter().zip(comment_lines) {
         if !numbers.contains_key(&c.issue) {
-            return Err(bad(*line, "issue", format!("there is no issue {} in the file", id(c.issue))));
+            return Err(bad(
+                *line,
+                "issue",
+                format!("there is no issue {} in the file", id(c.issue)),
+            ));
         }
     }
 
@@ -1008,10 +1460,20 @@ fn check_references(file: &File, comment_lines: &[usize]) -> Result<()> {
     for r in &file.relations {
         for (field, n) in [("from", r.from), ("to", r.to)] {
             if !numbers.contains_key(&n) {
-                return Err(bad(r.line, field, format!("there is no issue {} in the file", id(n))));
+                return Err(bad(
+                    r.line,
+                    field,
+                    format!("there is no issue {} in the file", id(n)),
+                ));
             }
         }
-        graph.add(r.kind, r.from, r.to, r.line).map_err(|e| bad(r.line, "relation", edge_message(key, &e, r.kind, r.from, r.to)))?;
+        graph.add(r.kind, r.from, r.to, r.line).map_err(|e| {
+            bad(
+                r.line,
+                "relation",
+                edge_message(key, &e, r.kind, r.from, r.to),
+            )
+        })?;
     }
     Ok(())
 }
@@ -1032,10 +1494,18 @@ impl Store {
     pub fn import(&mut self, input: &[u8], dry_run: bool) -> Result<ImportSummary> {
         let at = now();
         let file = read_file(input, at)?;
-        let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        // Issue and doc parents may be inserted after the rows that name
+        // them. The check runs at commit.
+        tx.pragma_update(None, "defer_foreign_keys", true)?;
         let key = read_key(&tx)?;
         if !key.eq_ignore_ascii_case(&file.header.key) {
-            return Err(LclError::ImportKeyMismatch { file: file.header.key.clone(), workspace: key });
+            return Err(LclError::ImportKeyMismatch {
+                file: file.header.key.clone(),
+                workspace: key,
+            });
         }
         let workspace = read_meta(&tx, "name")?.unwrap_or_default();
         let has = contents(&tx)?;
@@ -1048,7 +1518,13 @@ impl Store {
         } else {
             tx.commit()?;
         }
-        Ok(ImportSummary { counts: file.counts(), next_issue_number: next, dry_run, workspace, key })
+        Ok(ImportSummary {
+            counts: file.counts(),
+            next_issue_number: next,
+            dry_run,
+            workspace,
+            key,
+        })
     }
 }
 
@@ -1100,7 +1576,15 @@ fn insert(conn: &Connection, file: &File, at: i64) -> Result<i64> {
         let mut stmt = conn.prepare("INSERT INTO projects(id, name, description, status, target_date, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)")?;
         for p in &file.projects {
             let id = new_id();
-            stmt.execute(params![id, p.name, p.description, p.status.as_str(), p.target_date, p.created_at, p.updated_at])?;
+            stmt.execute(params![
+                id,
+                p.name,
+                p.description,
+                p.status.as_str(),
+                p.target_date,
+                p.created_at,
+                p.updated_at
+            ])?;
             project_ids.insert(p.name.to_ascii_lowercase(), id);
         }
     }
@@ -1110,41 +1594,91 @@ fn insert(conn: &Connection, file: &File, at: i64) -> Result<i64> {
         for m in &file.milestones {
             let id = new_id();
             let project = &project_ids[&m.project.to_ascii_lowercase()];
-            stmt.execute(params![id, project, m.name, m.description, m.target_date, m.sort_order, m.created_at, m.updated_at])?;
-            milestone_ids.insert((m.project.to_ascii_lowercase(), m.name.to_ascii_lowercase()), id);
+            stmt.execute(params![
+                id,
+                project,
+                m.name,
+                m.description,
+                m.target_date,
+                m.sort_order,
+                m.created_at,
+                m.updated_at
+            ])?;
+            milestone_ids.insert(
+                (m.project.to_ascii_lowercase(), m.name.to_ascii_lowercase()),
+                id,
+            );
         }
     }
     {
         let mut stmt = conn.prepare("INSERT INTO cycles(id, name, starts_at, ends_at, created_at) VALUES (?1, ?2, ?3, ?4, ?5)")?;
         for c in &file.cycles {
-            stmt.execute(params![c.id.clone().unwrap_or_else(new_id), c.name, c.starts_at, c.ends_at, c.created_at])?;
+            stmt.execute(params![
+                c.id.clone().unwrap_or_else(new_id),
+                c.name,
+                c.starts_at,
+                c.ends_at,
+                c.created_at
+            ])?;
         }
     }
     {
         let mut stmt = conn.prepare("INSERT INTO docs(id, title, content, parent_id, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)")?;
         for d in &file.docs {
-            stmt.execute(params![d.id.clone().unwrap_or_else(new_id), d.title, d.content, d.parent, d.created_at, d.updated_at])?;
+            stmt.execute(params![
+                d.id.clone().unwrap_or_else(new_id),
+                d.title,
+                d.content,
+                d.parent,
+                d.created_at,
+                d.updated_at
+            ])?;
         }
     }
-    let issue_ids: HashMap<i64, String> = file.issues.iter().map(|i| (i.number, new_id())).collect();
+    let issue_ids: HashMap<i64, String> =
+        file.issues.iter().map(|i| (i.number, new_id())).collect();
     {
         let mut stmt = conn.prepare(
             "INSERT INTO issues(id, number, title, description, status, priority, assignee, parent_id, estimate, due_date, created_at, updated_at, completed_at, started_at, canceled_at, project_id, milestone_id, ref, creator) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
         )?;
-        let mut label = conn.prepare("INSERT INTO issue_labels(issue_id, label_id) VALUES (?1, ?2)")?;
-        let mut cycle = conn.prepare("INSERT INTO issue_cycles(issue_id, cycle_id) VALUES (?1, ?2)")?;
+        let mut label =
+            conn.prepare("INSERT INTO issue_labels(issue_id, label_id) VALUES (?1, ?2)")?;
+        let mut cycle =
+            conn.prepare("INSERT INTO issue_cycles(issue_id, cycle_id) VALUES (?1, ?2)")?;
         for i in &file.issues {
             let id = &issue_ids[&i.number];
             let parent = i.parent.map(|p| &issue_ids[&p]);
-            let project = i.project.as_ref().map(|p| &project_ids[&p.to_ascii_lowercase()]);
+            let project = i
+                .project
+                .as_ref()
+                .map(|p| &project_ids[&p.to_ascii_lowercase()]);
             let milestone = match (&i.project, &i.milestone) {
-                (Some(p), Some(m)) => Some(&milestone_ids[&(p.to_ascii_lowercase(), m.to_ascii_lowercase())]),
+                (Some(p), Some(m)) => {
+                    Some(&milestone_ids[&(p.to_ascii_lowercase(), m.to_ascii_lowercase())])
+                }
                 _ => None,
             };
             stmt.execute(params![
-                id, i.number, i.title, i.description, i.status.as_str(), i.priority.as_i64(), i.assignee, parent, i.estimate, i.due_date,
-                i.created_at, i.updated_at, i.completed_at, i.started_at, i.canceled_at, project, milestone, i.r#ref, i.creator
+                id,
+                i.number,
+                i.title,
+                i.description,
+                i.status.as_str(),
+                i.priority.as_i64(),
+                i.assignee,
+                parent,
+                i.estimate,
+                i.due_date,
+                i.created_at,
+                i.updated_at,
+                i.completed_at,
+                i.started_at,
+                i.canceled_at,
+                project,
+                milestone,
+                i.r#ref,
+                i.creator
             ])?;
             for l in &i.labels {
                 label.execute(params![id, label_ids[&l.to_ascii_lowercase()]])?;
@@ -1158,7 +1692,13 @@ fn insert(conn: &Connection, file: &File, at: i64) -> Result<i64> {
         // File order, so same-second comments keep their order (rowid).
         let mut stmt = conn.prepare("INSERT INTO comments(id, issue_id, body, author, created_at) VALUES (?1, ?2, ?3, ?4, ?5)")?;
         for c in &file.comments {
-            stmt.execute(params![new_id(), issue_ids[&c.issue], c.body, c.author, c.created_at])?;
+            stmt.execute(params![
+                new_id(),
+                issue_ids[&c.issue],
+                c.body,
+                c.author,
+                c.created_at
+            ])?;
         }
     }
     {
@@ -1166,12 +1706,18 @@ fn insert(conn: &Connection, file: &File, at: i64) -> Result<i64> {
         for r in &file.relations {
             let (a, b) = (&issue_ids[&r.from], &issue_ids[&r.to]);
             // As `relate` stores it: related with the smaller id first.
-            let (from, to) = if r.kind == Kind::Related && b < a { (b, a) } else { (a, b) };
+            let (from, to) = if r.kind == Kind::Related && b < a {
+                (b, a)
+            } else {
+                (a, b)
+            };
             stmt.execute(params![from, to, r.kind.as_str(), at])?;
         }
     }
     let past_max = file.issues.iter().map(|i| i.number).max().unwrap_or(0) + 1;
-    let next = next_issue_number(conn)?.max(file.header.next_issue_number.unwrap_or(1)).max(past_max);
+    let next = next_issue_number(conn)?
+        .max(file.header.next_issue_number.unwrap_or(1))
+        .max(past_max);
     put_meta(conn, NEXT_ISSUE_NUMBER, &next.to_string())?;
     if let Some(d) = &file.header.description {
         put_meta(conn, "description", d)?;
@@ -1194,14 +1740,17 @@ impl Store {
         let (text, counts) = self.read(export_in)?;
         // The guarantee, checked: a file import refuses is lcl's bug.
         if let Err(e) = read_file(text.as_bytes(), now()) {
-            return Err(LclError::Msg(format!("lcl made an export that it would refuse to import ({e}); this is a bug in lcl")));
+            return Err(LclError::ExportRoundTrip(e.to_string()));
         }
         Ok(Export { text, counts })
     }
 }
 
 /// `rule` accepts `s` unchanged.
-fn passes(s: &str, rule: fn(&str) -> std::result::Result<String, InvalidValue>) -> std::result::Result<(), String> {
+fn passes(
+    s: &str,
+    rule: fn(&str) -> std::result::Result<String, InvalidValue>,
+) -> std::result::Result<(), String> {
     match rule(s) {
         Err(e) => Err(e.0),
         Ok(t) if t != s => Err(format!("{s:?} has leading or trailing whitespace")),
@@ -1233,16 +1782,38 @@ fn export_in(conn: &Connection) -> Result<(String, Counts)> {
         None => None,
     };
     if created_at.is_none() {
-        problems.push(by_hand("workspace".into(), "created_at is missing or not a whole number".into(), "meta.created_at"));
+        problems.push(by_hand(
+            "workspace".into(),
+            "created_at is missing or not a whole number".into(),
+            "meta.created_at",
+        ));
     }
     let next = next_issue_number(conn)?;
-    line(&mut out, &WorkspaceLine { r#type: "workspace", format: FORMAT, name: &name, key: &key, description: &description, created_at: created_at.unwrap_or(0), next_issue_number: next });
+    line(
+        &mut out,
+        &WorkspaceLine {
+            r#type: "workspace",
+            format: FORMAT,
+            name: &name,
+            key: &key,
+            description: &description,
+            created_at: created_at.unwrap_or(0),
+            next_issue_number: next,
+        },
+    );
 
     // ----- labels
     let mut label_names: HashMap<String, String> = HashMap::new();
     {
-        let mut stmt = conn.prepare("SELECT id, name, color FROM labels ORDER BY name COLLATE NOCASE, name, id")?;
-        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))?;
+        let mut stmt = conn
+            .prepare("SELECT id, name, color FROM labels ORDER BY name COLLATE NOCASE, name, id")?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })?;
         for row in rows {
             let (lid, lname, color) = row?;
             if let Err(why) = passes(&lname, parse::label_name) {
@@ -1253,7 +1824,14 @@ fn export_in(conn: &Connection) -> Result<(String, Counts)> {
             }
             label_names.insert(lid, lname.clone());
             counts.labels += 1;
-            line(&mut out, &LabelLine { r#type: "label", name: lname, color });
+            line(
+                &mut out,
+                &LabelLine {
+                    r#type: "label",
+                    name: lname,
+                    color,
+                },
+            );
         }
     }
 
@@ -1262,7 +1840,15 @@ fn export_in(conn: &Connection) -> Result<(String, Counts)> {
     {
         let mut stmt = conn.prepare("SELECT id, name, description, status, target_date, created_at, updated_at FROM projects ORDER BY name COLLATE NOCASE, name, id")?;
         let rows = stmt.query_map([], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?, r.get::<_, Option<String>>(4)?, r.get::<_, i64>(5)?, r.get::<_, i64>(6)?))
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, Option<String>>(4)?,
+                r.get::<_, i64>(5)?,
+                r.get::<_, i64>(6)?,
+            ))
         })?;
         for row in rows {
             let (pid, pname, pdesc, status, target, created, updated) = row?;
@@ -1272,7 +1858,11 @@ fn export_in(conn: &Connection) -> Result<(String, Counts)> {
             let status = match ProjectStatus::parse(&status) {
                 Some(s) => s.as_str(),
                 None => {
-                    problems.push(by_hand(format!("project {pname:?}"), format!("status {status:?} isn't one lcl knows"), "projects.status"));
+                    problems.push(by_hand(
+                        format!("project {pname:?}"),
+                        format!("status {status:?} isn't one lcl knows"),
+                        "projects.status",
+                    ));
                     "Backlog"
                 }
             };
@@ -1283,7 +1873,18 @@ fn export_in(conn: &Connection) -> Result<(String, Counts)> {
             }
             project_names.insert(pid, pname.clone());
             counts.projects += 1;
-            line(&mut out, &ProjectLine { r#type: "project", name: pname, description: pdesc, status, target_date: target, created_at: created, updated_at: updated });
+            line(
+                &mut out,
+                &ProjectLine {
+                    r#type: "project",
+                    name: pname,
+                    description: pdesc,
+                    status,
+                    target_date: target,
+                    created_at: created,
+                    updated_at: updated,
+                },
+            );
         }
     }
 
@@ -1296,18 +1897,33 @@ fn export_in(conn: &Connection) -> Result<(String, Counts)> {
         )?;
         let rows = stmt.query_map([], |r| {
             Ok((
-                r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?, r.get::<_, Option<String>>(4)?,
-                r.get::<_, i64>(5)?, r.get::<_, i64>(6)?, r.get::<_, i64>(7)?, r.get::<_, String>(8)?,
+                r.get::<_, String>(0)?,
+                r.get::<_, Option<String>>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, Option<String>>(4)?,
+                r.get::<_, i64>(5)?,
+                r.get::<_, i64>(6)?,
+                r.get::<_, i64>(7)?,
+                r.get::<_, String>(8)?,
             ))
         })?;
         for row in rows {
             let (mid, pname, mname, mdesc, target, sort, created, updated, pid) = row?;
             let Some(pname) = pname else {
-                problems.push(by_hand(format!("milestone {mname:?}"), format!("its project {pid} doesn't exist"), "milestones.project_id"));
+                problems.push(by_hand(
+                    format!("milestone {mname:?}"),
+                    format!("its project {pid} doesn't exist"),
+                    "milestones.project_id",
+                ));
                 continue;
             };
             if let Err(why) = passes(&mname, parse::milestone_name) {
-                problems.push(by_hand(format!("milestone {mname:?} in project {pname:?}"), why, "milestones.name"));
+                problems.push(by_hand(
+                    format!("milestone {mname:?} in project {pname:?}"),
+                    why,
+                    "milestones.name",
+                ));
             }
             if let Some(d) = &target
                 && let Err(e) = parse::date(d)
@@ -1319,30 +1935,70 @@ fn export_in(conn: &Connection) -> Result<(String, Counts)> {
             }
             milestone_names.insert(mid, (pid, mname.clone()));
             counts.milestones += 1;
-            line(&mut out, &MilestoneLine { r#type: "milestone", project: pname, name: mname, description: mdesc, target_date: target, sort_order: sort, created_at: created, updated_at: updated });
+            line(
+                &mut out,
+                &MilestoneLine {
+                    r#type: "milestone",
+                    project: pname,
+                    name: mname,
+                    description: mdesc,
+                    target_date: target,
+                    sort_order: sort,
+                    created_at: created,
+                    updated_at: updated,
+                },
+            );
         }
     }
 
     // ----- cycles
     let mut cycle_ids: HashSet<String> = HashSet::new();
     {
-        let mut stmt = conn.prepare("SELECT id, name, starts_at, ends_at, created_at FROM cycles ORDER BY created_at, id")?;
-        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, Option<String>>(2)?, r.get::<_, Option<String>>(3)?, r.get::<_, i64>(4)?)))?;
+        let mut stmt = conn.prepare(
+            "SELECT id, name, starts_at, ends_at, created_at FROM cycles ORDER BY created_at, id",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, Option<String>>(2)?,
+                r.get::<_, Option<String>>(3)?,
+                r.get::<_, i64>(4)?,
+            ))
+        })?;
         for row in rows {
             let (cid, cname, starts, ends, created) = row?;
             if parse::uuid(&cid).ok().as_deref() != Some(cid.as_str()) {
-                problems.push(by_hand(format!("cycle {cid}"), "its id is not a lowercase UUID".into(), "cycles.id"));
+                problems.push(by_hand(
+                    format!("cycle {cid}"),
+                    "its id is not a lowercase UUID".into(),
+                    "cycles.id",
+                ));
             }
             for (col, d) in [("starts_at", &starts), ("ends_at", &ends)] {
                 if let Some(d) = d
                     && let Err(e) = parse::date(d)
                 {
-                    problems.push(by_hand(format!("cycle {cid} ({cname:?})"), format!("{col}: {}", e.0), &format!("cycles.{col}")));
+                    problems.push(by_hand(
+                        format!("cycle {cid} ({cname:?})"),
+                        format!("{col}: {}", e.0),
+                        &format!("cycles.{col}"),
+                    ));
                 }
             }
             cycle_ids.insert(cid.clone());
             counts.cycles += 1;
-            line(&mut out, &CycleLine { r#type: "cycle", id: cid, name: cname, starts_at: starts, ends_at: ends, created_at: created });
+            line(
+                &mut out,
+                &CycleLine {
+                    r#type: "cycle",
+                    id: cid,
+                    name: cname,
+                    starts_at: starts,
+                    ends_at: ends,
+                    created_at: created,
+                },
+            );
         }
     }
 
@@ -1375,9 +2031,25 @@ fn export_in(conn: &Connection) -> Result<(String, Counts)> {
         )?;
         let rows = stmt.query_map([], |r| {
             Ok(Row {
-                id: r.get(0)?, number: r.get(1)?, title: r.get(2)?, description: r.get(3)?, status: r.get(4)?, priority: r.get(5)?, assignee: r.get(6)?,
-                parent_id: r.get(7)?, estimate: r.get(8)?, due_date: r.get(9)?, created_at: r.get(10)?, updated_at: r.get(11)?, completed_at: r.get(12)?,
-                started_at: r.get(13)?, canceled_at: r.get(14)?, project_id: r.get(15)?, milestone_id: r.get(16)?, r#ref: r.get(17)?, creator: r.get(18)?,
+                id: r.get(0)?,
+                number: r.get(1)?,
+                title: r.get(2)?,
+                description: r.get(3)?,
+                status: r.get(4)?,
+                priority: r.get(5)?,
+                assignee: r.get(6)?,
+                parent_id: r.get(7)?,
+                estimate: r.get(8)?,
+                due_date: r.get(9)?,
+                created_at: r.get(10)?,
+                updated_at: r.get(11)?,
+                completed_at: r.get(12)?,
+                started_at: r.get(13)?,
+                canceled_at: r.get(14)?,
+                project_id: r.get(15)?,
+                milestone_id: r.get(16)?,
+                r#ref: r.get(17)?,
+                creator: r.get(18)?,
             })
         })?;
         rows.collect::<std::result::Result<_, _>>()?
@@ -1386,48 +2058,73 @@ fn export_in(conn: &Connection) -> Result<(String, Counts)> {
 
     let mut labels_of: HashMap<String, Vec<String>> = HashMap::new();
     {
-        let mut stmt = conn.prepare("SELECT issue_id, label_id FROM issue_labels ORDER BY issue_id, label_id")?;
+        let mut stmt = conn
+            .prepare("SELECT issue_id, label_id FROM issue_labels ORDER BY issue_id, label_id")?;
         let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
         for row in rows {
             let (iid, lid) = row?;
             match (numbers.get(iid.as_str()), label_names.get(&lid)) {
                 (Some(_), Some(lname)) => labels_of.entry(iid).or_default().push(lname.clone()),
-                _ => problems.push(by_hand(format!("issue_labels row ({iid}, {lid})"), "it names an issue or label that doesn't exist".into(), "issue_labels")),
+                _ => problems.push(by_hand(
+                    format!("issue_labels row ({iid}, {lid})"),
+                    "it names an issue or label that doesn't exist".into(),
+                    "issue_labels",
+                )),
             }
         }
     }
     let mut cycles_of: HashMap<String, Vec<String>> = HashMap::new();
     {
-        let mut stmt = conn.prepare("SELECT issue_id, cycle_id FROM issue_cycles ORDER BY issue_id, cycle_id")?;
+        let mut stmt = conn
+            .prepare("SELECT issue_id, cycle_id FROM issue_cycles ORDER BY issue_id, cycle_id")?;
         let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
         for row in rows {
             let (iid, cid) = row?;
             if numbers.contains_key(iid.as_str()) && cycle_ids.contains(&cid) {
                 cycles_of.entry(iid).or_default().push(cid);
             } else {
-                problems.push(by_hand(format!("issue_cycles row ({iid}, {cid})"), "it names an issue or cycle that doesn't exist".into(), "issue_cycles"));
+                problems.push(by_hand(
+                    format!("issue_cycles row ({iid}, {cid})"),
+                    "it names an issue or cycle that doesn't exist".into(),
+                    "issue_cycles",
+                ));
             }
         }
     }
 
-    let parent_of: HashMap<i64, i64> = issues.iter().filter_map(|i| Some((i.number, *numbers.get(i.parent_id.as_deref()?)?))).collect();
+    let parent_of: HashMap<i64, i64> = issues
+        .iter()
+        .filter_map(|i| Some((i.number, *numbers.get(i.parent_id.as_deref()?)?)))
+        .collect();
     for i in issues {
         let ident = id(i.number);
         let what = format!("issue {ident}");
         if i.number < 1 || i.number == i64::MAX {
-            problems.push(by_hand(what.clone(), format!("its number {} is out of range", i.number), "issues.number"));
+            problems.push(by_hand(
+                what.clone(),
+                format!("its number {} is out of range", i.number),
+                "issues.number",
+            ));
         }
         let status = match Status::parse(&i.status) {
             Some(s) => s.as_str(),
             None => {
-                problems.push(by_hand(what.clone(), format!("status {:?} isn't one lcl knows", i.status), "issues.status"));
+                problems.push(by_hand(
+                    what.clone(),
+                    format!("status {:?} isn't one lcl knows", i.status),
+                    "issues.status",
+                ));
                 "Backlog"
             }
         };
         let priority = match Priority::from_stored(i.priority) {
             Some(p) => p.label(),
             None => {
-                problems.push(by_hand(what.clone(), format!("priority {} isn't one lcl knows (expected 0-4)", i.priority), "issues.priority"));
+                problems.push(by_hand(
+                    what.clone(),
+                    format!("priority {} isn't one lcl knows (expected 0-4)", i.priority),
+                    "issues.priority",
+                ));
                 "None"
             }
         };
@@ -1439,12 +2136,20 @@ fn export_in(conn: &Connection) -> Result<(String, Counts)> {
         if let Some(c) = &i.creator
             && let Err(why) = passes(c, parse::author)
         {
-            problems.push(by_hand(what.clone(), format!("creator: {why}"), "issues.creator"));
+            problems.push(by_hand(
+                what.clone(),
+                format!("creator: {why}"),
+                "issues.creator",
+            ));
         }
         if let Some(r) = &i.r#ref {
-            let why = passes(r, parse::issue_ref).err().or_else(|| ref_looks_own(&key, r).then(|| LclError::RefLooksOwn(r.clone()).to_string()));
+            let why = passes(r, parse::issue_ref).err().or_else(|| {
+                ref_looks_own(&key, r).then(|| LclError::RefLooksOwn(r.clone()).to_string())
+            });
             if let Some(why) = why {
-                problems.push(format!("{what}: ref: {why}; fix it with lcl issue update {ident} --no-ref"));
+                problems.push(format!(
+                    "{what}: ref: {why}; fix it with lcl issue update {ident} --no-ref"
+                ));
             }
         }
         let parent = match &i.parent_id {
@@ -1478,7 +2183,11 @@ fn export_in(conn: &Connection) -> Result<(String, Counts)> {
             Some(p) => match project_names.get(p) {
                 Some(n) => Some(n.clone()),
                 None => {
-                    problems.push(by_hand(what.clone(), format!("its project {p} doesn't exist"), "issues.project_id"));
+                    problems.push(by_hand(
+                        what.clone(),
+                        format!("its project {p} doesn't exist"),
+                        "issues.project_id",
+                    ));
                     None
                 }
             },
@@ -1488,26 +2197,56 @@ fn export_in(conn: &Connection) -> Result<(String, Counts)> {
             Some(m) => match milestone_names.get(m) {
                 Some((pid, mname)) if Some(pid) == i.project_id.as_ref() => Some(mname.clone()),
                 Some(_) => {
-                    problems.push(by_hand(what.clone(), format!("its milestone {m} is in another project"), "issues.milestone_id"));
+                    problems.push(by_hand(
+                        what.clone(),
+                        format!("its milestone {m} is in another project"),
+                        "issues.milestone_id",
+                    ));
                     None
                 }
                 None => {
-                    problems.push(by_hand(what.clone(), format!("its milestone {m} doesn't exist"), "issues.milestone_id"));
+                    problems.push(by_hand(
+                        what.clone(),
+                        format!("its milestone {m} doesn't exist"),
+                        "issues.milestone_id",
+                    ));
                     None
                 }
             },
         };
         let mut labels = labels_of.remove(&i.id).unwrap_or_default();
-        labels.sort_by(|a, b| a.to_ascii_lowercase().cmp(&b.to_ascii_lowercase()).then(a.cmp(b)));
+        labels.sort_by(|a, b| {
+            a.to_ascii_lowercase()
+                .cmp(&b.to_ascii_lowercase())
+                .then(a.cmp(b))
+        });
         let mut cycles = cycles_of.remove(&i.id).unwrap_or_default();
         cycles.sort();
         counts.issues += 1;
         line(
             &mut out,
             &IssueLine {
-                r#type: "issue", number: i.number, title: i.title, description: i.description, status, priority, assignee: i.assignee, creator: i.creator,
-                r#ref: i.r#ref, parent, project, milestone, labels, cycles, estimate: i.estimate, due_date: i.due_date, created_at: i.created_at,
-                updated_at: i.updated_at, started_at: i.started_at, completed_at: i.completed_at, canceled_at: i.canceled_at,
+                r#type: "issue",
+                number: i.number,
+                title: i.title,
+                description: i.description,
+                status,
+                priority,
+                assignee: i.assignee,
+                creator: i.creator,
+                r#ref: i.r#ref,
+                parent,
+                project,
+                milestone,
+                labels,
+                cycles,
+                estimate: i.estimate,
+                due_date: i.due_date,
+                created_at: i.created_at,
+                updated_at: i.updated_at,
+                started_at: i.started_at,
+                completed_at: i.completed_at,
+                canceled_at: i.canceled_at,
             },
         );
     }
@@ -1515,33 +2254,77 @@ fn export_in(conn: &Connection) -> Result<(String, Counts)> {
     // ----- comments
     {
         let mut stmt = conn.prepare("SELECT i.number, c.body, c.author, c.created_at, c.id, c.issue_id FROM comments c LEFT JOIN issues i ON i.id = c.issue_id ORDER BY i.number, c.created_at, c.rowid")?;
-        let rows = stmt.query_map([], |r| Ok((r.get::<_, Option<i64>>(0)?, r.get::<_, String>(1)?, r.get::<_, Option<String>>(2)?, r.get::<_, i64>(3)?, r.get::<_, String>(4)?, r.get::<_, String>(5)?)))?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, Option<i64>>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, Option<String>>(2)?,
+                r.get::<_, i64>(3)?,
+                r.get::<_, String>(4)?,
+                r.get::<_, String>(5)?,
+            ))
+        })?;
         for row in rows {
             let (number, body, author, created, cid, iid) = row?;
             let Some(number) = number else {
-                problems.push(by_hand(format!("comment {cid}"), format!("its issue {iid} doesn't exist"), "comments.issue_id"));
+                problems.push(by_hand(
+                    format!("comment {cid}"),
+                    format!("its issue {iid} doesn't exist"),
+                    "comments.issue_id",
+                ));
                 continue;
             };
             if let Some(a) = &author
                 && let Err(why) = passes(a, parse::author)
             {
-                problems.push(by_hand(format!("comment {cid} on {}", id(number)), format!("author: {why}"), "comments.author"));
+                problems.push(by_hand(
+                    format!("comment {cid} on {}", id(number)),
+                    format!("author: {why}"),
+                    "comments.author",
+                ));
             }
             counts.comments += 1;
-            line(&mut out, &CommentLine { r#type: "comment", issue: number, body, author, created_at: created });
+            line(
+                &mut out,
+                &CommentLine {
+                    r#type: "comment",
+                    issue: number,
+                    body,
+                    author,
+                    created_at: created,
+                },
+            );
         }
     }
 
     // ----- relations: by (from, kind, to), related smaller number first
     {
         let mut stmt = conn.prepare("SELECT issue_id, related_id, kind FROM issue_relations")?;
-        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })?;
         let mut rels: Vec<(i64, Kind, i64)> = vec![];
         for row in rows {
             let (a, b, kind) = row?;
-            match (numbers.get(a.as_str()), numbers.get(b.as_str()), Kind::parse(&kind)) {
-                (Some(&from), Some(&to), Some(kind)) => rels.push(if kind == Kind::Related { (from.min(to), kind, from.max(to)) } else { (from, kind, to) }),
-                _ => problems.push(by_hand(format!("relation ({a}, {kind}, {b})"), "it names an issue that doesn't exist, or a kind lcl doesn't know".into(), "issue_relations")),
+            match (
+                numbers.get(a.as_str()),
+                numbers.get(b.as_str()),
+                Kind::parse(&kind),
+            ) {
+                (Some(&from), Some(&to), Some(kind)) => rels.push(if kind == Kind::Related {
+                    (from.min(to), kind, from.max(to))
+                } else {
+                    (from, kind, to)
+                }),
+                _ => problems.push(by_hand(
+                    format!("relation ({a}, {kind}, {b})"),
+                    "it names an issue that doesn't exist, or a kind lcl doesn't know".into(),
+                    "issue_relations",
+                )),
             }
         }
         rels.sort_by(|x, y| (x.0, x.1.as_str(), x.2).cmp(&(y.0, y.1.as_str(), y.2)));
@@ -1553,38 +2336,94 @@ fn export_in(conn: &Connection) -> Result<(String, Counts)> {
                     k => k.as_str(),
                 };
                 let why = match &e {
-                    EdgeError::BlocksCycle { path } => format!("the blocks relations make a cycle ({})", path.iter().map(|n| id(*n)).collect::<Vec<_>>().join(" blocks ")),
-                    EdgeError::DuplicateCycle { path } => format!("the duplicate-of relations make a cycle ({})", path.iter().map(|n| id(*n)).collect::<Vec<_>>().join(" -> ")),
-                    EdgeError::SecondTarget { current, .. } => format!("{} is also a duplicate of {}", id(from), id(*current)),
-                    EdgeError::SelfRelation | EdgeError::Twice { .. } => "the row can't exist".into(),
+                    EdgeError::BlocksCycle { path } => format!(
+                        "the blocks relations make a cycle ({})",
+                        path.iter()
+                            .map(|n| id(*n))
+                            .collect::<Vec<_>>()
+                            .join(" blocks ")
+                    ),
+                    EdgeError::DuplicateCycle { path } => format!(
+                        "the duplicate-of relations make a cycle ({})",
+                        path.iter().map(|n| id(*n)).collect::<Vec<_>>().join(" -> ")
+                    ),
+                    EdgeError::SecondTarget { current, .. } => {
+                        format!("{} is also a duplicate of {}", id(from), id(*current))
+                    }
+                    EdgeError::SelfRelation | EdgeError::Twice { .. } => {
+                        "the row can't exist".into()
+                    }
                 };
-                problems.push(format!("relation {} {typed} {}: {why}; fix it with lcl issue unrelate {} {typed} {}", id(from), id(to), id(from), id(to)));
+                problems.push(format!(
+                    "relation {} {typed} {}: {why}; fix it with lcl issue unrelate {} {typed} {}",
+                    id(from),
+                    id(to),
+                    id(from),
+                    id(to)
+                ));
                 continue;
             }
             counts.relations += 1;
-            line(&mut out, &RelationLine { r#type: "relation", kind: kind.as_str(), from, to });
+            line(
+                &mut out,
+                &RelationLine {
+                    r#type: "relation",
+                    kind: kind.as_str(),
+                    from,
+                    to,
+                },
+            );
         }
     }
 
     // ----- docs
     {
         let mut stmt = conn.prepare("SELECT id, title, content, parent_id, created_at, updated_at FROM docs ORDER BY created_at, id")?;
-        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, Option<String>>(3)?, r.get::<_, i64>(4)?, r.get::<_, i64>(5)?)))?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, Option<String>>(3)?,
+                r.get::<_, i64>(4)?,
+                r.get::<_, i64>(5)?,
+            ))
+        })?;
         let docs: Vec<_> = rows.collect::<std::result::Result<_, _>>()?;
-        let parent_of: HashMap<&str, Option<&str>> = docs.iter().map(|d| (d.0.as_str(), d.3.as_deref())).collect();
+        let parent_of: HashMap<&str, Option<&str>> = docs
+            .iter()
+            .map(|d| (d.0.as_str(), d.3.as_deref()))
+            .collect();
         for (did, title, content, parent, created, updated) in &docs {
             if parse::uuid(did).ok().as_deref() != Some(did.as_str()) {
-                problems.push(by_hand(format!("doc {did}"), "its id is not a lowercase UUID".into(), "docs.id"));
+                problems.push(by_hand(
+                    format!("doc {did}"),
+                    "its id is not a lowercase UUID".into(),
+                    "docs.id",
+                ));
             }
             if let Some(p) = parent {
                 if !parent_of.contains_key(p.as_str()) {
                     problems.push(format!("doc {did}: parent {p} is not a doc; fix it with lcl doc update {did} --no-parent"));
-                } else if let Some(path) = loop_through(did.as_str(), |n| parent_of.get(n).copied().flatten()) {
+                } else if let Some(path) =
+                    loop_through(did.as_str(), |n| parent_of.get(n).copied().flatten())
+                {
                     problems.push(format!("doc {did}: its parents make a cycle ({}); fix it with lcl doc update {did} --no-parent", path.join(" -> ")));
                 }
             }
             counts.docs += 1;
-            line(&mut out, &DocLine { r#type: "doc", id: did.clone(), title: title.clone(), content: content.clone(), parent: parent.clone(), created_at: *created, updated_at: *updated });
+            line(
+                &mut out,
+                &DocLine {
+                    r#type: "doc",
+                    id: did.clone(),
+                    title: title.clone(),
+                    content: content.clone(),
+                    parent: parent.clone(),
+                    created_at: *created,
+                    updated_at: *updated,
+                },
+            );
         }
     }
 
@@ -1596,7 +2435,10 @@ fn export_in(conn: &Connection) -> Result<(String, Counts)> {
 
 /// `s` as one shell word, for a command in a message.
 fn shell(s: &str) -> String {
-    if !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || "-_./:@".contains(c)) {
+    if !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || "-_./:@".contains(c))
+    {
         s.to_string()
     } else {
         format!("'{}'", s.replace('\'', r"'\''"))

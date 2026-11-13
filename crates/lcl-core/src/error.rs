@@ -22,7 +22,11 @@ pub enum LclError {
     /// whose ref it is (its `KEY-N`, and the ref as stored), named as a
     /// hint; the identifier never resolves through it.
     #[error("{given} is not in this workspace (key {key}){}", holder.as_ref().map(|(issue, r)| format!("; {issue} has ref {r}")).unwrap_or_default())]
-    WrongWorkspace { given: String, key: String, holder: Option<(String, String)> },
+    WrongWorkspace {
+        given: String,
+        key: String,
+        holder: Option<(String, String)>,
+    },
     /// A ref another issue has, ignoring case. `holder` is its `KEY-N`.
     #[error("ref {given:?} is already on {holder}")]
     RefTaken { given: String, holder: String },
@@ -35,7 +39,11 @@ pub enum LclError {
     SelfParent(String),
     /// `path` is the loop the new link would close, from the issue back to it.
     #[error("making {parent} the parent of {issue} would make a cycle: {path}")]
-    ParentCycle { issue: String, parent: String, path: String },
+    ParentCycle {
+        issue: String,
+        parent: String,
+        path: String,
+    },
     #[error("{issue} has sub-issues {children}; reparent or delete them first")]
     HasChildren { issue: String, children: String },
     /// A label argument naming no label.
@@ -54,15 +62,27 @@ pub enum LclError {
     DocSelfParent(String),
     /// `path` runs from the doc up through its would-be parent back to it.
     #[error("making doc {parent} the parent of doc {doc} would make a cycle: {path}")]
-    DocParentCycle { doc: String, parent: String, path: String },
+    DocParentCycle {
+        doc: String,
+        parent: String,
+        path: String,
+    },
     /// A problem in an import file, which names its line and field (or the
     /// record, for a problem with the record as a whole).
     #[error("line {line}: {what}: {msg}")]
-    ImportLine { line: usize, what: String, msg: String },
+    ImportLine {
+        line: usize,
+        what: String,
+        msg: String,
+    },
     /// `has` lists what is there, as "1 issue and 2 labels".
-    #[error("workspace {workspace:?} is not empty: it has {has}; import only into an empty workspace (make one with lcl init or lcl workspace create)")]
+    #[error(
+        "workspace {workspace:?} is not empty: it has {has}; import only into an empty workspace (make one with lcl init or lcl workspace create)"
+    )]
     ImportNotEmpty { workspace: String, has: String },
-    #[error("the file is for key {file} but this workspace's key is {workspace}; import it into a workspace with key {file}")]
+    #[error(
+        "the file is for key {file} but this workspace's key is {workspace}; import it into a workspace with key {file}"
+    )]
     ImportKeyMismatch { file: String, workspace: String },
     /// Everything that keeps the workspace from exporting as a file that
     /// imports, one problem per entry.
@@ -74,25 +94,47 @@ pub enum LclError {
     SelfRelation(String),
     /// `path` is the cycle the new row would close, as `A blocks B blocks A`.
     #[error("{blocker} blocking {blocked} would make a cycle: {path}")]
-    BlocksCycle { blocker: String, blocked: String, path: String },
+    BlocksCycle {
+        blocker: String,
+        blocked: String,
+        path: String,
+    },
     /// A second duplicate-of target. `current` is the one it has.
-    #[error("{issue} is already a duplicate of {current}; unrelate it first: lcl issue unrelate {issue} duplicate-of {current}")]
+    #[error(
+        "{issue} is already a duplicate of {current}; unrelate it first: lcl issue unrelate {issue} duplicate-of {current}"
+    )]
     AlreadyDuplicate { issue: String, current: String },
     /// `path` runs from the issue through each duplicate-of target back to it.
     #[error("making {issue} a duplicate of {target} would make a cycle: {path}")]
-    DuplicateCycle { issue: String, target: String, path: String },
+    DuplicateCycle {
+        issue: String,
+        target: String,
+        path: String,
+    },
     /// `unrelate` of a relation that isn't there, as typed.
     #[error("there is no relation {0}")]
     RelationNotFound(String),
     /// The workspace index is from a newer lcl.
-    #[error("the workspace index {path} is v{found}, newer than this lcl supports (v{supported}); upgrade lcl")]
-    RegistryTooNew { path: String, found: i64, supported: i64 },
+    #[error(
+        "the workspace index {path} is v{found}, newer than this lcl supports (v{supported}); upgrade lcl"
+    )]
+    RegistryTooNew {
+        path: String,
+        found: i64,
+        supported: i64,
+    },
     /// `workspace create` of a name that is registered, exactly.
     #[error("workspace {0:?} already exists")]
     WorkspaceExists(String),
     /// `workspace create` of a name whose slug another workspace has.
-    #[error("workspace {name:?} would use the same file ({slug}.sqlite) as the existing workspace {existing:?}; choose another name")]
-    SlugTaken { name: String, existing: String, slug: String },
+    #[error(
+        "workspace {name:?} would use the same file ({slug}.sqlite) as the existing workspace {existing:?}; choose another name"
+    )]
+    SlugTaken {
+        name: String,
+        existing: String,
+        slug: String,
+    },
     /// A workspace file that is there although nothing registered it.
     #[error("a workspace file already exists at {0}")]
     WorkspaceFileExists(String),
@@ -100,11 +142,21 @@ pub enum LclError {
     #[error("this directory has no name for the workspace; give it one: lcl init NAME --key KEY")]
     InitNeedsName,
     /// `init` where a workspace with another name or key already is.
-    #[error("this directory already has workspace {name:?} (key {key}) at {path}; init doesn't rename or re-key a workspace")]
-    InitMismatch { name: String, key: String, path: String },
+    #[error(
+        "this directory already has workspace {name:?} (key {key}) at {path}; init doesn't rename or re-key a workspace"
+    )]
+    InitMismatch {
+        name: String,
+        key: String,
+        path: String,
+    },
     /// `init` of a name whose slug another workspace has.
     #[error("the name {name:?} is taken: workspace {existing:?} is registered at {path}")]
-    NameTaken { name: String, existing: String, path: String },
+    NameTaken {
+        name: String,
+        existing: String,
+        path: String,
+    },
     /// `init` of a name registered, exactly, to another place.
     #[error("workspace {name:?} is already registered at {path}")]
     AlreadyRegistered { name: String, path: String },
@@ -128,19 +180,40 @@ pub enum LclError {
     ProjectExists { name: String, existing: String },
     /// `project delete` of a project that issues or milestones reference.
     #[error("project {name:?} has {}; move or delete {} first", counted(&[(*issues, "issue"), (*milestones, "milestone")]), them(issues + milestones))]
-    ProjectInUse { name: String, issues: i64, milestones: i64 },
+    ProjectInUse {
+        name: String,
+        issues: i64,
+        milestones: i64,
+    },
     /// No milestone with this name or id (`project`: where it was looked for).
     #[error("milestone {name:?} not found{}", project.as_ref().map(|p| format!(" in project {p:?}")).unwrap_or_default())]
-    MilestoneNotFound { name: String, project: Option<String> },
+    MilestoneNotFound {
+        name: String,
+        project: Option<String>,
+    },
     /// An issue's milestone that exists, but only in other projects.
-    #[error("milestone {name:?} is not in project {project:?} (it is in {})", projects_named(elsewhere))]
-    MilestoneElsewhere { name: String, project: String, elsewhere: Vec<String> },
+    #[error(
+        "milestone {name:?} is not in project {project:?} (it is in {})",
+        projects_named(elsewhere)
+    )]
+    MilestoneElsewhere {
+        name: String,
+        project: String,
+        elsewhere: Vec<String>,
+    },
     /// A milestone name that several projects have, given without --project.
-    #[error("milestone {name:?} is in {}; pass --project to choose", projects_named(projects))]
+    #[error(
+        "milestone {name:?} is in {}; pass --project to choose",
+        projects_named(projects)
+    )]
     MilestoneAmbiguous { name: String, projects: Vec<String> },
     /// A milestone name taken in its project, ignoring case.
     #[error("milestone {name:?} already exists in project {project:?}{}", if name == existing { String::new() } else { format!(" (as {existing:?})") })]
-    MilestoneExists { name: String, existing: String, project: String },
+    MilestoneExists {
+        name: String,
+        existing: String,
+        project: String,
+    },
     /// `milestone delete` of a milestone that issues reference.
     #[error("milestone {name:?} has {}; move or delete {} first", counted(&[(*issues, "issue")]), them(*issues))]
     MilestoneInUse { name: String, issues: i64 },
@@ -148,7 +221,9 @@ pub enum LclError {
     #[error("milestone {0:?} needs a project: the issue has none; pass --project too")]
     MilestoneWithoutProject(String),
     /// `issue list --project none --milestone M`: nothing can match.
-    #[error("--milestone {0:?} can't be used with --project none: issues in no project have no milestone")]
+    #[error(
+        "--milestone {0:?} can't be used with --project none: issues in no project have no milestone"
+    )]
     MilestoneInNoProject(String),
     /// A comment id (matched ignoring case) that names no comment.
     #[error("comment {0} not found")]
@@ -169,14 +244,54 @@ pub enum LclError {
     /// `cycle update` leaving the end before the start, one of them the
     /// stored date. (Both typed is a usage error, as on create.)
     #[error("cycle {name:?} would end {end}, before its start {start}")]
-    CycleEndBeforeStart { name: String, start: String, end: String },
+    CycleEndBeforeStart {
+        name: String,
+        start: String,
+        end: String,
+    },
     #[error("the search query is empty")]
     EmptyQuery,
     /// Every word lacks token characters (`--`, `*`, a lone `"`).
     #[error("the search query {0:?} has no words to search for")]
     NothingToSearch(String),
-    #[error("{0}")]
-    Msg(String),
+    /// A doc delete while other docs name it as parent.
+    #[error("doc {doc} has sub-docs {children}; reparent or delete them first")]
+    DocHasChildren { doc: String, children: String },
+    /// The search index does not match the rows it indexes. External-content
+    /// FTS is keyed by rowid, which `VACUUM` can renumber.
+    #[error("the search index {table} does not match its rows: {detail}")]
+    FtsMismatch { table: &'static str, detail: String },
+    /// `PRAGMA foreign_key_check` after a migration.
+    #[error("foreign keys do not hold after migration: {0}")]
+    ForeignKeyCheck(String),
+    #[error("count(*) returned {0}")]
+    CountOverflow(i64),
+    #[error("meta {key} is not a number: {value:?}")]
+    BadMetaNumber { key: &'static str, value: String },
+    #[error("project status {value:?} is unknown")]
+    UnknownProjectStatus { value: String },
+    #[error("{what} {id} vanished inside its own transaction")]
+    Vanished { what: &'static str, id: String },
+    #[error("comment {id}: changed {changed} rows, not 1")]
+    CommentWriteCount { id: String, changed: usize },
+    #[error("can't encode ids: {0}")]
+    Encode(String),
+    #[error("database schema version {0} is invalid")]
+    BadSchemaVersion(i64),
+    #[error("the workspace index has a workspace of unknown kind {0:?}")]
+    UnknownWorkspaceKind(String),
+    #[error("{path} has no directory")]
+    NoParentDir { path: String },
+    #[error("{path} was left open after building the workspace")]
+    WorkspaceLeftOpen { path: String },
+    #[error("not UTF-8")]
+    PathNotUtf8,
+    #[error("the workspace index's schema version {0:?} is invalid")]
+    BadRegistryVersion(String),
+    #[error("the workspace index's schema version {0} is invalid")]
+    BadRegistryVersionNumber(i64),
+    #[error("lcl made an export that it would refuse to import ({0}); this is a bug in lcl")]
+    ExportRoundTrip(String),
 }
 pub type Result<T> = std::result::Result<T, LclError>;
 
@@ -219,9 +334,28 @@ impl LclError {
         use ErrorKind::*;
         match self {
             LclError::Db(e) => db_kind(e),
-            LclError::NoHome | LclError::Msg(_) => Other,
+            LclError::NoHome
+            | LclError::CountOverflow(_)
+            | LclError::BadMetaNumber { .. }
+            | LclError::UnknownProjectStatus { .. }
+            | LclError::Vanished { .. }
+            | LclError::CommentWriteCount { .. }
+            | LclError::Encode(_)
+            | LclError::UnknownWorkspaceKind(_)
+            | LclError::NoParentDir { .. }
+            | LclError::WorkspaceLeftOpen { .. }
+            | LclError::PathNotUtf8
+            | LclError::BadRegistryVersion(_)
+            | LclError::BadRegistryVersionNumber(_)
+            | LclError::ExportRoundTrip(_) => Other,
             LclError::Io(_) => Io,
-            LclError::SchemaTooNew { .. } | LclError::UnknownStatus { .. } | LclError::UnknownPriority { .. } | LclError::RegistryTooNew { .. } => Schema,
+            LclError::SchemaTooNew { .. }
+            | LclError::UnknownStatus { .. }
+            | LclError::UnknownPriority { .. }
+            | LclError::RegistryTooNew { .. }
+            | LclError::FtsMismatch { .. }
+            | LclError::ForeignKeyCheck(_)
+            | LclError::BadSchemaVersion(_) => Schema,
             LclError::NotFound(_)
             | LclError::IssueNotFound(_)
             | LclError::LabelNotFound(_)
@@ -265,7 +399,8 @@ impl LclError {
             | LclError::CycleExists { .. }
             | LclError::CycleAmbiguous { .. }
             | LclError::CycleInUse { .. }
-            | LclError::CycleEndBeforeStart { .. } => Conflict,
+            | LclError::CycleEndBeforeStart { .. }
+            | LclError::DocHasChildren { .. } => Conflict,
             LclError::WrongWorkspace { .. }
             | LclError::RefLooksOwn(_)
             | LclError::ImportLine { .. }
@@ -297,7 +432,11 @@ fn db_kind(e: &rusqlite::Error) -> ErrorKind {
 
 /// "3 issues and 1 milestone": each non-zero count with its noun.
 fn counted(parts: &[(i64, &str)]) -> String {
-    let parts: Vec<String> = parts.iter().filter(|(n, _)| *n != 0).map(|(n, noun)| format!("{n} {noun}{}", if *n == 1 { "" } else { "s" })).collect();
+    let parts: Vec<String> = parts
+        .iter()
+        .filter(|(n, _)| *n != 0)
+        .map(|(n, noun)| format!("{n} {noun}{}", if *n == 1 { "" } else { "s" }))
+        .collect();
     parts.join(" and ")
 }
 
@@ -318,6 +457,12 @@ fn projects_named(names: &[String]) -> String {
 
 /// `s` as one shell word: as is when that's safe, else single-quoted.
 fn shell_word(s: &str) -> String {
-    let plain = !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || "._/:@%+=,-".contains(c));
-    if plain { s.to_string() } else { format!("'{}'", s.replace('\'', r"'\''")) }
+    let plain = !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || "._/:@%+=,-".contains(c));
+    if plain {
+        s.to_string()
+    } else {
+        format!("'{}'", s.replace('\'', r"'\''"))
+    }
 }

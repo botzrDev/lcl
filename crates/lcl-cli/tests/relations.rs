@@ -4,8 +4,8 @@
 
 mod common;
 
-use common::{argv, dump, exec, foreign_key_violations, Env};
-use serde_json::{json, Value};
+use common::{Env, argv, dump, exec, foreign_key_violations};
+use serde_json::{Value, json};
 
 /// A workspace (key DREA) with issues 1..=n, titled "issue N".
 fn workspace(n: i64) -> Env {
@@ -22,12 +22,19 @@ fn relate(env: &Env, a: i64, kind: &str, b: i64) -> common::Out {
 }
 
 fn relations(env: &Env, n: i64) -> Value {
-    env.lcl(&["issue", "show", &n.to_string(), "--json"]).assert_ok().json()["relations"].clone()
+    env.lcl(&["issue", "show", &n.to_string(), "--json"])
+        .assert_ok()
+        .json()["relations"]
+        .clone()
 }
 
 /// The identifiers in one list of `relations`.
 fn ids(list: &Value) -> Vec<String> {
-    list.as_array().unwrap_or_else(|| panic!("not a list: {list}")).iter().map(|o| o["identifier"].as_str().expect("identifier").to_string()).collect()
+    list.as_array()
+        .unwrap_or_else(|| panic!("not a list: {list}"))
+        .iter()
+        .map(|o| o["identifier"].as_str().expect("identifier").to_string())
+        .collect()
 }
 
 /// Every stored row as (issue number, related number, kind), sorted.
@@ -36,7 +43,10 @@ fn rows(env: &Env) -> Vec<(i64, i64, String)> {
     let mut stmt = conn
         .prepare("SELECT a.number, b.number, r.kind FROM issue_relations r JOIN issues a ON a.id = r.issue_id JOIN issues b ON b.id = r.related_id ORDER BY 1, 2, 3")
         .expect("prepare");
-    stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).expect("query").collect::<Result<_, _>>().expect("rows")
+    stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .expect("query")
+        .collect::<Result<_, _>>()
+        .expect("rows")
 }
 
 fn listed(env: &Env, args: &[&str]) -> Value {
@@ -46,7 +56,12 @@ fn listed(env: &Env, args: &[&str]) -> Value {
 }
 
 fn numbers(list: &Value) -> Vec<i64> {
-    list["issues"].as_array().expect("issues").iter().map(|i| i["number"].as_i64().expect("number")).collect()
+    list["issues"]
+        .as_array()
+        .expect("issues")
+        .iter()
+        .map(|i| i["number"].as_i64().expect("number"))
+        .collect()
 }
 
 #[test]
@@ -64,28 +79,69 @@ fn each_kind_shows_from_both_sides() {
     assert_eq!(ids(&one["related"]), ["DREA-4", "DREA-5"]);
     assert_eq!(one["duplicate_of"], Value::Null);
     assert_eq!(ids(&one["duplicates"]), ["DREA-6"]);
-    assert_eq!(one["blocks"][0], json!({"identifier": "DREA-2", "title": "issue 2", "status": "Backlog"}));
+    assert_eq!(
+        one["blocks"][0],
+        json!({"identifier": "DREA-2", "title": "issue 2", "status": "Backlog"})
+    );
     assert_eq!(one["duplicates"][0]["status"], "Duplicate");
 
     for n in [2, 3] {
-        assert_eq!(ids(&relations(&env, n)["blocked_by"]), ["DREA-1"], "DREA-{n}");
-        assert_eq!(ids(&relations(&env, n)["blocks"]), Vec::<String>::new(), "DREA-{n}");
+        assert_eq!(
+            ids(&relations(&env, n)["blocked_by"]),
+            ["DREA-1"],
+            "DREA-{n}"
+        );
+        assert_eq!(
+            ids(&relations(&env, n)["blocks"]),
+            Vec::<String>::new(),
+            "DREA-{n}"
+        );
     }
     for n in [4, 5] {
         assert_eq!(ids(&relations(&env, n)["related"]), ["DREA-1"], "DREA-{n}");
     }
-    assert_eq!(relations(&env, 6)["duplicate_of"], json!({"identifier": "DREA-1", "title": "issue 1", "status": "Backlog"}));
-    assert_eq!(relations(&env, 7), json!({"blocks": [], "blocked_by": [], "related": [], "duplicate_of": null, "duplicates": []}));
+    assert_eq!(
+        relations(&env, 6)["duplicate_of"],
+        json!({"identifier": "DREA-1", "title": "issue 1", "status": "Backlog"})
+    );
+    assert_eq!(
+        relations(&env, 7),
+        json!({"blocks": [], "blocked_by": [], "related": [], "duplicate_of": null, "duplicates": []})
+    );
 
-    let show = |n: i64| env.lcl(&["issue", "show", &n.to_string()]).assert_ok().stdout.clone();
+    let show = |n: i64| {
+        env.lcl(&["issue", "show", &n.to_string()])
+            .assert_ok()
+            .stdout
+            .clone()
+    };
     let one = show(1);
-    for line in ["Blocks: DREA-2 [Backlog], DREA-3 [Backlog]\n", "Related: DREA-4 [Backlog], DREA-5 [Backlog]\n", "Duplicates: DREA-6 [Duplicate]\n"] {
+    for line in [
+        "Blocks: DREA-2 [Backlog], DREA-3 [Backlog]\n",
+        "Related: DREA-4 [Backlog], DREA-5 [Backlog]\n",
+        "Duplicates: DREA-6 [Duplicate]\n",
+    ] {
         assert!(one.contains(line), "{line:?} not in:\n{one}");
     }
-    assert!(!one.contains("Blocked by") && !one.contains("Duplicate of"), "{one}");
-    assert!(show(3).contains("\nBlocked by: DREA-1 [Backlog]\n"), "{}", show(3));
-    assert!(show(5).contains("\nRelated: DREA-1 [Backlog]\n"), "{}", show(5));
-    assert!(show(6).contains("\nDuplicate of: DREA-1 [Backlog]\n"), "{}", show(6));
+    assert!(
+        !one.contains("Blocked by") && !one.contains("Duplicate of"),
+        "{one}"
+    );
+    assert!(
+        show(3).contains("\nBlocked by: DREA-1 [Backlog]\n"),
+        "{}",
+        show(3)
+    );
+    assert!(
+        show(5).contains("\nRelated: DREA-1 [Backlog]\n"),
+        "{}",
+        show(5)
+    );
+    assert!(
+        show(6).contains("\nDuplicate of: DREA-1 [Backlog]\n"),
+        "{}",
+        show(6)
+    );
     let seven = show(7);
     for name in ["Blocks", "Blocked by", "Related", "Duplicate"] {
         assert!(!seven.contains(name), "{seven}");
@@ -100,20 +156,38 @@ fn one_row_per_relation() {
     let out = relate(&env, 1, "blocks", 2).assert_ok().stdout.clone();
     assert_eq!(out, "DREA-1 blocks DREA-2\n");
     let again = relate(&env, 2, "blocked-by", 1);
-    assert_eq!((again.code, again.stdout.as_str()), (0, "Already related: DREA-2 blocked-by DREA-1\n"));
-    let json = env.lcl(&["issue", "relate", "1", "blocks", "2", "--json"]).assert_ok().json();
-    assert_eq!(json, json!({"issue": "DREA-1", "kind": "blocks", "related": "DREA-2", "created": false}));
+    assert_eq!(
+        (again.code, again.stdout.as_str()),
+        (0, "Already related: DREA-2 blocked-by DREA-1\n")
+    );
+    let json = env
+        .lcl(&["issue", "relate", "1", "blocks", "2", "--json"])
+        .assert_ok()
+        .json();
+    assert_eq!(
+        json,
+        json!({"issue": "DREA-1", "kind": "blocks", "related": "DREA-2", "created": false})
+    );
     assert_eq!(rows(&env), [(1, 2, "blocks".to_string())]);
 
     // A blocked-by B, stored as B blocks A.
     relate(&env, 3, "Blocked_By", 2).assert_ok();
-    assert_eq!(rows(&env), [(1, 2, "blocks".to_string()), (2, 3, "blocks".to_string())]);
+    assert_eq!(
+        rows(&env),
+        [(1, 2, "blocks".to_string()), (2, 3, "blocks".to_string())]
+    );
 
     // Related both ways: one row, whichever order made it.
     relate(&env, 3, "related", 1).assert_ok();
-    let again = env.lcl(&["issue", "relate", "1", "related", "3", "--json"]).assert_ok().json();
+    let again = env
+        .lcl(&["issue", "relate", "1", "related", "3", "--json"])
+        .assert_ok()
+        .json();
     assert_eq!(again["created"], false);
-    let related: Vec<_> = rows(&env).into_iter().filter(|r| r.2 == "related").collect();
+    let related: Vec<_> = rows(&env)
+        .into_iter()
+        .filter(|r| r.2 == "related")
+        .collect();
     assert_eq!(related.len(), 1, "{related:?}");
     // A different kind between the same two issues is a different relation.
     relate(&env, 2, "related", 1).assert_ok();
@@ -121,7 +195,11 @@ fn one_row_per_relation() {
 
     let out = relate(&env, 1, "precedes", 2);
     assert_eq!(out.code, 2, "{out:#?}");
-    assert!(out.stderr.contains("expected one of: blocks, blocked-by, related, duplicate-of"), "{out:#?}");
+    assert!(
+        out.stderr
+            .contains("expected one of: blocks, blocked-by, related, duplicate-of"),
+        "{out:#?}"
+    );
 }
 
 #[test]
@@ -129,25 +207,51 @@ fn unrelate_in_either_form() {
     let env = workspace(3);
     relate(&env, 1, "blocks", 2).assert_ok();
     relate(&env, 3, "related", 1).assert_ok();
-    let out = env.lcl(&["issue", "unrelate", "2", "blocked-by", "1"]).assert_ok().stdout.clone();
+    let out = env
+        .lcl(&["issue", "unrelate", "2", "blocked-by", "1"])
+        .assert_ok()
+        .stdout
+        .clone();
     assert_eq!(out, "Removed: DREA-2 blocked-by DREA-1\n");
-    let json = env.lcl(&["issue", "unrelate", "1", "related", "3", "--json"]).assert_ok().json();
-    assert_eq!(json, json!({"issue": "DREA-1", "kind": "related", "related": "DREA-3", "removed": true}));
+    let json = env
+        .lcl(&["issue", "unrelate", "1", "related", "3", "--json"])
+        .assert_ok()
+        .json();
+    assert_eq!(
+        json,
+        json!({"issue": "DREA-1", "kind": "related", "related": "DREA-3", "removed": true})
+    );
     assert_eq!(rows(&env), Vec::new());
-    assert_eq!(relations(&env, 1), json!({"blocks": [], "blocked_by": [], "related": [], "duplicate_of": null, "duplicates": []}));
+    assert_eq!(
+        relations(&env, 1),
+        json!({"blocks": [], "blocked_by": [], "related": [], "duplicate_of": null, "duplicates": []})
+    );
 
     // Nothing to remove: exit 1, naming it, and nothing changes.
     relate(&env, 1, "blocks", 2).assert_ok();
     let db = env.db_path();
     let before = dump(&db);
     for (args, named) in [
-        (vec!["issue", "unrelate", "2", "blocks", "1"], "DREA-2 blocks DREA-1"),
-        (vec!["issue", "unrelate", "1", "related", "2"], "DREA-1 related DREA-2"),
-        (vec!["issue", "unrelate", "1", "duplicate-of", "3"], "DREA-1 duplicate-of DREA-3"),
+        (
+            vec!["issue", "unrelate", "2", "blocks", "1"],
+            "DREA-2 blocks DREA-1",
+        ),
+        (
+            vec!["issue", "unrelate", "1", "related", "2"],
+            "DREA-1 related DREA-2",
+        ),
+        (
+            vec!["issue", "unrelate", "1", "duplicate-of", "3"],
+            "DREA-1 duplicate-of DREA-3",
+        ),
     ] {
         let out = env.lcl(&args);
         assert_eq!(out.code, 1, "{args:?}: {out:#?}");
-        assert!(out.stderr.contains(&format!("there is no relation {named}")), "{args:?}: {out:#?}");
+        assert!(
+            out.stderr
+                .contains(&format!("there is no relation {named}")),
+            "{args:?}: {out:#?}"
+        );
     }
     assert_eq!(dump(&db), before);
 }
@@ -166,15 +270,42 @@ fn refusals_exit_1_and_change_nothing() {
     let before = dump(&db);
 
     for (args, message) in [
-        (vec!["1", "blocks", "1"], "DREA-1 can't be related to itself"),
-        (vec!["1", "related", "#1"], "DREA-1 can't be related to itself"),
-        (vec!["DREA-1", "duplicate-of", "1"], "DREA-1 can't be related to itself"),
-        (vec!["2", "blocks", "1"], "DREA-2 blocking DREA-1 would make a cycle: DREA-2 blocks DREA-1 blocks DREA-2"),
-        (vec!["1", "blocked-by", "2"], "DREA-2 blocking DREA-1 would make a cycle: DREA-2 blocks DREA-1 blocks DREA-2"),
-        (vec!["3", "blocks", "1"], "DREA-3 blocking DREA-1 would make a cycle: DREA-3 blocks DREA-1 blocks DREA-2 blocks DREA-3"),
-        (vec!["5", "duplicate-of", "4"], "making DREA-5 a duplicate of DREA-4 would make a cycle: DREA-5 -> DREA-4 -> DREA-5"),
-        (vec!["8", "duplicate-of", "6"], "making DREA-8 a duplicate of DREA-6 would make a cycle: DREA-8 -> DREA-6 -> DREA-7 -> DREA-8"),
-        (vec!["4", "duplicate-of", "9"], "DREA-4 is already a duplicate of DREA-5; unrelate it first: lcl issue unrelate DREA-4 duplicate-of DREA-5"),
+        (
+            vec!["1", "blocks", "1"],
+            "DREA-1 can't be related to itself",
+        ),
+        (
+            vec!["1", "related", "#1"],
+            "DREA-1 can't be related to itself",
+        ),
+        (
+            vec!["DREA-1", "duplicate-of", "1"],
+            "DREA-1 can't be related to itself",
+        ),
+        (
+            vec!["2", "blocks", "1"],
+            "DREA-2 blocking DREA-1 would make a cycle: DREA-2 blocks DREA-1 blocks DREA-2",
+        ),
+        (
+            vec!["1", "blocked-by", "2"],
+            "DREA-2 blocking DREA-1 would make a cycle: DREA-2 blocks DREA-1 blocks DREA-2",
+        ),
+        (
+            vec!["3", "blocks", "1"],
+            "DREA-3 blocking DREA-1 would make a cycle: DREA-3 blocks DREA-1 blocks DREA-2 blocks DREA-3",
+        ),
+        (
+            vec!["5", "duplicate-of", "4"],
+            "making DREA-5 a duplicate of DREA-4 would make a cycle: DREA-5 -> DREA-4 -> DREA-5",
+        ),
+        (
+            vec!["8", "duplicate-of", "6"],
+            "making DREA-8 a duplicate of DREA-6 would make a cycle: DREA-8 -> DREA-6 -> DREA-7 -> DREA-8",
+        ),
+        (
+            vec!["4", "duplicate-of", "9"],
+            "DREA-4 is already a duplicate of DREA-5; unrelate it first: lcl issue unrelate DREA-4 duplicate-of DREA-5",
+        ),
     ] {
         let mut cmd = vec!["issue", "relate"];
         cmd.extend(&args);
@@ -237,9 +368,16 @@ fn deleting_an_issue_removes_its_relations() {
     env.lcl(&["issue", "delete", "1"]).assert_ok();
     // Related is stored smaller UUID first, which needn't be the smaller number.
     let left = rows(&env);
-    assert!(matches!(left.as_slice(), [(a, b, k)] if k == "related" && [*a.min(b), *a.max(b)] == [2, 3]), "{left:?}");
+    assert!(
+        matches!(left.as_slice(), [(a, b, k)] if k == "related" && [*a.min(b), *a.max(b)] == [2, 3]),
+        "{left:?}"
+    );
     for n in [4, 5, 6] {
-        assert_eq!(relations(&env, n), json!({"blocks": [], "blocked_by": [], "related": [], "duplicate_of": null, "duplicates": []}), "DREA-{n}");
+        assert_eq!(
+            relations(&env, n),
+            json!({"blocks": [], "blocked_by": [], "related": [], "duplicate_of": null, "duplicates": []}),
+            "DREA-{n}"
+        );
     }
     assert_eq!(ids(&relations(&env, 2)["related"]), ["DREA-3"]);
     assert!(foreign_key_violations(&env.db_path()).is_empty());
@@ -249,25 +387,48 @@ fn deleting_an_issue_removes_its_relations() {
 #[test]
 fn duplicate_of_sets_the_status_and_unrelate_keeps_it() {
     let env = workspace(2);
-    env.lcl(&["issue", "update", "1", "--status", "InProgress"]).assert_ok();
-    let out = relate(&env, 1, "duplicate-of", 2).assert_ok().stdout.clone();
+    env.lcl(&["issue", "update", "1", "--status", "InProgress"])
+        .assert_ok();
+    let out = relate(&env, 1, "duplicate-of", 2)
+        .assert_ok()
+        .stdout
+        .clone();
     assert_eq!(out, "DREA-1 duplicate-of DREA-2; DREA-1 is Duplicate\n");
-    let issue = env.lcl(&["issue", "show", "1", "--json"]).assert_ok().json()["issue"].clone();
+    let issue = env
+        .lcl(&["issue", "show", "1", "--json"])
+        .assert_ok()
+        .json()["issue"]
+        .clone();
     assert_eq!(issue["status"], "Duplicate");
     let canceled_at = issue["canceled_at"].as_i64().expect("canceled_at set");
     assert!(issue["started_at"].is_i64(), "{issue:#}");
 
-    env.lcl(&["issue", "unrelate", "1", "duplicate-of", "2"]).assert_ok();
-    let after = env.lcl(&["issue", "show", "1", "--json"]).assert_ok().json()["issue"].clone();
-    assert_eq!((&after["status"], after["canceled_at"].as_i64()), (&json!("Duplicate"), Some(canceled_at)));
+    env.lcl(&["issue", "unrelate", "1", "duplicate-of", "2"])
+        .assert_ok();
+    let after = env
+        .lcl(&["issue", "show", "1", "--json"])
+        .assert_ok()
+        .json()["issue"]
+        .clone();
+    assert_eq!(
+        (&after["status"], after["canceled_at"].as_i64()),
+        (&json!("Duplicate"), Some(canceled_at))
+    );
     assert_eq!(relations(&env, 1)["duplicate_of"], Value::Null);
 
-    let help = env.lcl(&["issue", "unrelate", "--help"]).assert_ok().stdout.clone();
-    assert!(help.contains("Statuses stay as they are: unrelating duplicate-of leaves A Duplicate."), "{help}");
+    let help = env
+        .lcl(&["issue", "unrelate", "--help"])
+        .assert_ok()
+        .stdout
+        .clone();
+    assert!(
+        help.contains("Statuses stay as they are: unrelating duplicate-of leaves A Duplicate."),
+        "{help}"
+    );
 }
 
-/// Blocked: at least one blocker that isn't Done, Canceled or Duplicate,
-/// read by the same rule as every status.
+/// Blocked: at least one blocker whose stored status is not Done, Canceled
+/// or Duplicate. The comparison is the stored text.
 #[test]
 fn the_blocked_filter() {
     let env = workspace(4);
@@ -276,15 +437,32 @@ fn the_blocked_filter() {
     assert_eq!(numbers(&listed(&env, &["--blocked"])), [2]);
     assert_eq!(numbers(&listed(&env, &["--unblocked"])), [4, 3, 1]);
 
-    env.lcl(&["issue", "update", "1", "--status", "Done"]).assert_ok();
-    assert_eq!(numbers(&listed(&env, &["--blocked"])), [2], "DREA-3 still blocks");
-    exec(&env.db_path(), "UPDATE issues SET status = 'done' WHERE number = 3");
-    assert_eq!(numbers(&listed(&env, &["--blocked"])), Vec::<i64>::new(), "a hand-edited 'done' blocker is Done");
-    assert_eq!(numbers(&listed(&env, &["--unblocked"])), [4, 3, 2, 1]);
+    env.lcl(&["issue", "update", "1", "--status", "Done"])
+        .assert_ok();
+    assert_eq!(
+        numbers(&listed(&env, &["--blocked"])),
+        [2],
+        "DREA-3 still blocks"
+    );
+    exec(
+        &env.db_path(),
+        "PRAGMA ignore_check_constraints = ON; UPDATE issues SET status = 'done' WHERE number = 3",
+    );
+    assert_eq!(
+        numbers(&listed(&env, &["--blocked"])),
+        [2],
+        "a hand-edited spelling is not the stored canonical Done, so it still blocks"
+    );
+    assert_eq!(numbers(&listed(&env, &["--unblocked"])), [4, 3, 1]);
     for status in ["Canceled", "Duplicate", "Todo"] {
-        env.lcl(&["issue", "update", "3", "--status", status]).assert_ok();
+        env.lcl(&["issue", "update", "3", "--status", status])
+            .assert_ok();
         let want: Vec<i64> = if status == "Todo" { vec![2] } else { vec![] };
-        assert_eq!(numbers(&listed(&env, &["--blocked"])), want, "blocker {status}");
+        assert_eq!(
+            numbers(&listed(&env, &["--blocked"])),
+            want,
+            "blocker {status}"
+        );
     }
 
     // With other filters and a limit: 10 issues behind one open blocker,
@@ -295,17 +473,30 @@ fn the_blocked_filter() {
     for i in 5..=14 {
         relate(&env, 15, "blocks", i).assert_ok();
         if i <= 9 {
-            env.lcl(&["issue", "update", &i.to_string(), "--status", "Todo"]).assert_ok();
+            env.lcl(&["issue", "update", &i.to_string(), "--status", "Todo"])
+                .assert_ok();
         }
     }
     let page = listed(&env, &["--blocked", "--status", "Todo", "--limit", "2"]);
     assert_eq!(numbers(&page), [9, 8]);
-    assert_eq!((&page["total"], &page["truncated"]), (&json!(5), &json!(true)));
+    assert_eq!(
+        (&page["total"], &page["truncated"]),
+        (&json!(5), &json!(true))
+    );
     // DREA-3 ended the loop above as Todo, with nothing blocking it.
     let page = listed(&env, &["--unblocked", "--status", "Todo"]);
     assert_eq!((numbers(&page), &page["total"]), (vec![3], &json!(1)));
     let page = listed(&env, &["--blocked", "--all"]);
-    assert_eq!((numbers(&page), &page["total"]), ((2..=14).rev().filter(|&n| n != 3 && n != 4).collect::<Vec<_>>(), &json!(11)));
+    assert_eq!(
+        (numbers(&page), &page["total"]),
+        (
+            (2..=14)
+                .rev()
+                .filter(|&n| n != 3 && n != 4)
+                .collect::<Vec<_>>(),
+            &json!(11)
+        )
+    );
 
     let out = env.lcl(&["issue", "list", "--blocked", "--unblocked"]);
     assert_eq!(out.code, 2, "{out:#?}");
@@ -330,12 +521,18 @@ fn racing_opposite_blocks_store_one() {
         codes.sort_unstable();
         assert_eq!(codes, [0, 1], "pair {p}: {one:#?} {two:#?}");
         let refused = if one.code == 1 { one } else { two };
-        assert!(refused.stderr.contains("would make a cycle"), "pair {p}: {refused:#?}");
+        assert!(
+            refused.stderr.contains("would make a cycle"),
+            "pair {p}: {refused:#?}"
+        );
     }
     let stored = rows(&env);
     for p in 0..PAIRS {
         let (a, b) = (2 * p + 1, 2 * p + 2);
-        let between = stored.iter().filter(|r| (r.0, r.1) == (a, b) || (r.0, r.1) == (b, a)).count();
+        let between = stored
+            .iter()
+            .filter(|r| (r.0, r.1) == (a, b) || (r.0, r.1) == (b, a))
+            .count();
         assert_eq!(between, 1, "pair {a}/{b}: {stored:?}");
     }
 }
@@ -352,7 +549,13 @@ fn concurrent_relates_all_land() {
         cmds.push(argv(&["issue", "relate", &a.to_string(), "related", "1"]));
     }
     for a in 17..=20 {
-        cmds.push(argv(&["issue", "relate", &a.to_string(), "duplicate-of", "1"]));
+        cmds.push(argv(&[
+            "issue",
+            "relate",
+            &a.to_string(),
+            "duplicate-of",
+            "1",
+        ]));
     }
     cmds.push(argv(&["issue", "relate", "21", "blocked-by", "1"]));
     assert_eq!(cmds.len(), 20);
@@ -363,6 +566,12 @@ fn concurrent_relates_all_land() {
     let one = relations(&env, 1);
     let blocked: Vec<String> = (2..=11).chain([21]).map(|n| format!("DREA-{n}")).collect();
     assert_eq!(ids(&one["blocks"]), blocked);
-    assert_eq!(ids(&one["related"]), (12..=16).map(|n| format!("DREA-{n}")).collect::<Vec<_>>());
-    assert_eq!(ids(&one["duplicates"]), (17..=20).map(|n| format!("DREA-{n}")).collect::<Vec<_>>());
+    assert_eq!(
+        ids(&one["related"]),
+        (12..=16).map(|n| format!("DREA-{n}")).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        ids(&one["duplicates"]),
+        (17..=20).map(|n| format!("DREA-{n}")).collect::<Vec<_>>()
+    );
 }

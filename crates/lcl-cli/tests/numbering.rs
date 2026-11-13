@@ -2,19 +2,27 @@
 
 mod common;
 
-use common::{user_version, Env, V0_FIXTURE};
+use common::{Env, V0_FIXTURE, user_version};
 use lcl_core::SCHEMA_VERSION;
 
 fn next_issue_number(db: &std::path::Path) -> String {
     let conn = rusqlite::Connection::open(db).expect("open db");
-    conn.query_row("SELECT value FROM meta WHERE key='next_issue_number'", [], |r| r.get(0)).expect("read mark")
+    conn.query_row(
+        "SELECT value FROM meta WHERE key='next_issue_number'",
+        [],
+        |r| r.get(0),
+    )
+    .expect("read mark")
 }
 
 #[test]
 fn deleted_numbers_are_never_reused() {
     let env = Env::new();
     env.lcl(&["init", "--key", "TEST"]).assert_ok();
-    assert_eq!([env.create("a"), env.create("b"), env.create("c")], [1, 2, 3]);
+    assert_eq!(
+        [env.create("a"), env.create("b"), env.create("c")],
+        [1, 2, 3]
+    );
 
     env.lcl(&["issue", "delete", "3"]).assert_ok();
     assert_eq!(env.create("d"), 4, "the deleted newest number was reused");
@@ -24,7 +32,11 @@ fn deleted_numbers_are_never_reused() {
     }
     let list = env.lcl(&["issue", "list", "--json"]).assert_ok().json();
     assert_eq!(list["issues"].as_array().map(Vec::len), Some(0), "{list:#}");
-    assert_eq!(env.create("e"), 5, "numbering restarted after every issue was deleted");
+    assert_eq!(
+        env.create("e"),
+        5,
+        "numbering restarted after every issue was deleted"
+    );
 }
 
 #[test]

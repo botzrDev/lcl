@@ -9,7 +9,7 @@
 
 mod common;
 
-use common::{exec, Env, Out};
+use common::{Env, Out, exec};
 use serde_json::json;
 use std::process::Stdio;
 use std::time::{Duration, Instant};
@@ -35,7 +35,11 @@ fn detached(env: &Env, args: &[&str]) -> Out {
         std::thread::sleep(Duration::from_millis(20));
     }
     let out = child.wait_with_output().expect("output");
-    Out { code: out.status.code().expect("exit code"), stdout: String::from_utf8_lossy(&out.stdout).into_owned(), stderr: String::from_utf8_lossy(&out.stderr).into_owned() }
+    Out {
+        code: out.status.code().expect("exit code"),
+        stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+    }
 }
 
 #[test]
@@ -43,11 +47,23 @@ fn a_database_error_ends_the_tui_with_it() {
     let env = Env::new();
     env.lcl(&["init", "w", "--key", "W"]).assert_ok();
     env.create("one");
-    exec(&env.db_path(), "PRAGMA ignore_check_constraints = ON; UPDATE issues SET status = 'Weird' WHERE number = 1;");
+    exec(
+        &env.db_path(),
+        "PRAGMA ignore_check_constraints = ON; UPDATE issues SET status = 'Weird' WHERE number = 1;",
+    );
     let message = "issue 1 has status \"Weird\", which this lcl doesn't know";
     let out = detached(&env, &["tui"]);
-    assert_eq!((out.code, out.stdout.as_str(), out.stderr.as_str()), (1, "", format!("Error: {message}\n").as_str()));
+    assert_eq!(
+        (out.code, out.stdout.as_str(), out.stderr.as_str()),
+        (1, "", format!("Error: {message}\n").as_str())
+    );
     let out = detached(&env, &["--json", "tui"]);
-    let want = format!("{}\n", json!({"error": {"kind": "schema", "message": message}}));
-    assert_eq!((out.code, out.stdout.as_str(), out.stderr.as_str()), (1, "", want.as_str()));
+    let want = format!(
+        "{}\n",
+        json!({"error": {"kind": "schema", "message": message}})
+    );
+    assert_eq!(
+        (out.code, out.stdout.as_str(), out.stderr.as_str()),
+        (1, "", want.as_str())
+    );
 }
