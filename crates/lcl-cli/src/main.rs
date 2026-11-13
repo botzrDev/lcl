@@ -424,7 +424,9 @@ enum IssueCmd {
         #[arg(allow_negative_numbers = true)] b: IssueRef,
     },
     /// Add a comment: BODY inline, or --body-file PATH. Exactly one.
+    // clap would print the group (BODY) before ID; the arguments parse ID first.
     #[command(group(ArgGroup::new("body_source").required(true).args(["body", "body_file"])))]
+    #[command(override_usage = "lcl issue comment [OPTIONS] <ID> <BODY|--body-file <PATH>>")]
     Comment {
         /// The issue: KEY-N, #N, N or its UUID.
         #[arg(allow_negative_numbers = true)] id: IssueRef,
@@ -661,7 +663,9 @@ enum CycleCmd {
 #[derive(Subcommand)]
 enum CommentCmd {
     /// Replace a comment's text: BODY inline, or --body-file PATH. Exactly one. Its author and date stay.
+    // As issue comment: ID comes first.
     #[command(group(ArgGroup::new("body_source").required(true).args(["body", "body_file"])))]
+    #[command(override_usage = "lcl comment edit [OPTIONS] <ID> <BODY|--body-file <PATH>>")]
     Edit {
         /// The comment's id (a UUID, ignoring case), as issue comments --json shows it.
         id: String,

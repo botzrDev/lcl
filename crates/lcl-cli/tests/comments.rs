@@ -182,3 +182,20 @@ fn search_follows_comment_edits_and_deletes() {
     assert_eq!((found("charlie"), found("delta"), found("echo")), (vec![], vec![], vec!["W-1".to_string()]));
     fts_integrity(&db, &["comments_fts"]);
 }
+
+/// The usage shows ID first, as the arguments parse. clap's own line put
+/// the body first, and following it, `issue comment 123 1` comments "1" on
+/// issue 123.
+#[test]
+fn comment_usage_puts_the_id_first() {
+    let env = Env::new();
+    for (sub, usage) in [
+        (["issue", "comment"], "Usage: lcl issue comment [OPTIONS] <ID> <BODY|--body-file <PATH>>"),
+        (["comment", "edit"], "Usage: lcl comment edit [OPTIONS] <ID> <BODY|--body-file <PATH>>"),
+    ] {
+        let missing = format!("error: the following required arguments were not provided:\n  <BODY|--body-file <PATH>>\n  <ID>\n\n{usage}\n\nFor more information, try '--help'.\n");
+        assert_eq!(trio(&env.lcl(&sub)), (2, "", missing.as_str()), "{sub:?}");
+        let help = env.lcl(&[sub[0], sub[1], "--help"]);
+        assert_eq!((help.code, help.stdout.lines().find(|l| l.starts_with("Usage:"))), (0, Some(usage)), "{sub:?}: {help:#?}");
+    }
+}
