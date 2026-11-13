@@ -16,8 +16,16 @@ use ratatui::widgets::*;
 use std::io::stdout;
 use std::time::Duration;
 
-const TITLE: &str = "lcl TUI  (q quit, j/k nav, r reload)";
 const HELP: &str = "j/k: move  r: reload  q: quit  1-7: filter status  0: all";
+
+/// One read of a workspace: its name and key (either may be empty) and
+/// every issue, in list order.
+#[derive(Debug, Clone, Default)]
+pub struct Snapshot {
+    pub workspace: String,
+    pub key: String,
+    pub issues: Vec<Issue>,
+}
 
 /// What the loop does after a key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,20 +36,20 @@ pub enum Action {
     Quit,
 }
 
-/// The issues as last read, the status filter, and the selected issue.
+/// The workspace as last read, the status filter, and the selected issue.
 ///
 /// The selection is the issue's UUID, not its row, so it stays on the same
 /// issue when a reload moves the rows. It is `None` exactly when the
 /// filtered list is empty; otherwise it names an issue in that list.
 pub struct App {
-    issues: Vec<Issue>,
+    snapshot: Snapshot,
     filter: Option<Status>,
     selected: Option<String>,
 }
 
 impl App {
-    pub fn new(issues: Vec<Issue>) -> App {
-        let mut app = App { issues, filter: None, selected: None };
+    pub fn new(snapshot: Snapshot) -> App {
+        let mut app = App { snapshot, filter: None, selected: None };
         app.select_row(0);
         app
     }
@@ -61,7 +69,7 @@ impl App {
 
     /// The issues the filter lets through, in list order.
     pub fn visible(&self) -> Vec<&Issue> {
-        self.issues.iter().filter(|i| self.filter.is_none_or(|s| i.status == s)).collect()
+        self.snapshot.issues.iter().filter(|i| self.filter.is_none_or(|s| i.status == s)).collect()
     }
 
     /// Handles one key. q and Ctrl-C quit, j/k (or the arrows) move within
@@ -92,23 +100,41 @@ impl App {
         }
     }
 
-    /// Takes a fresh read of the issues, keeping the filter and the selected
+    /// Takes a fresh read of the workspace, keeping the filter and the selected
     /// issue, whatever row it is on now. If that issue is no longer in the
     /// filtered list, the selection goes to the row it was on (else the last).
-    pub fn reloaded(&mut self, issues: Vec<Issue>) {
+    pub fn reloaded(&mut self, snapshot: Snapshot) {
         let row = self.row();
-        self.issues = issues;
+        self.snapshot = snapshot;
         if !self.visible().iter().any(|i| Some(&i.id) == self.selected.as_ref()) {
             self.select_row(row);
         }
     }
 
+    /// The header line: the workspace's name, with its key in brackets if it
+    /// has one; how many issues it has; and under a filter, how many of them
+    /// are listed and what the filter is. `demo (D) · 2 of 5 issues · status: Done`.
+    fn header(&self) -> String {
+        let mut out = self.snapshot.workspace.clone();
+        if !self.snapshot.key.is_empty() {
+            out.push_str(&format!(" ({})", self.snapshot.key));
+        }
+        let total = self.snapshot.issues.len();
+        let issues = if total == 1 { "issue" } else { "issues" };
+        match self.filter {
+            None => out.push_str(&format!(" · {total} {issues}")),
+            Some(status) => out.push_str(&format!(" · {} of {total} {issues} · status: {status}", self.visible().len())),
+        }
+        out
+    }
+
+    /// One line of header, the list, one line of keys.
     pub fn draw(&self, f: &mut Frame) {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(3), Constraint::Min(0), Constraint::Length(3)])
+            .constraints([Constraint::Length(1), Constraint::Min(0), Constraint::Length(1)])
             .split(f.area());
-        f.render_widget(Paragraph::new(TITLE).block(Block::default().borders(Borders::ALL).title("Linear-lite")), chunks[0]);
+        f.render_widget(Paragraph::new(self.header()).style(Style::default().add_modifier(Modifier::BOLD)), chunks[0]);
 
         let items: Vec<ListItem> = self
             .visible()
@@ -116,14 +142,13 @@ impl App {
             .map(|i| ListItem::new(format!("{} [{}] {} - {}", i.identifier, i.status, i.priority.label(), i.title)))
             .collect();
         let list = List::new(items)
-            .block(Block::default().borders(Borders::ALL).title("Issues"))
             .highlight_style(Style::default().bg(Color::DarkGray))
             .highlight_symbol(">> ");
         let mut state = ListState::default();
         state.select(Some(self.row()));
         f.render_stateful_widget(list, chunks[1], &mut state);
 
-        f.render_widget(Paragraph::new(HELP).block(Block::default().borders(Borders::ALL)), chunks[2]);
+        f.render_widget(Paragraph::new(HELP).style(Style::default().add_modifier(Modifier::DIM)), chunks[2]);
     }
 }
 
@@ -153,9 +178,13 @@ pub fn run(store: Store) -> Result<()> {
     })
 }
 
-/// Every issue, by number. Read-only.
-fn load(store: &Store) -> Result<Vec<Issue>> {
-    Ok(store.list_issues(&IssueFilter::default(), IssueSort::Number, Page::ALL)?.issues)
+/// The workspace's name and key, and every issue, by number. Read-only.
+fn load(store: &Store) -> Result<Snapshot> {
+    Ok(Snapshot {
+        workspace: store.get_meta("name")?.unwrap_or_default(),
+        key: store.get_meta("key")?.unwrap_or_default(),
+        issues: store.list_issues(&IssueFilter::default(), IssueSort::Number, Page::ALL)?.issues,
+    })
 }
 
 /// The next key event, or None if none comes within a quarter second.
@@ -173,7 +202,7 @@ fn next_key() -> Result<Option<KeyEvent>> {
 fn run_app<B: Backend>(
     terminal: &mut Terminal<B>,
     app: &mut App,
-    mut reload: impl FnMut() -> Result<Vec<Issue>>,
+    mut reload: impl FnMut() -> Result<Snapshot>,
     mut next_key: impl FnMut() -> Result<Option<KeyEvent>>,
 ) -> Result<()>
 where
@@ -240,9 +269,14 @@ mod tests {
         }
     }
 
+    /// Workspace "work" (key W) with these issues.
+    fn work(issues: Vec<Issue>) -> Snapshot {
+        Snapshot { workspace: "work".into(), key: "W".into(), issues }
+    }
+
     /// W-1 Done, W-2 Backlog, W-3 Done, W-4 Backlog, W-5 Backlog.
-    fn five() -> Vec<Issue> {
-        [Status::Done, Status::Backlog, Status::Done, Status::Backlog, Status::Backlog].into_iter().enumerate().map(|(n, s)| issue(n as i64 + 1, s)).collect()
+    fn five() -> Snapshot {
+        work([Status::Done, Status::Backlog, Status::Done, Status::Backlog, Status::Backlog].into_iter().enumerate().map(|(n, s)| issue(n as i64 + 1, s)).collect())
     }
 
     fn press(c: char) -> KeyEvent {
@@ -294,13 +328,13 @@ mod tests {
         assert_eq!(app.key(press('r')), Action::Reload);
         assert_eq!(selected(&app), "W-5");
         // W-5 is gone: the selection moves up to the last row left.
-        app.reloaded(five().into_iter().take(4).collect());
+        app.reloaded(work(five().issues.into_iter().take(4).collect()));
         assert_eq!((app.visible().len(), selected(&app)), (2, "W-4"));
     }
 
     /// Issues `numbers`, in that order, all Backlog.
-    fn numbered(numbers: &[i64]) -> Vec<Issue> {
-        numbers.iter().map(|n| issue(*n, Status::Backlog)).collect()
+    fn numbered(numbers: &[i64]) -> Snapshot {
+        work(numbers.iter().map(|n| issue(*n, Status::Backlog)).collect())
     }
 
     #[test]
@@ -318,7 +352,7 @@ mod tests {
         // That row is gone too: the last row.
         app.reloaded(numbered(&[6, 5]));
         assert_eq!((app.row(), selected(&app)), (1, "W-5"));
-        app.reloaded(vec![]);
+        app.reloaded(work(vec![]));
         assert_eq!((app.row(), &app.selected), (0, &None));
         // From an empty list, a reload selects the first row.
         app.reloaded(numbered(&[2, 1]));
@@ -331,7 +365,7 @@ mod tests {
     /// selected issue in the filtered list leaves it selected.
     #[test]
     fn the_selection_is_always_an_issue_in_the_filtered_list() {
-        let reloads = [vec![], five(), numbered(&[6, 5, 4, 3, 2, 1]), five().into_iter().skip(2).collect()];
+        let reloads = [work(vec![]), five(), numbered(&[6, 5, 4, 3, 2, 1]), work(five().issues.into_iter().skip(2).collect())];
         let keys = ['j', 'k', '1', '5', '7', '0'];
         let ops = keys.len() + reloads.len();
         let apply = |app: &mut App, op: usize| {
@@ -351,11 +385,11 @@ mod tests {
             }
         };
         let mut sequences = 0;
-        for start in [vec![], five(), numbered(&[1])] {
+        for start in [work(vec![]), five(), numbered(&[1])] {
             for len in 0..=5u32 {
                 for mut n in 0..ops.pow(len) {
                     let mut app = App::new(start.clone());
-                    assert_eq!(app.selected.is_none(), start.is_empty());
+                    assert_eq!(app.selected.is_none(), start.issues.is_empty());
                     for _ in 0..len {
                         apply(&mut app, n % ops);
                         n /= ops;
@@ -384,29 +418,81 @@ mod tests {
         (0..buf.area.height).map(|y| (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect::<String>()).collect()
     }
 
-    #[test]
-    fn a_frame_shows_the_title_and_the_filtered_rows() {
-        let mut app = App::new(five());
-        app.key(press('5'));
-        app.key(press('j'));
-        let mut terminal = Terminal::new(TestBackend::new(62, 10)).unwrap();
+    fn frame(app: &App, width: u16, height: u16) -> Vec<String> {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal.draw(|f| app.draw(f)).unwrap();
+        lines(&terminal)
+    }
+
+    #[test]
+    fn a_frame_is_the_header_the_rows_and_the_keys() {
+        let app = App::new(five());
         assert_eq!(
-            lines(&terminal),
+            frame(&app, 60, 8),
             [
-                "┌Linear-lite─────────────────────────────────────────────────┐",
-                "│lcl TUI  (q quit, j/k nav, r reload)                        │",
-                "└────────────────────────────────────────────────────────────┘",
-                "┌Issues──────────────────────────────────────────────────────┐",
-                "│   W-1 [Done] None - issue 1                                │",
-                "│>> W-3 [Done] None - issue 3                                │",
-                "└────────────────────────────────────────────────────────────┘",
-                "┌────────────────────────────────────────────────────────────┐",
-                "│j/k: move  r: reload  q: quit  1-7: filter status  0: all   │",
-                "└────────────────────────────────────────────────────────────┘",
+                "work (W) · 5 issues                                         ",
+                ">> W-1 [Done] None - issue 1                                ",
+                "   W-2 [Backlog] None - issue 2                             ",
+                "   W-3 [Done] None - issue 3                                ",
+                "   W-4 [Backlog] None - issue 4                             ",
+                "   W-5 [Backlog] None - issue 5                             ",
+                "                                                            ",
+                "j/k: move  r: reload  q: quit  1-7: filter status  0: all   ",
             ]
             .map(String::from)
         );
+    }
+
+    #[test]
+    fn under_a_filter_the_header_says_how_many_are_listed_and_why() {
+        let mut app = App::new(five());
+        app.key(press('5'));
+        app.key(press('j'));
+        assert_eq!(
+            frame(&app, 60, 4),
+            [
+                "work (W) · 2 of 5 issues · status: Done                     ",
+                "   W-1 [Done] None - issue 1                                ",
+                ">> W-3 [Done] None - issue 3                                ",
+                "j/k: move  r: reload  q: quit  1-7: filter status  0: all   ",
+            ]
+            .map(String::from)
+        );
+        // No issue has the status: the count is 0 and the list is empty.
+        app.key(press('3'));
+        assert_eq!(frame(&app, 60, 3)[..2], ["work (W) · 0 of 5 issues · status: InProgress               ", "                                                            "].map(String::from));
+        // 0 takes the filter, and its part of the header, away.
+        app.key(press('0'));
+        assert_eq!(frame(&app, 60, 3)[0], "work (W) · 5 issues                                         ");
+    }
+
+    #[test]
+    fn the_header_counts_one_issue_and_leaves_out_a_key_that_isn_t_there() {
+        let mut app = App::new(Snapshot { workspace: "solo".into(), key: String::new(), issues: vec![issue(1, Status::Todo)] });
+        assert_eq!(app.header(), "solo · 1 issue");
+        app.key(press('2'));
+        assert_eq!(app.header(), "solo · 1 of 1 issue · status: Todo");
+        // A reload brings the workspace's new name and count.
+        app.reloaded(work(vec![]));
+        assert_eq!(app.header(), "work (W) · 0 of 0 issues · status: Todo");
+    }
+
+    /// `load` on a real (in-memory) workspace: its name and key from meta,
+    /// and its issues, highest number first.
+    #[test]
+    fn load_reads_the_name_the_key_and_every_issue() {
+        let mut store = Store::open_in_memory().unwrap();
+        let empty = load(&store).unwrap();
+        assert_eq!((empty.workspace.as_str(), empty.key.as_str(), empty.issues.len()), ("", "", 0));
+        store.set_meta(&[("name", "demo"), ("key", "D")]).unwrap();
+        for title in ["one", "two"] {
+            let mut new = issue(0, Status::Todo);
+            (new.id, new.title) = (String::new(), title.into());
+            store.create_issue(new, &Default::default()).unwrap();
+        }
+        let snapshot = load(&store).unwrap();
+        let rows: Vec<(&str, &str)> = snapshot.issues.iter().map(|i| (i.identifier.as_str(), i.title.as_str())).collect();
+        assert_eq!((snapshot.workspace.as_str(), snapshot.key.as_str(), rows), ("demo", "D", vec![("D-2", "two"), ("D-1", "one")]));
     }
 
     /// Keys from a list, then an error if the loop asks for more.
