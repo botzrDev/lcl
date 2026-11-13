@@ -191,6 +191,11 @@ pub struct Issue {
     /// Label names. Read sorted (ignoring case); on write each must name a
     /// label, matched ignoring case.
     pub labels: Vec<String>,
+    /// The cycles it is in, by start date (no date last), then name. Derived
+    /// when the issue is read; set through `db::Placement`. Usually one; an
+    /// import can give several.
+    #[serde(default)]
+    pub cycles: Vec<CycleRef>,
     pub created_at: i64,
     pub updated_at: i64,
     pub completed_at: Option<i64>,
@@ -499,6 +504,21 @@ pub struct Cycle {
     pub created_at: i64,
 }
 
+/// A cycle as an issue names it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CycleRef {
+    pub id: String,
+    pub name: String,
+}
+
+/// A cycle and how many issues are in it, as `cycle list` shows it.
+#[derive(Debug, Clone, Serialize)]
+pub struct CycleListing {
+    #[serde(flatten)]
+    pub cycle: Cycle,
+    pub issues: i64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkspaceMeta {
     pub name: String,
@@ -571,7 +591,7 @@ mod tests {
             id: "id".into(), number: 1, identifier: String::new(), title: "t".into(), description: String::new(), status,
             priority: Priority::None, assignee: None, parent_id: None, parent_identifier: None,
             project_id: None, project: None, milestone_id: None, milestone: None, r#ref: None, creator: None, estimate: None, due_date: None,
-            labels: vec![], created_at: 1, updated_at: 1,
+            labels: vec![], cycles: vec![], created_at: 1, updated_at: 1,
             completed_at: completed, started_at: started, canceled_at: canceled,
         }
     }

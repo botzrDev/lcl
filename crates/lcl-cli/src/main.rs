@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use chrono::NaiveDate;
 use clap::parser::ValueSource;
 use clap::{ArgGroup, CommandFactory, FromArgMatches, Parser, Subcommand};
-use lcl_core::db::{AssigneeFilter, Change, IssueFilter, IssueSort, MilestoneUpdate, Page, Placement, ProjectFilter, ProjectUpdate, Store};
+use lcl_core::db::{AssigneeFilter, Change, CycleUpdate, IssueFilter, IssueSort, MilestoneUpdate, Page, Placement, ProjectFilter, ProjectUpdate, Store};
 use lcl_core::error::{ErrorKind, LclError};
 use lcl_core::models::*;
 use lcl_core::parse;
@@ -45,6 +45,9 @@ struct Cli {
     cmd: Commands,
 }
 
+// One value per run, parsed once: its size doesn't matter, and boxing
+// IssueCmd would only add derefs to every match on it.
+#[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
 enum Commands {
     /// Make a workspace in the current directory, at .lcl/data.sqlite, and
@@ -80,6 +83,11 @@ enum Commands {
         #[command(subcommand)]
         cmd: IssueCmd,
     },
+    /// Comments, by id: edit, delete. Add and list them with issue comment and issue comments.
+    Comment {
+        #[command(subcommand)]
+        cmd: CommentCmd,
+    },
     /// Docs in this workspace: create, list, show, update, delete.
     Doc {
         #[command(subcommand)]
@@ -90,7 +98,7 @@ enum Commands {
         #[command(subcommand)]
         cmd: LabelCmd,
     },
-    /// Cycles in this workspace: create, list.
+    /// Cycles in this workspace: create, list, update, delete.
     Cycle {
         #[command(subcommand)]
         cmd: CycleCmd,
@@ -276,6 +284,8 @@ enum IssueCmd {
         #[arg(long, value_name = "MILESTONE", value_parser = parse_milestone_name, conflicts_with = "no_milestone", requires = "project")] milestone: Option<String>,
         /// Give it no milestone (the default).
         #[arg(long)] no_milestone: bool,
+        /// The cycle to put it in, by name (trimmed, ignoring case) or id.
+        #[arg(long, value_name = "CYCLE", value_parser = parse_cycle_name)] cycle: Option<String>,
         /// The id it has elsewhere, as BZR-1532 for a Linear issue: on no
         /// other issue (ignoring case), and not shaped like a reference to one
         /// of this workspace's issues (N, #N, its KEY-N, a UUID).
@@ -307,6 +317,8 @@ enum IssueCmd {
         /// Only issues with this milestone, by name (ignoring case) or id: in
         /// the --project project if given, else in any project.
         #[arg(long, value_name = "MILESTONE", value_parser = parse_milestone_name)] milestone: Option<String>,
+        /// Only issues in this cycle, by name (trimmed, ignoring case) or id.
+        #[arg(long, value_name = "CYCLE", value_parser = parse_cycle_name)] cycle: Option<String>,
         /// number, created or updated (each newest first), or priority (Urgent first, None last).
         #[arg(long, value_name = "ORDER", default_value = "number")] sort: IssueSort,
         /// Show at most N issues.
@@ -370,6 +382,10 @@ enum IssueCmd {
         #[arg(long, value_name = "MILESTONE", value_parser = parse_milestone_name, conflicts_with = "no_milestone")] milestone: Option<String>,
         /// Take it off its milestone, leaving its project.
         #[arg(long)] no_milestone: bool,
+        /// Put it in this cycle, by name (trimmed, ignoring case) or id, and in no other.
+        #[arg(long, value_name = "CYCLE", value_parser = parse_cycle_name, conflicts_with = "no_cycle")] cycle: Option<String>,
+        /// Take it out of every cycle.
+        #[arg(long)] no_cycle: bool,
         /// Set the id it has elsewhere, as BZR-1532 (see issue create --ref).
         #[arg(long = "ref", value_name = "REF", value_parser = parse_ref, conflicts_with = "no_ref")] issue_ref: Option<String>,
         /// Remove its ref.
@@ -609,8 +625,8 @@ enum LabelCmd {
 enum CycleCmd {
     /// Create a cycle, with or without its dates.
     Create {
-        /// The cycle's name.
-        name: String,
+        /// The cycle's name, trimmed: no other cycle's, ignoring case.
+        #[arg(value_parser = parse_cycle_name)] name: String,
         /// Its first day, as YYYY-MM-DD.
         #[arg(long, value_parser = parse_date)]
         start: Option<NaiveDate>,
@@ -620,6 +636,45 @@ enum CycleCmd {
     },
     /// List cycles: id, name and dates, newest first.
     List,
+    /// Rename a cycle, or set or clear its dates. The end can't come before the start.
+    Update {
+        /// The cycle's name (trimmed, ignoring case) or id. A name several cycles have needs the id.
+        #[arg(value_name = "CYCLE", value_parser = parse_cycle_name)] cycle: String,
+        /// Its new name, trimmed: no other cycle's, ignoring case (its own in another case is fine).
+        #[arg(long, value_name = "NAME", value_parser = parse_cycle_name)] name: Option<String>,
+        /// Its first day, as YYYY-MM-DD.
+        #[arg(long, value_name = "DATE", value_parser = parse_date, conflicts_with = "no_start")] start: Option<NaiveDate>,
+        /// Clear its first day.
+        #[arg(long)] no_start: bool,
+        /// Its last day, as YYYY-MM-DD: not before its start.
+        #[arg(long, value_name = "DATE", value_parser = parse_date, conflicts_with = "no_end")] end: Option<NaiveDate>,
+        /// Clear its last day.
+        #[arg(long)] no_end: bool,
+    },
+    /// Delete a cycle. Refused while any issue is in it.
+    Delete {
+        /// The cycle's name (trimmed, ignoring case) or id. A name several cycles have needs the id.
+        #[arg(value_name = "CYCLE", value_parser = parse_cycle_name)] cycle: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum CommentCmd {
+    /// Replace a comment's text: BODY inline, or --body-file PATH. Exactly one. Its author and date stay.
+    #[command(group(ArgGroup::new("body_source").required(true).args(["body", "body_file"])))]
+    Edit {
+        /// The comment's id (a UUID, ignoring case), as issue comments --json shows it.
+        id: String,
+        /// The new text inline. For long text, use --body-file.
+        #[arg(value_parser = inline_body)] body: Option<String>,
+        /// Read the new text from PATH, or from stdin if PATH is `-`. Stored byte for byte.
+        #[arg(long, value_name = "PATH", value_parser = read_comment)] body_file: Option<String>,
+    },
+    /// Delete a comment.
+    Delete {
+        /// The comment's id (a UUID, ignoring case), as issue comments --json shows it.
+        id: String,
+    },
 }
 
 // The value rules live in lcl_core::parse, shared with `import`; these
@@ -636,6 +691,9 @@ fn parse_estimate(s: &str) -> std::result::Result<i64, String> {
     }
     Ok(n)
 }
+
+/// A cycle name or reference, trimmed; blank is refused.
+fn parse_cycle_name(s: &str) -> std::result::Result<String, String> { parse::cycle_name(s).map_err(|e| e.0) }
 
 /// `#rgb` or `#rrggbb`.
 fn parse_color(s: &str) -> std::result::Result<String, String> { parse::color(s).map_err(|e| e.0) }
@@ -886,6 +944,11 @@ fn validate(cli: &Cli) {
     {
         fail(&["cycle", "create"], format!("cycle end {end} is before its start {start}"));
     }
+    if let Commands::Cycle { cmd: CycleCmd::Update { start: Some(start), end: Some(end), .. } } = &cli.cmd
+        && end < start
+    {
+        fail(&["cycle", "update"], format!("cycle end {end} is before its start {start}"));
+    }
     // Names match ignoring ASCII case, as label lookups do.
     if let Commands::Issue { cmd: IssueCmd::Update { add_label, remove_label, .. } } = &cli.cmd
         && let Some(both) = add_label.iter().find(|a| remove_label.iter().any(|r| r.eq_ignore_ascii_case(a)))
@@ -915,13 +978,44 @@ fn project_hint<T>(r: lcl_core::error::Result<T>, flag: Option<&str>) -> Result<
 }
 
 /// Placement from an issue command's four flags (clap keeps each pair apart).
-fn placement(project: Option<String>, no_project: bool, milestone: Option<String>, no_milestone: bool) -> Placement {
-    let change = |set: Option<String>, clear: bool| match (set, clear) {
+/// A flag pair as a change: --X V sets, --no-X clears, neither keeps.
+fn change<T>(set: Option<T>, clear: bool) -> Change<T> {
+    match (set, clear) {
         (Some(v), _) => Change::Set(v),
         (None, true) => Change::Clear,
         (None, false) => Change::Keep,
-    };
-    Placement { project: change(project, no_project), milestone: change(milestone, no_milestone) }
+    }
+}
+
+fn placement(project: Option<String>, no_project: bool, milestone: Option<String>, no_milestone: bool, cycle: Option<String>, no_cycle: bool) -> Placement {
+    Placement { project: change(project, no_project), milestone: change(milestone, no_milestone), cycle: change(cycle, no_cycle) }
+}
+
+/// Epoch seconds as local time, YYYY-MM-DD HH:MM; the number itself if
+/// chrono can't represent it.
+fn local_time(at: i64) -> String {
+    match chrono::DateTime::from_timestamp(at, 0) {
+        Some(t) => t.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M").to_string(),
+        None => at.to_string(),
+    }
+}
+
+/// A comment as people read it: `AUTHOR · DATE` (with ` · ID` when
+/// `with_id`), then every line of its body indented two spaces.
+fn comment_text(c: &Comment, with_id: bool) -> String {
+    let mut out = format!("{} · {}", c.author.as_deref().unwrap_or("anon"), local_time(c.created_at));
+    if with_id {
+        out.push_str(&format!(" · {}", c.id));
+    }
+    for line in c.body.lines() {
+        out.push_str(&format!("\n  {line}"));
+    }
+    out
+}
+
+/// Comments for people: each as `comment_text`, a blank line between them.
+fn comments_text(comments: &[Comment], with_id: bool) -> String {
+    comments.iter().map(|c| comment_text(c, with_id)).collect::<Vec<_>>().join("\n\n")
 }
 
 /// "12 (Backlog 3, Done 9)": the total, then each non-zero status, in
@@ -1241,25 +1335,25 @@ fn run(cli: Cli) -> Result<()> {
             match cmd {
                 IssueCmd::Create {
                     title, description, description_file, status, priority, assignee, parent, label, estimate, due,
-                    project, no_project, milestone, no_milestone, issue_ref, author,
+                    project, no_project, milestone, no_milestone, cycle, issue_ref, author,
                 } => {
                     let description = description.or(description_file).unwrap_or_default();
                     let parent_id = parent.map(|p| store.resolve(&p)).transpose()?.map(|p| p.id);
                     let flag = project.clone();
-                    let place = placement(project, no_project, milestone, no_milestone);
+                    let place = placement(project, no_project, milestone, no_milestone, cycle, false);
                     let issue = project_hint(store.create_issue(Issue {
                         id: String::new(), number: 0, identifier: String::new(), title, description, status, priority,
                         assignee, parent_id, parent_identifier: None, project_id: None, project: None, milestone_id: None, milestone: None,
                         r#ref: issue_ref, creator: author.or_else(env_author), estimate, due_date: due.map(|d| d.to_string()), labels: label,
-                        created_at: 0, updated_at: 0, completed_at: None, started_at: None, canceled_at: None,
+                        cycles: vec![], created_at: 0, updated_at: 0, completed_at: None, started_at: None, canceled_at: None,
                     }, &place), flag.as_deref())?;
                     if cli.json { print_json(&issue)?; } else { outln!("Created {}", issue.identifier); }
                 }
-                IssueCmd::List { status, assignee, label, parent, blocked, unblocked, project, milestone, sort, limit, offset, all } => {
+                IssueCmd::List { status, assignee, label, parent, blocked, unblocked, project, milestone, cycle, sort, limit, offset, all } => {
                     let page = if all { Page::ALL } else { Page { limit: Some(limit), offset } };
                     let blocked = if blocked { Some(true) } else if unblocked { Some(false) } else { None };
                     let flag = match &project { Some(ProjectFilter::Is(p)) => Some(p.clone()), _ => None };
-                    let filter = IssueFilter { statuses: status, assignee, labels: label, parent, blocked, project, milestone };
+                    let filter = IssueFilter { statuses: status, assignee, labels: label, parent, blocked, project, milestone, cycle };
                     let list = project_hint(store.list_issues(&filter, sort, page), flag.as_deref())?;
                     if cli.json { print_json(&list)?; }
                     else {
@@ -1288,6 +1382,12 @@ fn run(cli: Cli) -> Result<()> {
                         if let Some(p) = &issue.parent_identifier { outln!("Parent: {p}"); }
                         if let Some(p) = &issue.project { outln!("Project: {p}"); }
                         if let Some(m) = &issue.milestone { outln!("Milestone: {m}"); }
+                        let cycles: Vec<&str> = issue.cycles.iter().map(|c| c.name.as_str()).collect();
+                        match cycles.as_slice() {
+                            [] => {}
+                            [one] => outln!("Cycle: {one}"),
+                            several => outln!("Cycles: {}", several.join(", ")),
+                        }
                         let line = |name: &str, others: &[RelatedIssue]| -> Result<()> {
                             if !others.is_empty() {
                                 let others: Vec<String> = others.iter().map(|o| format!("{} [{}]", o.identifier, o.status)).collect();
@@ -1306,15 +1406,14 @@ fn run(cli: Cli) -> Result<()> {
                             for c in &children { outln!("  {} {}", c.identifier, c.title); }
                         }
                         if !comments.is_empty() {
-                            outln!("\nComments:");
-                            for c in comments { outln!("  - {}: {}", c.author.as_deref().unwrap_or("anon"), c.body); }
+                            outln!("\nComments:\n{}", comments_text(&comments, false));
                         }
                     }
                 }
                 IssueCmd::Update {
                     id, title, description, description_file, status, priority, assignee, no_assignee, estimate, no_estimate, due, no_due,
                     label, add_label, remove_label, clear_labels, parent, no_parent, project, no_project, milestone, no_milestone,
-                    issue_ref, no_ref,
+                    cycle, no_cycle, issue_ref, no_ref,
                 } => {
                     // An unknown name is an error even when removing; a known
                     // label the issue doesn't have is a no-op.
@@ -1326,7 +1425,7 @@ fn run(cli: Cli) -> Result<()> {
                         (None, false) => None,
                     };
                     let flag = project.clone();
-                    let place = placement(project, no_project, milestone, no_milestone);
+                    let place = placement(project, no_project, milestone, no_milestone, cycle, no_cycle);
                     let (issue, cleared) = project_hint(store.update_issue(&id, &place, |i| {
                         if let Some(t) = title { i.title = t; }
                         if let Some(d) = description.or(description_file) { i.description = d; }
@@ -1378,10 +1477,24 @@ fn run(cli: Cli) -> Result<()> {
                     let issue = store.resolve(&id)?;
                     let comments = store.list_comments(&issue.id)?;
                     if cli.json { print_json(&comments)?; }
-                    else { for c in comments { outln!("[{}] {}: {}", c.created_at, c.author.as_deref().unwrap_or("anon"), c.body); } }
+                    else if !comments.is_empty() { outln!("{}", comments_text(&comments, true)); }
                 }
             }
         },
+        Commands::Comment { cmd } => {
+            let mut store = resolve_store(&cli.workspace)?;
+            match cmd {
+                CommentCmd::Edit { id, body, body_file } => {
+                    let body = body.or(body_file).expect("clap requires one of BODY and --body-file");
+                    let c = store.edit_comment(&id, body)?;
+                    if cli.json { print_json(&c)?; } else { outln!("Comment edited"); }
+                }
+                CommentCmd::Delete { id } => {
+                    let (c, issue) = store.delete_comment(&id)?;
+                    if cli.json { print_json(&serde_json::json!({"deleted": c.id, "issue": issue}))?; } else { outln!("Deleted comment {}", c.id); }
+                }
+            }
+        }
         Commands::Doc { cmd } => {
             let mut store = resolve_store(&cli.workspace)?;
             match cmd {
@@ -1444,11 +1557,20 @@ fn run(cli: Cli) -> Result<()> {
                     let cs = store.list_cycles()?;
                     if cli.json { print_json(&cs)?; }
                     else {
-                        for c in cs {
+                        for CycleListing { cycle: c, .. } in cs {
                             let (start, end) = (c.starts_at.as_deref().unwrap_or("?"), c.ends_at.as_deref().unwrap_or("?"));
                             outln!("{}\t{}\t{start}..{end}", c.id, c.name);
                         }
                     }
+                }
+                CycleCmd::Update { cycle, name, start, no_start, end, no_end } => {
+                    let u = CycleUpdate { name, starts_at: change(start.map(|d| d.to_string()), no_start), ends_at: change(end.map(|d| d.to_string()), no_end) };
+                    let c = store.update_cycle(&cycle, &u)?;
+                    if cli.json { print_json(&c)?; } else { outln!("Updated cycle {:?}", c.name); }
+                }
+                CycleCmd::Delete { cycle } => {
+                    let c = store.delete_cycle(&cycle)?;
+                    if cli.json { print_json(&serde_json::json!({"deleted": c.name, "id": c.id}))?; } else { outln!("Deleted cycle {:?}", c.name); }
                 }
             }
         },

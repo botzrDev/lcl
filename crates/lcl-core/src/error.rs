@@ -150,6 +150,26 @@ pub enum LclError {
     /// `issue list --project none --milestone M`: nothing can match.
     #[error("--milestone {0:?} can't be used with --project none: issues in no project have no milestone")]
     MilestoneInNoProject(String),
+    /// A comment id (matched ignoring case) that names no comment.
+    #[error("comment {0} not found")]
+    CommentNotFound(String),
+    /// A cycle name taken, comparing both trimmed and ignoring case.
+    /// `existing` is its stored spelling.
+    #[error("cycle {name:?} already exists{}", if name == existing { String::new() } else { format!(" (as {existing:?})") })]
+    CycleExists { name: String, existing: String },
+    /// A cycle name several cycles have. `ids` are theirs, oldest first.
+    #[error("cycle {name:?} names {} cycles: {}; give one by its id", ids.len(), ids.join(", "))]
+    CycleAmbiguous { name: String, ids: Vec<String> },
+    /// No cycle with this name or id.
+    #[error("cycle {0:?} not found")]
+    CycleNotFound(String),
+    /// `cycle delete` of a cycle that issues are in.
+    #[error("cycle {name:?} has {}; move {} to another cycle or none first", counted(&[(*issues, "issue")]), them(*issues))]
+    CycleInUse { name: String, issues: i64 },
+    /// `cycle update` leaving the end before the start, one of them the
+    /// stored date. (Both typed is a usage error, as on create.)
+    #[error("cycle {name:?} would end {end}, before its start {start}")]
+    CycleEndBeforeStart { name: String, start: String, end: String },
     #[error("the search query is empty")]
     EmptyQuery,
     /// Every word lacks token characters (`--`, `*`, a lone `"`).
@@ -211,7 +231,9 @@ impl LclError {
             | LclError::NoWorkspace
             | LclError::ProjectNotFound { .. }
             | LclError::MilestoneNotFound { .. }
-            | LclError::UnknownLabel(_) => NotFound,
+            | LclError::UnknownLabel(_)
+            | LclError::CommentNotFound(_)
+            | LclError::CycleNotFound(_) => NotFound,
             LclError::RefTaken { .. }
             | LclError::SelfParent(_)
             | LclError::ParentCycle { .. }
@@ -239,7 +261,11 @@ impl LclError {
             | LclError::MilestoneInUse { .. }
             | LclError::MilestoneElsewhere { .. }
             | LclError::MilestoneAmbiguous { .. }
-            | LclError::MilestoneWithoutProject(_) => Conflict,
+            | LclError::MilestoneWithoutProject(_)
+            | LclError::CycleExists { .. }
+            | LclError::CycleAmbiguous { .. }
+            | LclError::CycleInUse { .. }
+            | LclError::CycleEndBeforeStart { .. } => Conflict,
             LclError::WrongWorkspace { .. }
             | LclError::RefLooksOwn(_)
             | LclError::ImportLine { .. }

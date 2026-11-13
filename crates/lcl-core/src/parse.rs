@@ -56,6 +56,11 @@ pub fn milestone_name(s: &str) -> Result<String, InvalidValue> {
     non_blank(s, "a milestone name can't be empty")
 }
 
+/// A cycle name or reference, trimmed; blank is refused.
+pub fn cycle_name(s: &str) -> Result<String, InvalidValue> {
+    non_blank(s, "a cycle name can't be empty")
+}
+
 /// An assignee, trimmed; blank is refused. Unassigning is its own flag.
 pub fn assignee(s: &str) -> Result<String, InvalidValue> {
     non_blank(s, "an assignee can't be empty; to unassign, use `issue update --no-assignee`")

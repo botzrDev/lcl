@@ -331,7 +331,7 @@ fn comments_read_oldest_first_then_in_the_order_added() {
         assert_eq!(bodies(&env.lcl(&["issue", "show", &n.to_string(), "--json"]).assert_ok().json()["comments"]), want, "issue show {n}");
     }
     let human = env.lcl(&["issue", "show", "2"]).assert_ok().stdout.clone();
-    let at: Vec<usize> = ["c1", "c2", "c3"].iter().map(|b| human.find(&format!(": {b}\n")).unwrap_or_else(|| panic!("{b}: {human}"))).collect();
+    let at: Vec<usize> = ["c1", "c2", "c3"].iter().map(|b| human.find(&format!("\n  {b}\n")).unwrap_or_else(|| panic!("{b}: {human}"))).collect();
     assert!(at[0] < at[1] && at[1] < at[2], "{human}");
 }
 

@@ -71,6 +71,9 @@ pub struct IssueFilter {
     /// Only issues with this milestone (name or id), looked up in the
     /// `project` filter's project when there is one, else in the workspace.
     pub milestone: Option<String>,
+    /// Only issues in this cycle (name or id; see `resolve_cycle`). An
+    /// unknown cycle is an error, not an empty list.
+    pub cycle: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -93,11 +96,21 @@ pub enum Change<T> {
 /// Where `create_issue` and `update_issue` put an issue. The project and the
 /// milestone are given by name (ignoring ASCII case) or id, and resolved
 /// inside the write transaction. A milestone is looked up in the issue's
-/// resulting project: the one given, or the one it has.
+/// resulting project: the one given, or the one it has. A cycle set is the
+/// only one the issue is then in; cleared, it is in none.
 #[derive(Debug, Clone, Default)]
 pub struct Placement {
     pub project: Change<String>,
     pub milestone: Change<String>,
+    pub cycle: Change<String>,
+}
+
+/// `update_cycle`'s changes; None or Keep leaves a field alone.
+#[derive(Debug, Clone, Default)]
+pub struct CycleUpdate {
+    pub name: Option<String>,
+    pub starts_at: Change<String>,
+    pub ends_at: Change<String>,
 }
 
 /// A milestone `update_issue` took off an issue because the issue left the
@@ -344,6 +357,7 @@ impl Store {
                 params![issue.id, issue.number, issue.title, issue.description, status, priority, issue.assignee, issue.parent_id, issue.estimate, issue.due_date, issue.created_at, issue.updated_at, issue.completed_at, issue.started_at, issue.canceled_at, issue.project_id, issue.milestone_id, issue.r#ref, issue.creator],
             )?;
             set_labels(tx, &issue.id, &issue.labels)?;
+            place_cycle(tx, &issue.id, &placement.cycle)?;
             put_meta(tx, NEXT_ISSUE_NUMBER, &next.max(issue.number + 1).to_string())?;
             reread(tx, &key, &issue.id)
         })
@@ -384,6 +398,11 @@ impl Store {
                 let label = label_by_name(conn, name)?.ok_or_else(|| LclError::UnknownLabel(name.clone()))?;
                 conds.push("EXISTS (SELECT 1 FROM issue_labels il WHERE il.issue_id = i.id AND il.label_id = ?)".into());
                 args.push(Value::Text(label.id));
+            }
+            if let Some(c) = &filter.cycle {
+                let cycle = resolve_cycle(conn, c)?;
+                conds.push("EXISTS (SELECT 1 FROM issue_cycles ic WHERE ic.issue_id = i.id AND ic.cycle_id = ?)".into());
+                args.push(Value::Text(cycle.id));
             }
             if let Some(parent) = &filter.parent {
                 conds.push("i.parent_id = ?".into());
@@ -429,6 +448,7 @@ impl Store {
                 issues.push(row_to_issue(r, &key)?);
             }
             attach_labels(conn, &mut issues)?;
+            attach_cycles(conn, &mut issues)?;
 
             let total = usize::try_from(total).map_err(|_| LclError::Msg(format!("count(*) returned {total}")))?;
             let truncated = page.offset as usize + issues.len() < total;
@@ -464,6 +484,7 @@ impl Store {
                 params![issue.title, issue.description, status, priority, issue.assignee, issue.parent_id, issue.estimate, issue.due_date, issue.updated_at, issue.completed_at, issue.started_at, issue.canceled_at, issue.project_id, issue.milestone_id, issue.r#ref, issue.id],
             )?;
             set_labels(tx, &issue.id, &issue.labels)?;
+            place_cycle(tx, &issue.id, &placement.cycle)?;
             Ok((reread(tx, &key, &issue.id)?, cleared))
         })
     }
@@ -751,6 +772,29 @@ impl Store {
             Ok(c)
         })
     }
+    /// Replaces the comment's body; its id, issue, author and created_at
+    /// stay, and so does the issue's updated_at (as when a comment is added).
+    /// The search index follows through the comments_au trigger.
+    pub fn edit_comment(&mut self, id: &str, body: String) -> Result<Comment> {
+        self.write(|tx| {
+            let mut c = find_comment(tx, id)?;
+            one_comment_row(tx.execute("UPDATE comments SET body=?1 WHERE id=?2", params![body, c.id])?, &c.id)?;
+            c.body = body;
+            Ok(c)
+        })
+    }
+    /// Deletes the comment, leaving the issue's updated_at alone, and returns
+    /// it with its issue's `KEY-N` (None if that issue is gone). The search
+    /// index follows through the comments_ad trigger.
+    pub fn delete_comment(&mut self, id: &str) -> Result<(Comment, Option<String>)> {
+        self.write(|tx| {
+            let c = find_comment(tx, id)?;
+            let key = read_key(tx)?;
+            let number: Option<i64> = tx.query_row("SELECT number FROM issues WHERE id=?1", params![c.issue_id], |r| r.get(0)).optional()?;
+            one_comment_row(tx.execute("DELETE FROM comments WHERE id=?1", params![c.id])?, &c.id)?;
+            Ok((c, number.map(|n| identifier(&key, n))))
+        })
+    }
     pub fn list_comments(&self, issue_id: &str) -> Result<Vec<Comment>> {
         // Oldest first; same-second comments in the order they were added.
         let mut stmt = self.conn.prepare("SELECT id,issue_id,body,author,created_at FROM comments WHERE issue_id=?1 ORDER BY created_at, rowid")?;
@@ -810,14 +854,58 @@ impl Store {
         if c.id.is_empty() { c.id = uuid::Uuid::new_v4().to_string(); }
         if c.created_at == 0 { c.created_at = crate::models::now(); }
         self.write(|tx| {
+            // No unique index (names stored twice before this check stay):
+            // the check and the insert share the write lock instead.
+            check_cycle_name(tx, &c.name, None)?;
             tx.execute("INSERT INTO cycles(id,name,starts_at,ends_at,created_at) VALUES(?1,?2,?3,?4,?5)", params![c.id, c.name, c.starts_at, c.ends_at, c.created_at])?;
             Ok(c)
         })
     }
-    pub fn list_cycles(&self) -> Result<Vec<Cycle>> {
-        let mut stmt = self.conn.prepare("SELECT id,name,starts_at,ends_at,created_at FROM cycles ORDER BY created_at DESC")?;
-        let rows = stmt.query_map([], |r| Ok(Cycle { id: r.get(0)?, name: r.get(1)?, starts_at: r.get(2)?, ends_at: r.get(3)?, created_at: r.get(4)? }))?;
+    /// Every cycle with how many issues are in it, newest first.
+    pub fn list_cycles(&self) -> Result<Vec<CycleListing>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT c.id,c.name,c.starts_at,c.ends_at,c.created_at,(SELECT count(*) FROM issue_cycles ic WHERE ic.cycle_id = c.id) FROM cycles c ORDER BY c.created_at DESC",
+        )?;
+        let rows = stmt.query_map([], |r| Ok(CycleListing { cycle: row_to_cycle(r)?, issues: r.get(5)? }))?;
         Ok(rows.collect::<std::result::Result<Vec<_>,_>>()?)
+    }
+    /// Renames the cycle (a name no other cycle has) and sets or clears its
+    /// dates. The end may not come before the start, as they will be stored.
+    pub fn update_cycle(&mut self, r: &str, u: &CycleUpdate) -> Result<Cycle> {
+        self.write(|tx| {
+            let mut c = resolve_cycle(tx, r)?;
+            if let Some(name) = &u.name {
+                check_cycle_name(tx, name, Some(&c.id))?;
+                c.name = name.clone();
+            }
+            for (date, change) in [(&mut c.starts_at, &u.starts_at), (&mut c.ends_at, &u.ends_at)] {
+                match change {
+                    Change::Keep => {}
+                    Change::Clear => *date = None,
+                    Change::Set(d) => *date = Some(d.clone()),
+                }
+            }
+            if let (Some(start), Some(end)) = (&c.starts_at, &c.ends_at)
+                && let (Ok(s), Ok(e)) = (crate::parse::date(start), crate::parse::date(end))
+                && e < s
+            {
+                return Err(LclError::CycleEndBeforeStart { name: c.name.clone(), start: start.clone(), end: end.clone() });
+            }
+            tx.execute("UPDATE cycles SET name=?1, starts_at=?2, ends_at=?3 WHERE id=?4", params![c.name, c.starts_at, c.ends_at, c.id])?;
+            Ok(c)
+        })
+    }
+    /// Deletes the cycle. Refused while any issue is in it.
+    pub fn delete_cycle(&mut self, r: &str) -> Result<Cycle> {
+        self.write(|tx| {
+            let c = resolve_cycle(tx, r)?;
+            let issues: i64 = tx.query_row("SELECT count(*) FROM issue_cycles WHERE cycle_id=?1", params![c.id], |r| r.get(0))?;
+            if issues > 0 {
+                return Err(LclError::CycleInUse { name: c.name, issues });
+            }
+            tx.execute("DELETE FROM cycles WHERE id=?1", params![c.id])?;
+            Ok(c)
+        })
     }
 
     // ----- search -----
@@ -1426,6 +1514,7 @@ fn fetch_issues(conn: &Connection, ids: &[String]) -> Result<Vec<Issue>> {
     }
     let mut out: Vec<Issue> = ids.iter().filter_map(|id| by_id.remove(id)).collect();
     attach_labels(conn, &mut out)?;
+    attach_cycles(conn, &mut out)?;
     Ok(out)
 }
 
@@ -1437,6 +1526,7 @@ fn fetch_issue_by(conn: &Connection, key: &str, col: &str, val: &dyn ToSql) -> R
     let Some(r) = rows.next()? else { return Ok(None) };
     let mut issue = [row_to_issue(r, key)?];
     attach_labels(conn, &mut issue)?;
+    attach_cycles(conn, &mut issue)?;
     let [issue] = issue;
     Ok(Some(issue))
 }
@@ -1461,6 +1551,103 @@ fn attach_labels(conn: &Connection, issues: &mut [Issue]) -> Result<()> {
         issue.labels = by_issue.get(&issue.id).cloned().unwrap_or_default();
     }
     Ok(())
+}
+
+/// Fills in every issue's cycles, by start date (no date last), then name,
+/// with one query however many issues there are.
+fn attach_cycles(conn: &Connection, issues: &mut [Issue]) -> Result<()> {
+    if issues.is_empty() {
+        return Ok(());
+    }
+    let ids: Vec<&str> = issues.iter().map(|i| i.id.as_str()).collect();
+    let mut stmt = conn.prepare(
+        "SELECT ic.issue_id, c.id, c.name FROM issue_cycles ic JOIN cycles c ON c.id = ic.cycle_id
+         WHERE ic.issue_id IN (SELECT value FROM json_each(?1))
+         ORDER BY c.starts_at IS NULL, c.starts_at, c.name COLLATE NOCASE, c.name, c.id",
+    )?;
+    let mut by_issue: HashMap<String, Vec<CycleRef>> = HashMap::new();
+    for row in stmt.query_map(params![json_array(&ids)?], |r| Ok((r.get::<_, String>(0)?, CycleRef { id: r.get(1)?, name: r.get(2)? })))? {
+        let (id, cycle) = row?;
+        by_issue.entry(id).or_default().push(cycle);
+    }
+    for issue in issues {
+        issue.cycles = by_issue.remove(&issue.id).unwrap_or_default();
+    }
+    Ok(())
+}
+
+/// Puts the issue in exactly the cycle `c` names (Set), in none (Clear), or
+/// leaves its cycles as they are (Keep).
+fn place_cycle(conn: &Connection, issue_id: &str, c: &Change<String>) -> Result<()> {
+    let cycle = match c {
+        Change::Keep => return Ok(()),
+        Change::Clear => None,
+        Change::Set(r) => Some(resolve_cycle(conn, r)?),
+    };
+    conn.execute("DELETE FROM issue_cycles WHERE issue_id=?1", params![issue_id])?;
+    if let Some(cycle) = cycle {
+        conn.execute("INSERT INTO issue_cycles(issue_id,cycle_id) VALUES(?1,?2)", params![issue_id, cycle.id])?;
+    }
+    Ok(())
+}
+
+fn row_to_cycle(r: &rusqlite::Row<'_>) -> rusqlite::Result<Cycle> {
+    Ok(Cycle { id: r.get(0)?, name: r.get(1)?, starts_at: r.get(2)?, ends_at: r.get(3)?, created_at: r.get(4)? })
+}
+
+/// Every cycle, oldest first.
+fn all_cycles(conn: &Connection) -> Result<Vec<Cycle>> {
+    let mut stmt = conn.prepare("SELECT id,name,starts_at,ends_at,created_at FROM cycles ORDER BY created_at, id")?;
+    let rows = stmt.query_map([], row_to_cycle)?;
+    Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+}
+
+/// Whether a stored cycle name is `name`: both trimmed, ignoring ASCII
+/// case. Names aren't rewritten, and some have spaces around them (the v10
+/// repair's), so a cycle is reached by the name it shows.
+fn same_cycle_name(stored: &str, name: &str) -> bool {
+    stored.trim().eq_ignore_ascii_case(name.trim())
+}
+
+/// The cycle `r` names: its id (ignoring case), else its name (see
+/// `same_cycle_name`). A name several cycles have is refused, with their ids.
+fn resolve_cycle(conn: &Connection, r: &str) -> Result<Cycle> {
+    let all = all_cycles(conn)?;
+    if let Some(c) = all.iter().find(|c| c.id.eq_ignore_ascii_case(r)) {
+        return Ok(c.clone());
+    }
+    let mut named: Vec<Cycle> = all.into_iter().filter(|c| same_cycle_name(&c.name, r)).collect();
+    match named.len() {
+        0 => Err(LclError::CycleNotFound(r.to_string())),
+        1 => Ok(named.remove(0)),
+        _ => Err(LclError::CycleAmbiguous { name: r.to_string(), ids: named.into_iter().map(|c| c.id).collect() }),
+    }
+}
+
+/// Refuses `name` if a cycle other than `except` has it (see `same_cycle_name`).
+fn check_cycle_name(conn: &Connection, name: &str, except: Option<&str>) -> Result<()> {
+    match all_cycles(conn)?.into_iter().find(|c| Some(c.id.as_str()) != except && same_cycle_name(&c.name, name)) {
+        Some(c) => Err(LclError::CycleExists { name: name.to_string(), existing: c.name }),
+        None => Ok(()),
+    }
+}
+
+/// An edit or delete of the comment `find_comment` found, in the same
+/// transaction, changes exactly its row; anything else is a bug, and an
+/// error rather than a success that changed nothing.
+fn one_comment_row(changed: usize, id: &str) -> Result<()> {
+    if changed == 1 { Ok(()) } else { Err(LclError::Msg(format!("comment {id}: changed {changed} rows, not 1"))) }
+}
+
+/// The comment with this id, ignoring case (an exact match first).
+fn find_comment(conn: &Connection, id: &str) -> Result<Comment> {
+    conn.query_row(
+        "SELECT id,issue_id,body,author,created_at FROM comments WHERE id = ?1 COLLATE NOCASE ORDER BY id = ?1 DESC, rowid LIMIT 1",
+        params![id],
+        |r| Ok(Comment { id: r.get(0)?, issue_id: r.get(1)?, body: r.get(2)?, author: r.get(3)?, created_at: r.get(4)? }),
+    )
+    .optional()?
+    .ok_or_else(|| LclError::CommentNotFound(id.to_string()))
 }
 
 /// `items` as a JSON array, for `json_each(?)`: one parameter however many
@@ -1514,6 +1701,7 @@ fn row_to_issue(r: &rusqlite::Row, key: &str) -> Result<Issue> {
         estimate: r.get(8)?,
         due_date: r.get(9)?,
         labels: vec![],
+        cycles: vec![],
         created_at: r.get(10)?,
         updated_at: r.get(11)?,
         completed_at: r.get(12)?,

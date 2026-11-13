@@ -143,7 +143,10 @@ impl Env {
             // An exported LCL_AUTHOR must not name the tests' creators and
             // comment authors either. USER is left as it is; a test that
             // checks an author sets or removes it.
-            .env_remove("LCL_AUTHOR");
+            .env_remove("LCL_AUTHOR")
+            // Human output shows timestamps in local time; tests read them
+            // in UTC unless they set TZ themselves.
+            .env("TZ", "UTC");
         cmd
     }
 
