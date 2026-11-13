@@ -40,7 +40,7 @@ pub(crate) fn use_wal(conn: &Connection) -> Result<()> {
 /// The `meta` key holding the next issue number to hand out (seeded by
 /// migration 2; the name must match it). It only ever grows: deleting an issue
 /// never lowers it, so no number is handed out twice.
-const NEXT_ISSUE_NUMBER: &str = "next_issue_number";
+pub(crate) const NEXT_ISSUE_NUMBER: &str = "next_issue_number";
 
 pub struct Store {
     pub conn: Connection,
@@ -237,7 +237,7 @@ impl Store {
     /// can change between its reads and its writes. Concurrent writers queue on
     /// the lock for up to BUSY_TIMEOUT instead of failing. An error drops the
     /// transaction, which rolls all of it back.
-    fn write<T>(&mut self, f: impl FnOnce(&Transaction<'_>) -> Result<T>) -> Result<T> {
+    pub(crate) fn write<T>(&mut self, f: impl FnOnce(&Transaction<'_>) -> Result<T>) -> Result<T> {
         let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let out = f(&tx)?;
         tx.commit()?;
@@ -248,7 +248,7 @@ impl Store {
     /// mode every query in it reads the same snapshot, so a count and the
     /// page it counts agree even while another process writes. Takes no
     /// write lock.
-    fn read<T>(&self, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
+    pub(crate) fn read<T>(&self, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
         let tx = self.conn.unchecked_transaction()?;
         let out = f(&tx)?;
         tx.commit()?;
@@ -749,12 +749,14 @@ impl Store {
     }
 
     // ----- docs -----
+    /// Adds the doc. A parent must be an existing doc (see `check_doc_parent`).
     pub fn create_doc(&mut self, mut d: Doc) -> Result<Doc> {
         if d.id.is_empty() { d.id = uuid::Uuid::new_v4().to_string(); }
         let now = crate::models::now();
         if d.created_at == 0 { d.created_at = now; }
         if d.updated_at == 0 { d.updated_at = now; }
         self.write(|tx| {
+            if let Some(p) = &d.parent_id { d.parent_id = Some(check_doc_parent(tx, None, p)?); }
             tx.execute("INSERT INTO docs(id,title,content,parent_id,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6)", params![d.id, d.title, d.content, d.parent_id, d.created_at, d.updated_at])?;
             Ok(d)
         })
@@ -767,13 +769,20 @@ impl Store {
         let rows = stmt.query_map([], |r| Ok(Doc { id: r.get(0)?, title: r.get(1)?, content: r.get(2)?, parent_id: r.get(3)?, created_at: r.get(4)?, updated_at: r.get(5)? }))?;
         Ok(rows.collect::<std::result::Result<Vec<_>,_>>()?)
     }
-    pub fn update_doc(&mut self, id: &str, title: Option<String>, content: Option<String>) -> Result<Doc> {
+    /// Changes what is given. A new parent is checked as on create, and may
+    /// not be the doc itself or below it.
+    pub fn update_doc(&mut self, id: &str, title: Option<String>, content: Option<String>, parent: Change<String>) -> Result<Doc> {
         self.write(|tx| {
             let mut d = read_doc(tx, id)?.ok_or_else(|| LclError::NotFound(id.to_string()))?;
             if let Some(t) = title { d.title = t; }
             if let Some(c) = content { d.content = c; }
+            match parent {
+                Change::Keep => {}
+                Change::Clear => d.parent_id = None,
+                Change::Set(p) => d.parent_id = Some(check_doc_parent(tx, Some(&d.id), &p)?),
+            }
             d.updated_at = crate::models::now();
-            tx.execute("UPDATE docs SET title=?1,content=?2,updated_at=?3 WHERE id=?4", params![d.title, d.content, d.updated_at, d.id])?;
+            tx.execute("UPDATE docs SET title=?1,content=?2,parent_id=?3,updated_at=?4 WHERE id=?5", params![d.title, d.content, d.parent_id, d.updated_at, d.id])?;
             Ok(d)
         })
     }
@@ -926,13 +935,13 @@ impl Store {
 // They take &Connection; a &Transaction derefs to one, so a write can make its
 // reads inside its own transaction.
 
-fn read_meta(conn: &Connection, key: &str) -> Result<Option<String>> {
+pub(crate) fn read_meta(conn: &Connection, key: &str) -> Result<Option<String>> {
     let mut stmt = conn.prepare("SELECT value FROM meta WHERE key=?1")?;
     let mut rows = stmt.query(params![key])?;
     if let Some(r) = rows.next()? { Ok(Some(r.get(0)?)) } else { Ok(None) }
 }
 
-fn put_meta(conn: &Connection, key: &str, value: &str) -> Result<()> {
+pub(crate) fn put_meta(conn: &Connection, key: &str, value: &str) -> Result<()> {
     conn.execute("INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value", params![key, value])?;
     Ok(())
 }
@@ -941,7 +950,7 @@ fn put_meta(conn: &Connection, key: &str, value: &str) -> Result<()> {
 /// the highest existing number if that is larger. The second term covers a
 /// 0.1.0 binary, which knows nothing of the mark, writing to an upgraded file.
 /// Must run inside the create's write transaction.
-fn next_issue_number(conn: &Connection) -> Result<i64> {
+pub(crate) fn next_issue_number(conn: &Connection) -> Result<i64> {
     let mark = match read_meta(conn, NEXT_ISSUE_NUMBER)? {
         Some(v) => v.parse::<i64>().map_err(|_| LclError::Msg(format!("meta {NEXT_ISSUE_NUMBER} is not a number: {v:?}")))?,
         None => 1,
@@ -971,7 +980,7 @@ fn set_labels(conn: &Connection, issue_id: &str, names: &[String]) -> Result<()>
 }
 
 /// This workspace's key, as used in `KEY-N` ("" if it has none).
-fn read_key(conn: &Connection) -> Result<String> {
+pub(crate) fn read_key(conn: &Connection) -> Result<String> {
     Ok(read_meta(conn, "key")?.unwrap_or_default())
 }
 
@@ -1009,13 +1018,8 @@ fn own_key(typed: &str, key: &str) -> bool {
 /// UUID, whether or not an issue has it), which would give that text two
 /// meanings; and on no issue but `issue_id`, ignoring ASCII case. The unique
 /// index holds every writer to the second rule; this check names the holder.
-pub(crate) fn check_ref(conn: &Connection, key: &str, r: &str, issue_id: Option<&str>) -> Result<()> {
-    let own = match r.parse::<IssueRef>() {
-        Ok(IssueRef::Number { key: Some(typed), .. }) => !key.is_empty() && own_key(&typed, key),
-        Ok(IssueRef::Number { key: None, .. } | IssueRef::Id(_)) => true,
-        Err(_) => false,
-    };
-    if own {
+fn check_ref(conn: &Connection, key: &str, r: &str, issue_id: Option<&str>) -> Result<()> {
+    if ref_looks_own(key, r) {
         return Err(LclError::RefLooksOwn(r.to_string()));
     }
     let holder: Option<i64> = conn
@@ -1025,6 +1029,50 @@ pub(crate) fn check_ref(conn: &Connection, key: &str, r: &str, issue_id: Option<
         Some(n) => Err(LclError::RefTaken { given: r.to_string(), holder: identifier(key, n) }),
         None => Ok(()),
     }
+}
+
+/// Whether lcl would read `r` as a reference to one of the issues of a
+/// workspace with key `key`: `N`, `#N`, its `KEY-N`, or any UUID.
+pub(crate) fn ref_looks_own(key: &str, r: &str) -> bool {
+    match r.parse::<IssueRef>() {
+        Ok(IssueRef::Number { key: Some(typed), .. }) => !key.is_empty() && own_key(&typed, key),
+        Ok(IssueRef::Number { key: None, .. } | IssueRef::Id(_)) => true,
+        Err(_) => false,
+    }
+}
+
+/// The doc `parent` names (its id as stored, given exactly or as a UUID in
+/// either case), checked as a parent for `doc` (None: a doc being created):
+/// it must exist, and must be neither the doc itself nor below it.
+fn check_doc_parent(conn: &Connection, doc: Option<&str>, parent: &str) -> Result<String> {
+    let find = |id: &str| -> Result<Option<String>> { Ok(conn.query_row("SELECT id FROM docs WHERE id=?1", params![id], |r| r.get(0)).optional()?) };
+    let found = match find(parent)? {
+        Some(id) => Some(id),
+        None => match crate::parse::uuid(parent) {
+            Ok(lower) => find(&lower)?,
+            Err(_) => None,
+        },
+    };
+    let parent_id = found.ok_or_else(|| LclError::DocNotFound(parent.to_string()))?;
+    let Some(doc) = doc else { return Ok(parent_id) };
+    if parent_id == doc {
+        return Err(LclError::DocSelfParent(doc.to_string()));
+    }
+    let mut path = vec![doc.to_string(), parent_id.clone()];
+    let mut seen = HashSet::from([parent_id.clone()]);
+    let mut next: Option<String> = conn.query_row("SELECT parent_id FROM docs WHERE id=?1", params![parent_id], |r| r.get(0))?;
+    while let Some(id) = next {
+        if id == doc {
+            path.push(doc.to_string());
+            return Err(LclError::DocParentCycle { doc: doc.to_string(), parent: parent_id, path: path.join(" -> ") });
+        }
+        // A dangling link, or a loop above that doesn't pass through this
+        // doc (only a hand edit could make one), ends the walk.
+        if !seen.insert(id.clone()) { break; }
+        path.push(id.clone());
+        next = conn.query_row("SELECT parent_id FROM docs WHERE id=?1", params![id], |r| r.get(0)).optional()?.flatten();
+    }
+    Ok(parent_id)
 }
 
 /// Checks a parent link before it is written. The parent must exist, and for

@@ -140,6 +140,11 @@ impl Env {
         self.run_with(args, None, Stdio::null(), adjust)
     }
 
+    /// As `lcl_stdin`, after `adjust` has changed the command.
+    pub fn lcl_stdin_with(&self, args: &[&str], input: &[u8], adjust: impl FnOnce(&mut Command)) -> Out {
+        self.run_with(args, Some(input), Stdio::piped(), adjust)
+    }
+
     fn run(&self, args: &[&str], input: Option<&[u8]>, stdin: Stdio) -> Out {
         self.run_with(args, input, stdin, |_| {})
     }

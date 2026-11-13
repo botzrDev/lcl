@@ -312,18 +312,27 @@ fn workspace_show_json() {
     workspace(&env, "dreamd", "drm");
     let shown = show(&env, "dreamd");
     let keys: Vec<&String> = shown.as_object().expect("object").keys().collect();
-    assert_eq!(keys, ["created_at", "key", "name", "path", "schema_version"]);
-    assert_eq!((&shown["name"], &shown["key"]), (&json!("dreamd"), &json!("DRM")));
-    assert_eq!(shown["path"], json!(projects_dir(&env).join("dreamd.sqlite").display().to_string()));
-    assert_eq!(shown["schema_version"], json!(SCHEMA_VERSION));
+    assert_eq!(keys, ["created_at", "description", "key", "name", "path", "schema_version"]);
     let created = shown["created_at"].as_i64().unwrap_or_else(|| panic!("created_at is not an integer: {shown:#}"));
     assert!((start..=lcl_core::models::now()).contains(&created), "{created}");
+    // The whole object. A new workspace's description is "": `workspace
+    // create` (and `init`) store an empty one.
+    let path = projects_dir(&env).join("dreamd.sqlite").display().to_string();
+    let exact = |description: &str| {
+        json!({"created_at": created, "description": description, "key": "DRM", "name": "dreamd", "path": path, "schema_version": SCHEMA_VERSION})
+    };
+    assert_eq!(shown, exact(""));
+    // A description that is set is shown as it is; here an import's header sets it.
+    let header = "{\"type\":\"workspace\",\"format\":\"lcl-export/1\",\"key\":\"DRM\",\"description\":\"dreamd's tracker\"}\n";
+    env.lcl_stdin(&["-w", "dreamd", "import", "-"], header.as_bytes()).assert_ok();
+    assert_eq!(show(&env, "dreamd"), exact("dreamd's tracker"));
 
     // A workspace in the current directory, found from cwd.
     env.lcl(&["init", "here"]).assert_ok();
     let here = env.lcl(&["workspace", "show", "--json"]).assert_ok().json();
     assert_eq!(here["path"], json!(env.db_path().display().to_string()));
     assert!(here["created_at"].is_i64(), "{here:#}");
+    assert_eq!(here["description"], json!(""), "init stores an empty description");
     let human = env.lcl(&["-w", "dreamd", "workspace", "show"]).assert_ok().stdout.clone();
     assert_eq!(human, format!("dreamd [DRM] {}\n", projects_dir(&env).join("dreamd.sqlite").display()));
 

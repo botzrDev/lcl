@@ -50,6 +50,26 @@ pub enum LclError {
     LabelNotFound(String),
     #[error("doc {0} not found")]
     DocNotFound(String),
+    #[error("doc {0} can't be its own parent")]
+    DocSelfParent(String),
+    /// `path` runs from the doc up through its would-be parent back to it.
+    #[error("making doc {parent} the parent of doc {doc} would make a cycle: {path}")]
+    DocParentCycle { doc: String, parent: String, path: String },
+    /// A problem in an import file, which names its line and field (or the
+    /// record, for a problem with the record as a whole).
+    #[error("line {line}: {what}: {msg}")]
+    ImportLine { line: usize, what: String, msg: String },
+    /// `has` lists what is there, as "1 issue and 2 labels".
+    #[error("workspace {workspace:?} is not empty: it has {has}; import only into an empty workspace (make one with lcl init or lcl workspace create)")]
+    ImportNotEmpty { workspace: String, has: String },
+    #[error("the file is for key {file} but this workspace's key is {workspace}; import it into a workspace with key {file}")]
+    ImportKeyMismatch { file: String, workspace: String },
+    /// Everything that keeps the workspace from exporting as a file that
+    /// imports, one problem per entry.
+    #[error("can't export: {}:\n{}", counted(&[(problems.len() as i64, "problem")]), problems.iter().map(|p| format!("  {p}")).collect::<Vec<_>>().join("\n"))]
+    ExportBlocked { problems: Vec<String> },
+    #[error("{0} already exists; pass --force to replace it")]
+    OutputExists(String),
     #[error("{0} can't be related to itself")]
     SelfRelation(String),
     /// `path` is the cycle the new row would close, as `A blocks B blocks A`.
@@ -137,6 +157,7 @@ impl LclError {
         matches!(
             self,
             LclError::WrongWorkspace { .. }
+                | LclError::ImportLine { .. }
                 | LclError::RefLooksOwn(_)
                 | LclError::SelfParent(_)
                 | LclError::ParentCycle { .. }

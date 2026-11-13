@@ -5,9 +5,10 @@ use clap::{ArgGroup, CommandFactory, FromArgMatches, Parser, Subcommand};
 use lcl_core::db::{AssigneeFilter, Change, IssueFilter, IssueSort, MilestoneUpdate, Page, Placement, ProjectFilter, ProjectUpdate, Store};
 use lcl_core::error::LclError;
 use lcl_core::models::*;
+use lcl_core::parse;
 use lcl_core::registry::{self, Registry, WorkspaceKey};
 use lcl_core::search::SearchQuery;
-use std::io::{IsTerminal, Read};
+use std::io::{IsTerminal, Read, Write};
 use std::time::Duration;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -89,7 +90,100 @@ enum Commands {
         #[arg(long, value_name = "N", default_value_t = 50, value_parser = clap::value_parser!(u32).range(1..))]
         limit: u32,
     },
+    /// Write the whole workspace as a text file (format lcl-export/1).
+    ///
+    /// One JSON record per line: the workspace, then labels, projects,
+    /// milestones, cycles, issues, comments, relations and docs. Issues keep
+    /// their numbers; nothing in the file depends on this workspace's ids.
+    /// The same workspace always exports to the same bytes, and every file
+    /// export writes, import reads back exactly.
+    ///
+    /// A stored value import would refuse (from a hand edit, or an older
+    /// lcl) stops the export: each is listed, with the command that fixes
+    /// it where there is one, and nothing is written.
+    Export {
+        /// Write to PATH (through a temporary file in its directory, renamed
+        /// into place) instead of stdout. `-` is stdout.
+        #[arg(long, value_name = "PATH")]
+        output: Option<String>,
+        /// Replace PATH if it exists.
+        #[arg(long, requires = "output")]
+        force: bool,
+    },
+    /// Restore a file written by lcl export (or a converter) into this
+    /// workspace, which must be empty and have the file's key.
+    ///
+    /// Numbers, refs, creators, comment authors and timestamps are kept as
+    /// the file gives them; no status rules run. Every value must pass the
+    /// rules the commands apply, and the file is checked whole before
+    /// anything is written: a problem exits 2 naming its line and field,
+    /// and the workspace is left as it was. The import is one transaction.
+    Import {
+        /// The file, or `-` for stdin.
+        #[arg(value_name = "PATH", value_parser = read_import)]
+        input: ImportInput,
+        /// Check and count everything, then roll back: nothing is written.
+        #[arg(long)]
+        dry_run: bool,
+    },
     Tui,
+}
+
+/// An import file's bytes, read as the arguments are parsed.
+#[derive(Clone)]
+struct ImportInput(Vec<u8>);
+
+/// `import PATH`: the file, or stdin for `-`, as bytes (import reports a
+/// line that isn't UTF-8 itself).
+fn read_import(path: &str) -> std::result::Result<ImportInput, String> {
+    if path == "-" {
+        read_stdin("import").map(ImportInput)
+    } else {
+        std::fs::read(path).map(ImportInput).map_err(|e| format!("can't read {path}: {e}"))
+    }
+}
+
+/// Writes an export to `path` through a temporary file in the same
+/// directory, so a reader never sees half a file. Without `force` an
+/// existing `path` is refused, also one that appears while writing.
+fn write_export(path: &str, text: &str, force: bool) -> Result<()> {
+    let target = std::path::Path::new(path);
+    let exists = |p: &std::path::Path| std::fs::symlink_metadata(p).is_ok();
+    if !force && exists(target) {
+        return Err(LclError::OutputExists(path.to_string()).into());
+    }
+    let dir = match target.parent() {
+        Some(d) if !d.as_os_str().is_empty() => d.to_path_buf(),
+        _ => PathBuf::from("."),
+    };
+    let name = target.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "export".into());
+    let tmp = dir.join(format!(".{name}.lcl-export-{}.tmp", std::process::id()));
+    let written = (|| -> std::io::Result<()> {
+        let mut f = std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp)?;
+        f.write_all(text.as_bytes())?;
+        f.sync_all()
+    })();
+    let placed = written.and_then(|()| {
+        if force {
+            return std::fs::rename(&tmp, target);
+        }
+        // A hard link fails if `path` exists, so no file is ever replaced.
+        match std::fs::hard_link(&tmp, target) {
+            Ok(()) => std::fs::remove_file(&tmp),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(e),
+            // A filesystem without hard links: check, then rename.
+            Err(_) if exists(target) => Err(std::io::Error::from(std::io::ErrorKind::AlreadyExists)),
+            Err(_) => std::fs::rename(&tmp, target),
+        }
+    });
+    if let Err(e) = placed {
+        let _ = std::fs::remove_file(&tmp);
+        if e.kind() == std::io::ErrorKind::AlreadyExists {
+            return Err(LclError::OutputExists(path.to_string()).into());
+        }
+        return Err(anyhow::Error::new(e).context(format!("can't write {path}")));
+    }
+    Ok(())
 }
 
 #[derive(Subcommand)]
@@ -388,7 +482,8 @@ enum DocCmd {
         #[arg(long, value_parser = inline_content, conflicts_with = "content_file")] content: Option<String>,
         /// Read the content from PATH, or from stdin if PATH is `-`. Stored byte for byte.
         #[arg(long, value_name = "PATH", value_parser = read_content)] content_file: Option<String>,
-        #[arg(long)] parent: Option<String>,
+        /// The parent doc's id: it must exist.
+        #[arg(long, value_name = "ID")] parent: Option<String>,
     },
     List,
     Show { id: String },
@@ -399,6 +494,11 @@ enum DocCmd {
         #[arg(long, value_parser = inline_content, conflicts_with = "content_file")] content: Option<String>,
         /// Read the content from PATH, or from stdin if PATH is `-`. Stored byte for byte.
         #[arg(long, value_name = "PATH", value_parser = read_content)] content_file: Option<String>,
+        /// Move it under the doc with this id, which must exist and must not
+        /// be this doc or one below it.
+        #[arg(long, value_name = "ID", conflicts_with = "no_parent")] parent: Option<String>,
+        /// Make it a top-level doc.
+        #[arg(long)] no_parent: bool,
     },
     Delete { id: String },
 }
@@ -417,26 +517,14 @@ enum CycleCmd {
     List,
 }
 
-/// A real calendar date written exactly as YYYY-MM-DD: 2026-02-30 and
-/// 2026-2-3 are both rejected.
-fn parse_date(s: &str) -> std::result::Result<NaiveDate, String> {
-    let b = s.as_bytes();
-    let shaped = b.len() == 10 && b.iter().enumerate().all(|(i, c)| if i == 4 || i == 7 { *c == b'-' } else { c.is_ascii_digit() });
-    shaped
-        .then(|| NaiveDate::parse_from_str(s, "%Y-%m-%d").ok())
-        .flatten()
-        .ok_or_else(|| format!("invalid date \"{s}\"; expected a real calendar date as YYYY-MM-DD"))
-}
+// The value rules live in lcl_core::parse, shared with `import`; these
+// adapt them to clap.
+
+/// A real calendar date written exactly as YYYY-MM-DD.
+fn parse_date(s: &str) -> std::result::Result<NaiveDate, String> { parse::date(s).map_err(|e| e.0) }
 
 /// `#rgb` or `#rrggbb`.
-fn parse_color(s: &str) -> std::result::Result<String, String> {
-    let hex = s.strip_prefix('#').unwrap_or("");
-    if s.starts_with('#') && matches!(hex.len(), 3 | 6) && hex.chars().all(|c| c.is_ascii_hexdigit()) {
-        Ok(s.to_string())
-    } else {
-        Err(format!("invalid color \"{s}\"; expected #rgb or #rrggbb"))
-    }
-}
+fn parse_color(s: &str) -> std::result::Result<String, String> { parse::color(s).map_err(|e| e.0) }
 
 // Long text. Inline text passes through the shell, which splits, expands and
 // substitutes it, and through argv, which has a size limit. So text can also
@@ -559,16 +647,10 @@ fn search_query(words: &[String]) -> SearchQuery {
 }
 
 /// A label name, trimmed; blank is refused.
-fn parse_label_name(s: &str) -> std::result::Result<String, String> {
-    let s = s.trim();
-    if s.is_empty() { Err("a label name can't be empty".into()) } else { Ok(s.to_string()) }
-}
+fn parse_label_name(s: &str) -> std::result::Result<String, String> { parse::label_name(s).map_err(|e| e.0) }
 
 /// An assignee, trimmed; blank is refused. Unassigning is its own flag.
-fn parse_assignee(s: &str) -> std::result::Result<String, String> {
-    let s = s.trim();
-    if s.is_empty() { Err("an assignee can't be empty; to unassign, use `issue update --no-assignee`".into()) } else { Ok(s.to_string()) }
-}
+fn parse_assignee(s: &str) -> std::result::Result<String, String> { parse::assignee(s).map_err(|e| e.0) }
 
 /// `issue list --assignee`: a name, trimmed, or `none` (any case) for
 /// unassigned issues. Blank is refused.
@@ -581,26 +663,11 @@ fn parse_assignee_filter(s: &str) -> std::result::Result<AssigneeFilter, String>
 
 /// `--ref`: trimmed; at most 100 characters, none of them whitespace or a
 /// control character. Blank is refused.
-fn parse_ref(s: &str) -> std::result::Result<String, String> {
-    let s = s.trim();
-    let chars = s.chars().count();
-    if s.is_empty() {
-        Err("a ref can't be empty; to remove one, use issue update --no-ref".into())
-    } else if chars > 100 {
-        Err(format!("a ref can be at most 100 characters; this one has {chars}"))
-    } else if s.chars().any(|c| c.is_whitespace() || c.is_control()) {
-        Err(format!("ref {s:?} contains whitespace or a control character"))
-    } else {
-        Ok(s.to_string())
-    }
-}
+fn parse_ref(s: &str) -> std::result::Result<String, String> { parse::issue_ref(s).map_err(|e| e.0) }
 
 /// `--author`: trimmed; blank is refused (leaving it out means LCL_AUTHOR,
 /// else USER).
-fn parse_author(s: &str) -> std::result::Result<String, String> {
-    let s = s.trim();
-    if s.is_empty() { Err("an author can't be empty; leave --author out to use LCL_AUTHOR or USER".into()) } else { Ok(s.to_string()) }
-}
+fn parse_author(s: &str) -> std::result::Result<String, String> { parse::author(s).map_err(|e| e.0) }
 
 /// Who is writing, when --author isn't given: LCL_AUTHOR, else USER,
 /// trimmed. Empty (or only whitespace, or not UTF-8) counts as unset; with
@@ -610,16 +677,10 @@ fn env_author() -> Option<String> {
 }
 
 /// A project name or reference, trimmed; blank is refused.
-fn parse_project_name(s: &str) -> std::result::Result<String, String> {
-    let s = s.trim();
-    if s.is_empty() { Err("a project name can't be empty".into()) } else { Ok(s.to_string()) }
-}
+fn parse_project_name(s: &str) -> std::result::Result<String, String> { parse::project_name(s).map_err(|e| e.0) }
 
 /// A milestone name or reference, trimmed; blank is refused.
-fn parse_milestone_name(s: &str) -> std::result::Result<String, String> {
-    let s = s.trim();
-    if s.is_empty() { Err("a milestone name can't be empty".into()) } else { Ok(s.to_string()) }
-}
+fn parse_milestone_name(s: &str) -> std::result::Result<String, String> { parse::milestone_name(s).map_err(|e| e.0) }
 
 /// `issue list --project`: a project, or `none` (any case) for issues in no
 /// project.
@@ -952,8 +1013,9 @@ fn run(cli: Cli) -> Result<()> {
                 let key = store.get_meta("key")?.unwrap_or_default();
                 // Stored as text; null if absent or not a number.
                 let created_at = store.get_meta("created_at")?.and_then(|t| t.parse::<i64>().ok());
+                let description = store.get_meta("description")?.unwrap_or_default();
                 let schema_version = store.schema_version()?;
-                let v = serde_json::json!({"name": name, "key": key, "path": path, "schema_version": schema_version, "created_at": created_at});
+                let v = serde_json::json!({"name": name, "key": key, "description": description, "path": path, "schema_version": schema_version, "created_at": created_at});
                 if cli.json { print_json(&v); } else { println!("{} [{}] {}", name, key, path.display()); }
             }
         },
@@ -1119,8 +1181,13 @@ fn run(cli: Cli) -> Result<()> {
                     let d = store.get_doc(&id)?.ok_or_else(|| anyhow::anyhow!("doc not found"))?;
                     if cli.json { print_json(&d); } else { println!("# {}\n\n{}", d.title, d.content); }
                 }
-                DocCmd::Update { id, title, content, content_file } => {
-                    let d = store.update_doc(&id, title, content.or(content_file))?;
+                DocCmd::Update { id, title, content, content_file, parent, no_parent } => {
+                    let parent = match (parent, no_parent) {
+                        (Some(p), _) => Change::Set(p),
+                        (None, true) => Change::Clear,
+                        (None, false) => Change::Keep,
+                    };
+                    let d = store.update_doc(&id, title, content.or(content_file), parent)?;
                     if cli.json { print_json(&d); } else { println!("Updated {}", id); }
                 }
                 DocCmd::Delete { id } => {
@@ -1183,6 +1250,36 @@ fn run(cli: Cli) -> Result<()> {
                 if found.issue_total == 0 && found.doc_total == 0 { println!("no matches"); }
             }
         },
+        Commands::Export { output, force } => {
+            let store = resolve_store(&cli.workspace)?;
+            let export = store.export()?;
+            match output.as_deref() {
+                None | Some("-") => {
+                    let mut out = std::io::stdout().lock();
+                    out.write_all(export.text.as_bytes()).and_then(|()| out.flush()).context("can't write the export to stdout")?;
+                }
+                Some(path) => {
+                    write_export(path, &export.text, force)?;
+                    if cli.json {
+                        let mut v = serde_json::to_value(export.counts)?;
+                        v["path"] = serde_json::Value::String(path.to_string());
+                        print_json(&v);
+                    } else {
+                        println!("Exported {} to {path}", export.counts.phrase());
+                    }
+                }
+            }
+        }
+        Commands::Import { input, dry_run } => {
+            let mut store = resolve_store(&cli.workspace)?;
+            let s = store.import(&input.0, dry_run)?;
+            if cli.json { print_json(&s); }
+            else {
+                let next = identifier(&s.key, s.next_issue_number);
+                let what = format!("{} into workspace {} (key {}); next number {next}", s.counts.phrase(), s.workspace, s.key);
+                if s.dry_run { println!("Dry run, nothing written: would import {what}"); } else { println!("Imported {what}"); }
+            }
+        }
         Commands::Tui => {
             lcl_tui::run(resolve_store(&cli.workspace)?)?;
         }
