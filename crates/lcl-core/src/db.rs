@@ -13,7 +13,9 @@ use std::time::{Duration, Instant};
 
 /// How long a connection waits for a lock held by another lcl process before
 /// failing with SQLITE_BUSY. Concurrent first opens queue on the migration lock.
-pub(crate) const BUSY_TIMEOUT: Duration = Duration::from_millis(5000);
+/// Generous, because a writer that gives up loses its write: on a machine busy
+/// with builds, a few seconds' stall is ordinary.
+pub(crate) const BUSY_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Puts a database (a workspace, or the registry's index) in WAL mode. The
 /// switch needs an exclusive lock, and when waiting for it could deadlock
@@ -317,6 +319,7 @@ impl Store {
             if let Some(parent) = &issue.parent_id { check_parent(tx, &key, None, parent)?; }
             (issue.project_id, issue.milestone_id) = (None, None);
             place(tx, &mut issue, placement)?;
+            if let Some(r) = &issue.r#ref { check_ref(tx, &key, r, None)?; }
             if issue.id.is_empty() { issue.id = uuid::Uuid::new_v4().to_string(); }
             let next = next_issue_number(tx)?;
             if issue.number == 0 { issue.number = next; }
@@ -327,8 +330,8 @@ impl Store {
             let status = issue.status.as_str();
             let priority = issue.priority.as_i64();
             tx.execute(
-                "INSERT INTO issues(id,number,title,description,status,priority,assignee,parent_id,estimate,due_date,created_at,updated_at,completed_at,started_at,canceled_at,project_id,milestone_id) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
-                params![issue.id, issue.number, issue.title, issue.description, status, priority, issue.assignee, issue.parent_id, issue.estimate, issue.due_date, issue.created_at, issue.updated_at, issue.completed_at, issue.started_at, issue.canceled_at, issue.project_id, issue.milestone_id],
+                "INSERT INTO issues(id,number,title,description,status,priority,assignee,parent_id,estimate,due_date,created_at,updated_at,completed_at,started_at,canceled_at,project_id,milestone_id,ref,creator) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)",
+                params![issue.id, issue.number, issue.title, issue.description, status, priority, issue.assignee, issue.parent_id, issue.estimate, issue.due_date, issue.created_at, issue.updated_at, issue.completed_at, issue.started_at, issue.canceled_at, issue.project_id, issue.milestone_id, issue.r#ref, issue.creator],
             )?;
             set_labels(tx, &issue.id, &issue.labels)?;
             put_meta(tx, NEXT_ISSUE_NUMBER, &next.max(issue.number + 1).to_string())?;
@@ -427,13 +430,17 @@ impl Store {
     /// A changed `parent_id` must be the UUID of an existing issue that is
     /// neither this one nor below it. `placement` moves it between projects
     /// and milestones (see `place`); a milestone it loses because it left the
-    /// milestone's project is returned, for the caller to report.
+    /// milestone's project is returned, for the caller to report. A changed
+    /// ref is checked as on create; the creator is never written.
     pub fn update_issue(&mut self, r: &IssueRef, placement: &Placement, f: impl FnOnce(&mut Issue)) -> Result<(Issue, Option<ClearedMilestone>)> {
         self.write(|tx| {
             let key = read_key(tx)?;
             let mut issue = resolve_issue(tx, r)?;
-            let (from, old_parent) = (issue.status, issue.parent_id.clone());
+            let (from, old_parent, old_ref) = (issue.status, issue.parent_id.clone(), issue.r#ref.clone());
             f(&mut issue);
+            if issue.r#ref != old_ref && let Some(r) = &issue.r#ref {
+                check_ref(tx, &key, r, Some(&issue.id))?;
+            }
             if issue.parent_id != old_parent && let Some(parent) = &issue.parent_id {
                 check_parent(tx, &key, Some(&issue), parent)?;
             }
@@ -443,8 +450,8 @@ impl Store {
             let status = issue.status.as_str();
             let priority = issue.priority.as_i64();
             tx.execute(
-                "UPDATE issues SET title=?1,description=?2,status=?3,priority=?4,assignee=?5,parent_id=?6,estimate=?7,due_date=?8,updated_at=?9,completed_at=?10,started_at=?11,canceled_at=?12,project_id=?13,milestone_id=?14 WHERE id=?15",
-                params![issue.title, issue.description, status, priority, issue.assignee, issue.parent_id, issue.estimate, issue.due_date, issue.updated_at, issue.completed_at, issue.started_at, issue.canceled_at, issue.project_id, issue.milestone_id, issue.id],
+                "UPDATE issues SET title=?1,description=?2,status=?3,priority=?4,assignee=?5,parent_id=?6,estimate=?7,due_date=?8,updated_at=?9,completed_at=?10,started_at=?11,canceled_at=?12,project_id=?13,milestone_id=?14,ref=?15 WHERE id=?16",
+                params![issue.title, issue.description, status, priority, issue.assignee, issue.parent_id, issue.estimate, issue.due_date, issue.updated_at, issue.completed_at, issue.started_at, issue.canceled_at, issue.project_id, issue.milestone_id, issue.r#ref, issue.id],
             )?;
             set_labels(tx, &issue.id, &issue.labels)?;
             Ok((reread(tx, &key, &issue.id)?, cleared))
@@ -735,7 +742,8 @@ impl Store {
         })
     }
     pub fn list_comments(&self, issue_id: &str) -> Result<Vec<Comment>> {
-        let mut stmt = self.conn.prepare("SELECT id,issue_id,body,author,created_at FROM comments WHERE issue_id=?1 ORDER BY created_at")?;
+        // Oldest first; same-second comments in the order they were added.
+        let mut stmt = self.conn.prepare("SELECT id,issue_id,body,author,created_at FROM comments WHERE issue_id=?1 ORDER BY created_at, rowid")?;
         let rows = stmt.query_map(params![issue_id], |r| Ok(Comment { id: r.get(0)?, issue_id: r.get(1)?, body: r.get(2)?, author: r.get(3)?, created_at: r.get(4)? }))?;
         Ok(rows.collect::<std::result::Result<Vec<_>,_>>()?)
     }
@@ -800,7 +808,9 @@ impl Store {
     /// together, or every word is in one of its comments; it is listed once
     /// either way, ranked by the best (lowest) bm25 of those matches. If the
     /// query is exactly this workspace's `KEY-N` or `#N` for an issue that
-    /// exists, that issue comes first. `matched_in` comes from per-column
+    /// exists, that issue comes first; if it is an issue's ref (ignoring
+    /// ASCII case), that issue comes next, listed once with `ref` in
+    /// `matched_in`. `matched_in` comes from per-column
     /// MATCHes (`{title} : (any word)`), counted only for issues whose own
     /// text matched. Every query runs in one read transaction.
     pub fn search(&self, q: &SearchQuery, limit: usize) -> Result<SearchResults> {
@@ -849,7 +859,7 @@ impl Store {
             if let Some(IssueRef::Number { key: typed, number }) = q.identifier() {
                 let key = read_key(conn)?;
                 let ours = match typed {
-                    Some(typed) => !key.is_empty() && typed.to_lowercase() == key.to_lowercase(),
+                    Some(typed) => !key.is_empty() && own_key(typed, &key),
                     None => true,
                 };
                 if ours && let Some(id) = conn.query_row("SELECT id FROM issues WHERE number=?1", params![number], |r| r.get::<_, String>(0)).optional()? {
@@ -859,10 +869,23 @@ impl Store {
                 }
             }
 
+            // The issue whose ref the query is. A ref has no whitespace, so
+            // only a one-word query can be one.
+            let mut by_ref = None;
+            let holder = conn
+                .query_row("SELECT id, number FROM issues WHERE ref = ?1 COLLATE NOCASE", params![q.raw().trim()], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
+                .optional()?;
+            if let Some((id, number)) = holder {
+                let hit = hits.entry(id.clone()).or_insert(Hit { rank: 0.0, number, fields: vec![] });
+                let at = usize::from(hit.fields.first() == Some(&Field::Identifier));
+                hit.fields.insert(at, Field::Ref);
+                by_ref = Some(id);
+            }
+
             let mut ranked: Vec<(String, Hit)> = hits.into_iter().collect();
             ranked.sort_by(|(a_id, a), (b_id, b)| {
-                let (a_named, b_named) = (named.as_ref() == Some(a_id), named.as_ref() == Some(b_id));
-                b_named.cmp(&a_named).then(a.rank.total_cmp(&b.rank)).then(b.number.cmp(&a.number))
+                let first = |id: &String| (named.as_ref() == Some(id), by_ref.as_ref() == Some(id));
+                first(b_id).cmp(&first(a_id)).then(a.rank.total_cmp(&b.rank)).then(b.number.cmp(&a.number))
             });
             let issue_total = ranked.len();
             // The page's issues, and all their labels, in one query each.
@@ -959,12 +982,48 @@ fn resolve_issue(conn: &Connection, r: &IssueRef) -> Result<Issue> {
     let key = read_key(conn)?;
     match r {
         IssueRef::Number { key: typed, number } => {
-            if let Some(typed) = typed && typed.to_lowercase() != key.to_lowercase() {
-                return Err(LclError::WrongWorkspace { given: r.to_string(), key });
+            if let Some(typed) = typed && !own_key(typed, &key) {
+                // Never resolved through a ref; an issue whose ref it is is
+                // only named in the error.
+                let given = r.to_string();
+                let holder = conn
+                    .query_row("SELECT number, ref FROM issues WHERE ref = ?1 COLLATE NOCASE", params![given], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))
+                    .optional()?
+                    .map(|(n, stored)| (identifier(&key, n), stored));
+                return Err(LclError::WrongWorkspace { given, key, holder });
             }
             fetch_issue_by(conn, &key, "number", number)?.ok_or_else(|| LclError::IssueNotFound(identifier(&key, *number)))
         }
         IssueRef::Id(id) => fetch_issue_by(conn, &key, "id", id)?.ok_or_else(|| LclError::IssueNotFound(id.clone())),
+    }
+}
+
+/// Whether `typed`, the key of a `KEY-N`, is this workspace's `key`: the
+/// comparison issue lookups use.
+fn own_key(typed: &str, key: &str) -> bool {
+    typed.to_lowercase() == key.to_lowercase()
+}
+
+/// Checks a ref before it is written: not shaped like a reference lcl reads
+/// as one of this workspace's issues (`N`, `#N`, this key's `KEY-N`, or a
+/// UUID, whether or not an issue has it), which would give that text two
+/// meanings; and on no issue but `issue_id`, ignoring ASCII case. The unique
+/// index holds every writer to the second rule; this check names the holder.
+pub(crate) fn check_ref(conn: &Connection, key: &str, r: &str, issue_id: Option<&str>) -> Result<()> {
+    let own = match r.parse::<IssueRef>() {
+        Ok(IssueRef::Number { key: Some(typed), .. }) => !key.is_empty() && own_key(&typed, key),
+        Ok(IssueRef::Number { key: None, .. } | IssueRef::Id(_)) => true,
+        Err(_) => false,
+    };
+    if own {
+        return Err(LclError::RefLooksOwn(r.to_string()));
+    }
+    let holder: Option<i64> = conn
+        .query_row("SELECT number FROM issues WHERE ref = ?1 COLLATE NOCASE AND id IS NOT ?2", params![r, issue_id], |row| row.get(0))
+        .optional()?;
+    match holder {
+        Some(n) => Err(LclError::RefTaken { given: r.to_string(), holder: identifier(key, n) }),
+        None => Ok(()),
     }
 }
 
@@ -1291,7 +1350,7 @@ fn reread(conn: &Connection, key: &str, id: &str) -> Result<Issue> {
 
 /// An issue row as `row_to_issue` reads it: `issues i`, with its parent's
 /// number from `issues p` and its project's and milestone's names. Callers append WHERE, ORDER BY and LIMIT.
-const ISSUE_SELECT: &str = "SELECT i.id,i.number,i.title,i.description,i.status,i.priority,i.assignee,i.parent_id,i.estimate,i.due_date,i.created_at,i.updated_at,i.completed_at,i.started_at,i.canceled_at,p.number,i.project_id,pr.name,i.milestone_id,ms.name FROM issues i LEFT JOIN issues p ON p.id = i.parent_id LEFT JOIN projects pr ON pr.id = i.project_id LEFT JOIN milestones ms ON ms.id = i.milestone_id";
+const ISSUE_SELECT: &str = "SELECT i.id,i.number,i.title,i.description,i.status,i.priority,i.assignee,i.parent_id,i.estimate,i.due_date,i.created_at,i.updated_at,i.completed_at,i.started_at,i.canceled_at,p.number,i.project_id,pr.name,i.milestone_id,ms.name,i.ref,i.creator FROM issues i LEFT JOIN issues p ON p.id = i.parent_id LEFT JOIN projects pr ON pr.id = i.project_id LEFT JOIN milestones ms ON ms.id = i.milestone_id";
 
 /// The issues with these UUIDs, in this order, skipping any that are gone:
 /// one query for the rows and one for all their labels.
@@ -1392,6 +1451,8 @@ fn row_to_issue(r: &rusqlite::Row, key: &str) -> Result<Issue> {
         project: r.get(17)?,
         milestone_id: r.get(18)?,
         milestone: r.get(19)?,
+        r#ref: r.get(20)?,
+        creator: r.get(21)?,
         estimate: r.get(8)?,
         due_date: r.get(9)?,
         labels: vec![],

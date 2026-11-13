@@ -30,6 +30,11 @@ pub const V7_INDEX_FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/f
 /// tests/projects.rs for how it was built.
 pub const V7_FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/v7.sqlite");
 
+/// A workspace written by a build of 8cffde1 (schema v8) with a project, a
+/// milestone, an issue in both, a blocks relation and a comment. See
+/// tests/refs.rs for how it was built.
+pub const V8_FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/v8.sqlite");
+
 /// A database written by lcl 0.1.0. See tests/schema.rs for how it was built.
 pub const V0_FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/v0.sqlite");
 
@@ -115,7 +120,11 @@ impl Env {
             // behind the test's back. Likewise LCL_STDIN_WAIT.
             .env_remove("LCL_WORKSPACE")
             .env_remove("LCL_PROJECT")
-            .env_remove("LCL_STDIN_WAIT");
+            .env_remove("LCL_STDIN_WAIT")
+            // An exported LCL_AUTHOR must not name the tests' creators and
+            // comment authors either. USER is left as it is; a test that
+            // checks an author sets or removes it.
+            .env_remove("LCL_AUTHOR");
         cmd
     }
 
@@ -423,6 +432,33 @@ pub fn undo_v8_schema(after: &mut Dump) {
     let Value::Text(sql) = &issues["sql"] else { panic!("{issues:?}") };
     let v7 = sql.strip_suffix(V8_ISSUE_COLUMNS).unwrap_or_else(|| panic!("the v8 columns aren't at the end of {sql}"));
     issues.insert("sql".into(), Value::Text(format!("{v7})")));
+}
+
+/// Migration 9's index, as sqlite_master keeps it.
+pub const V9_REF_INDEX: &str = "CREATE UNIQUE INDEX issues_ref ON issues(ref COLLATE NOCASE) WHERE ref IS NOT NULL";
+
+/// What migration 9's two ADD COLUMNs append to the issues table's CREATE
+/// statement, before its closing parenthesis.
+pub const V9_ISSUE_COLUMNS: &str = ", ref TEXT, creator TEXT)";
+
+/// Undoes migration 9's schema changes on an upgraded dump, after checking
+/// them: the ref index's exact SQL, the two new issue columns null on every
+/// issue and appended to the issues CREATE statement, which gets its v8
+/// text back. Call it before `undo_v8_schema`, whose columns come before
+/// these.
+pub fn undo_v9_schema(after: &mut Dump) {
+    let t = |s: &str| Value::Text(s.into());
+    let index = after.schema.iter().find(|r| r["name"] == t("issues_ref")).expect("issues_ref missing");
+    assert_eq!((&index["type"], &index["tbl_name"], &index["sql"]), (&t("index"), &t("issues"), &t(V9_REF_INDEX)));
+    after.schema.retain(|r| r["name"] != t("issues_ref"));
+    for row in after.tables.get_mut("issues").expect("issues table") {
+        assert_eq!(row.remove("ref"), Some(Value::Null), "{row:?}");
+        assert_eq!(row.remove("creator"), Some(Value::Null), "{row:?}");
+    }
+    let issues = after.schema.iter_mut().find(|r| r["name"] == t("issues")).expect("issues");
+    let Value::Text(sql) = &issues["sql"] else { panic!("{issues:?}") };
+    let v8 = sql.strip_suffix(V9_ISSUE_COLUMNS).unwrap_or_else(|| panic!("the v9 columns aren't at the end of {sql}"));
+    issues.insert("sql".into(), Value::Text(format!("{v8})")));
 }
 
 /// The schema plus every row of every table, for before/after comparisons.

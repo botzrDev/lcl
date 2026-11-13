@@ -180,6 +180,12 @@ pub struct Issue {
     pub milestone_id: Option<String>,
     /// The milestone's name. Derived when the issue is read; ignored on write.
     pub milestone: Option<String>,
+    /// The id the issue has elsewhere (its Linear id, say): on no other
+    /// issue, ignoring ASCII case, and never shaped like a reference to one
+    /// of this workspace's issues (`N`, `#N`, its `KEY-N`, a UUID).
+    pub r#ref: Option<String>,
+    /// Who created it. Written on create only.
+    pub creator: Option<String>,
     pub estimate: Option<i64>,
     pub due_date: Option<String>,
     /// Label names. Read sorted (ignoring case); on write each must name a
@@ -564,7 +570,7 @@ mod tests {
         Issue {
             id: "id".into(), number: 1, identifier: String::new(), title: "t".into(), description: String::new(), status,
             priority: Priority::None, assignee: None, parent_id: None, parent_identifier: None,
-            project_id: None, project: None, milestone_id: None, milestone: None, estimate: None, due_date: None,
+            project_id: None, project: None, milestone_id: None, milestone: None, r#ref: None, creator: None, estimate: None, due_date: None,
             labels: vec![], created_at: 1, updated_at: 1,
             completed_at: completed, started_at: started, canceled_at: canceled,
         }

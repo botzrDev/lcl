@@ -22,7 +22,7 @@
 
 mod common;
 
-use common::{argv, dump, exec, files, foreign_key_violations, fts_integrity, undo_v8_schema, user_version, Env, Out, FTS_TABLES, V0_INDEX_FIXTURE, V7_FIXTURE};
+use common::{argv, dump, exec, files, foreign_key_violations, fts_integrity, undo_v8_schema, undo_v9_schema, user_version, Env, Out, FTS_TABLES, V0_INDEX_FIXTURE, V7_FIXTURE};
 use rusqlite::Connection;
 use serde_json::{json, Value};
 use std::path::Path;
@@ -96,13 +96,14 @@ fn upgrades_a_v7_workspace() {
     let before = dump(&db);
 
     let list = env.lcl(&["issue", "list", "--json"]).assert_ok().json();
-    assert_eq!(user_version(&db), 8);
+    assert_eq!(user_version(&db), 9);
     let seen: Vec<_> = list["issues"].as_array().expect("issues").iter().map(|i| (i["identifier"].clone(), i["project"].clone(), i["milestone"].clone())).collect();
     assert_eq!(seen, [(json!("SEVE-3"), Value::Null, Value::Null), (json!("SEVE-2"), Value::Null, Value::Null), (json!("SEVE-1"), Value::Null, Value::Null)]);
 
-    // Undoing V8's expected changes gives back the v7 file exactly, the
-    // issues table's CREATE statement included.
+    // Undoing V9's and V8's expected changes gives back the v7 file
+    // exactly, the issues table's CREATE statement included.
     let mut after = dump(&db);
+    undo_v9_schema(&mut after);
     undo_v8_schema(&mut after);
     assert_eq!(after, before);
     assert_eq!(foreign_key_violations(&db), vec![]);

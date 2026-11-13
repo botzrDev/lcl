@@ -18,9 +18,19 @@ pub enum LclError {
     /// UUID, when that is what was given).
     #[error("issue {0} not found")]
     IssueNotFound(String),
-    /// `KEY-N` with a key that isn't this workspace's.
-    #[error("{given} is not in this workspace (key {key})")]
-    WrongWorkspace { given: String, key: String },
+    /// `KEY-N` with a key that isn't this workspace's. `holder`: an issue
+    /// whose ref it is (its `KEY-N`, and the ref as stored), named as a
+    /// hint; the identifier never resolves through it.
+    #[error("{given} is not in this workspace (key {key}){}", holder.as_ref().map(|(issue, r)| format!("; {issue} has ref {r}")).unwrap_or_default())]
+    WrongWorkspace { given: String, key: String, holder: Option<(String, String)> },
+    /// A ref another issue has, ignoring case. `holder` is its `KEY-N`.
+    #[error("ref {given:?} is already on {holder}")]
+    RefTaken { given: String, holder: String },
+    /// A ref that lcl would read as a reference to one of this workspace's
+    /// issues (`N`, `#N`, its `KEY-N`, a UUID): text must never have two
+    /// meanings.
+    #[error("ref {0:?} looks like one of this workspace's own issue references")]
+    RefLooksOwn(String),
     #[error("{0} can't be its own parent")]
     SelfParent(String),
     /// `path` is the loop the new link would close, from the issue back to it.
@@ -127,6 +137,7 @@ impl LclError {
         matches!(
             self,
             LclError::WrongWorkspace { .. }
+                | LclError::RefLooksOwn(_)
                 | LclError::SelfParent(_)
                 | LclError::ParentCycle { .. }
                 | LclError::UnknownLabel(_)

@@ -143,6 +143,12 @@ enum IssueCmd {
         #[arg(long, value_name = "MILESTONE", value_parser = parse_milestone_name, conflicts_with = "no_milestone")] milestone: Option<String>,
         /// Give it no milestone (the default).
         #[arg(long)] no_milestone: bool,
+        /// The id it has elsewhere, as BZR-1532 for a Linear issue: on no
+        /// other issue (ignoring case), and not shaped like a reference to one
+        /// of this workspace's issues (N, #N, its KEY-N, a UUID).
+        #[arg(long = "ref", value_name = "REF", value_parser = parse_ref)] issue_ref: Option<String>,
+        /// Who is creating it. Without it: LCL_AUTHOR, else USER.
+        #[arg(long, value_name = "NAME", value_parser = parse_author)] author: Option<String>,
     },
     /// List issues: 50 at a time unless told otherwise, newest number first.
     ///
@@ -218,6 +224,10 @@ enum IssueCmd {
         #[arg(long, value_name = "MILESTONE", value_parser = parse_milestone_name, conflicts_with = "no_milestone")] milestone: Option<String>,
         /// Take it off its milestone, leaving its project.
         #[arg(long)] no_milestone: bool,
+        /// Set the id it has elsewhere, as BZR-1532 (see issue create --ref).
+        #[arg(long = "ref", value_name = "REF", value_parser = parse_ref, conflicts_with = "no_ref")] issue_ref: Option<String>,
+        /// Remove its ref.
+        #[arg(long)] no_ref: bool,
     },
     Delete { #[arg(allow_negative_numbers = true)] id: IssueRef },
     /// Relate two issues: A blocks B, A blocked-by B, A related B, or A duplicate-of B.
@@ -250,7 +260,8 @@ enum IssueCmd {
         #[arg(value_parser = inline_body)] body: Option<String>,
         /// Read the comment from PATH, or from stdin if PATH is `-`. Stored byte for byte.
         #[arg(long, value_name = "PATH", value_parser = read_comment)] body_file: Option<String>,
-        #[arg(long)] author: Option<String>,
+        /// Who is writing it. Without it: LCL_AUTHOR, else USER.
+        #[arg(long, value_name = "NAME", value_parser = parse_author)] author: Option<String>,
     },
     Comments { #[arg(allow_negative_numbers = true)] id: IssueRef },
 }
@@ -566,6 +577,36 @@ fn parse_assignee_filter(s: &str) -> std::result::Result<AssigneeFilter, String>
     if s.is_empty() { Err("an assignee can't be empty; for unassigned issues, use --assignee none".into()) }
     else if s.eq_ignore_ascii_case("none") { Ok(AssigneeFilter::Unassigned) }
     else { Ok(AssigneeFilter::Named(s.to_string())) }
+}
+
+/// `--ref`: trimmed; at most 100 characters, none of them whitespace or a
+/// control character. Blank is refused.
+fn parse_ref(s: &str) -> std::result::Result<String, String> {
+    let s = s.trim();
+    let chars = s.chars().count();
+    if s.is_empty() {
+        Err("a ref can't be empty; to remove one, use issue update --no-ref".into())
+    } else if chars > 100 {
+        Err(format!("a ref can be at most 100 characters; this one has {chars}"))
+    } else if s.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        Err(format!("ref {s:?} contains whitespace or a control character"))
+    } else {
+        Ok(s.to_string())
+    }
+}
+
+/// `--author`: trimmed; blank is refused (leaving it out means LCL_AUTHOR,
+/// else USER).
+fn parse_author(s: &str) -> std::result::Result<String, String> {
+    let s = s.trim();
+    if s.is_empty() { Err("an author can't be empty; leave --author out to use LCL_AUTHOR or USER".into()) } else { Ok(s.to_string()) }
+}
+
+/// Who is writing, when --author isn't given: LCL_AUTHOR, else USER,
+/// trimmed. Empty (or only whitespace, or not UTF-8) counts as unset; with
+/// neither, nobody (null).
+fn env_author() -> Option<String> {
+    ["LCL_AUTHOR", "USER"].iter().find_map(|v| std::env::var(v).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()))
 }
 
 /// A project name or reference, trimmed; blank is refused.
@@ -921,7 +962,7 @@ fn run(cli: Cli) -> Result<()> {
             match cmd {
                 IssueCmd::Create {
                     title, description, description_file, status, priority, assignee, parent, label, estimate, due,
-                    project, no_project, milestone, no_milestone,
+                    project, no_project, milestone, no_milestone, issue_ref, author,
                 } => {
                     let description = description.or(description_file).unwrap_or_default();
                     let parent_id = parent.map(|p| store.resolve(&p)).transpose()?.map(|p| p.id);
@@ -930,7 +971,7 @@ fn run(cli: Cli) -> Result<()> {
                     let issue = project_hint(store.create_issue(Issue {
                         id: String::new(), number: 0, identifier: String::new(), title, description, status, priority,
                         assignee, parent_id, parent_identifier: None, project_id: None, project: None, milestone_id: None, milestone: None,
-                        estimate, due_date: due.map(|d| d.to_string()), labels: label,
+                        r#ref: issue_ref, creator: author.or_else(env_author), estimate, due_date: due.map(|d| d.to_string()), labels: label,
                         created_at: 0, updated_at: 0, completed_at: None, started_at: None, canceled_at: None,
                     }, &place), flag.as_deref())?;
                     if cli.json { print_json(&issue); } else { println!("Created {}", issue.identifier); }
@@ -962,6 +1003,8 @@ fn run(cli: Cli) -> Result<()> {
                     else {
                         println!("{} {}", issue.identifier, issue.title);
                         println!("Status: {}  Priority: {}  Assignee: {}", issue.status, issue.priority.label(), issue.assignee.as_deref().unwrap_or("Unassigned"));
+                        if let Some(r) = &issue.r#ref { println!("Ref: {r}"); }
+                        if let Some(c) = &issue.creator { println!("Creator: {c}"); }
                         if !issue.labels.is_empty() { println!("Labels: {}", issue.labels.join(", ")); }
                         if let Some(p) = &issue.parent_identifier { println!("Parent: {p}"); }
                         if let Some(p) = &issue.project { println!("Project: {p}"); }
@@ -991,6 +1034,7 @@ fn run(cli: Cli) -> Result<()> {
                 IssueCmd::Update {
                     id, title, description, description_file, status, priority, assignee, no_assignee, estimate, no_estimate, due, no_due,
                     label, add_label, remove_label, clear_labels, parent, no_parent, project, no_project, milestone, no_milestone,
+                    issue_ref, no_ref,
                 } => {
                     // An unknown name is an error even when removing; a known
                     // label the issue doesn't have is a no-op.
@@ -1021,6 +1065,8 @@ fn run(cli: Cli) -> Result<()> {
                         i.labels.retain(|n| !remove_label.iter().any(|r| r.eq_ignore_ascii_case(n)));
                         i.labels.extend(add_label);
                         if let Some(p) = new_parent { i.parent_id = p; }
+                        if issue_ref.is_some() { i.r#ref = issue_ref; }
+                        if no_ref { i.r#ref = None; }
                     }), flag.as_deref())?;
                     if let Some(c) = cleared {
                         eprintln!("lcl: milestone {:?} cleared: it belongs to project {:?}", c.milestone, c.project);
@@ -1045,7 +1091,7 @@ fn run(cli: Cli) -> Result<()> {
                 }
                 IssueCmd::Comment { id, body, body_file, author } => {
                     let Some(body) = body.or(body_file) else { unreachable!("clap requires BODY or --body-file") };
-                    let c = store.add_comment(&id, body, author)?;
+                    let c = store.add_comment(&id, body, author.or_else(env_author))?;
                     if cli.json { print_json(&c); } else { println!("Comment added"); }
                 }
                 IssueCmd::Comments { id } => {

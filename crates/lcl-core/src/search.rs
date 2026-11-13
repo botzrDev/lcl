@@ -99,6 +99,8 @@ pub enum Field {
     Description,
     /// Every word is in one of its comments.
     Comments,
+    /// The query is the issue's ref, ignoring ASCII case.
+    Ref,
 }
 
 impl Field {
@@ -108,6 +110,7 @@ impl Field {
             Field::Title => "title",
             Field::Description => "description",
             Field::Comments => "comments",
+            Field::Ref => "ref",
         }
     }
 }

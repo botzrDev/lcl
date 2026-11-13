@@ -4,7 +4,61 @@
 
 mod common;
 
-use common::{argv, Env};
+use common::{argv, Env, Out};
+use rusqlite::Connection;
+use serde_json::json;
+use std::path::Path;
+use std::time::{Duration, Instant};
+
+/// Holds `db`'s write lock (BEGIN IMMEDIATE on a plain connection) for
+/// `hold`, and runs `f` once it is taken. Returns what `f` returned and how
+/// long after the lock was taken `f` finished.
+fn while_locked(db: &Path, hold: Duration, f: impl FnOnce() -> Out) -> (Out, Duration) {
+    let (locked, taken) = std::sync::mpsc::channel();
+    std::thread::scope(|s| {
+        let holder = s.spawn(move || {
+            let conn = Connection::open(db).expect("open db");
+            conn.execute_batch("BEGIN IMMEDIATE").expect("take the write lock");
+            locked.send(Instant::now()).expect("signal");
+            std::thread::sleep(hold);
+            conn.execute_batch("COMMIT").expect("release the write lock");
+        });
+        let at = taken.recv().expect("lock taken");
+        let out = f();
+        let took = at.elapsed();
+        holder.join().expect("holder thread");
+        (out, took)
+    })
+}
+
+/// A write that meets a lock held for 7 s (a stall of a few seconds is
+/// ordinary on a machine busy with builds) waits it out, and lands.
+#[test]
+fn a_write_waits_out_a_seven_second_lock() {
+    let env = Env::new();
+    env.lcl(&["init"]).assert_ok();
+    env.create("one");
+    let (out, took) = while_locked(&env.db_path(), Duration::from_secs(7), || env.lcl(&["issue", "comment", "1", "x"]));
+    assert_eq!((out.code, out.stdout.as_str(), out.stderr.as_str()), (0, "Comment added\n", ""), "after {took:?}");
+    assert!(took >= Duration::from_secs(7), "{took:?}");
+    let comments = env.lcl(&["issue", "comments", "1", "--json"]).assert_ok().json();
+    let bodies: Vec<_> = comments.as_array().expect("comments").iter().map(|c| c["body"].clone()).collect();
+    assert_eq!(bodies, [json!("x")]);
+}
+
+/// The same for the registry's index.
+#[test]
+fn workspace_create_waits_out_a_seven_second_lock_on_the_index() {
+    let env = Env::new();
+    env.lcl(&["workspace", "create", "first", "--key", "FIR"]).assert_ok();
+    let index = env.home.path().join(".lcl").join("index.sqlite");
+    let (out, took) = while_locked(&index, Duration::from_secs(7), || env.lcl(&["workspace", "create", "second", "--key", "SEC", "--json"]));
+    assert_eq!((out.code, out.stderr.as_str()), (0, ""), "after {took:?}: {out:#?}");
+    assert!(took >= Duration::from_secs(7), "{took:?}");
+    let list = env.lcl(&["workspace", "list", "--json"]).assert_ok().json();
+    let names: Vec<_> = list.as_array().expect("workspaces").iter().map(|w| (w["name"].clone(), w["missing"].clone())).collect();
+    assert_eq!(names, [(json!("first"), json!(false)), (json!("second"), json!(false))]);
+}
 
 #[test]
 fn parallel_creates_all_succeed_with_distinct_numbers() {

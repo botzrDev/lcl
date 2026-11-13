@@ -13,7 +13,7 @@
 /// adding a migration bumps it and the two can't drift apart.
 pub const SCHEMA_VERSION: i64 = MIGRATIONS.len() as i64;
 
-pub(crate) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8];
+pub(crate) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8, V9];
 
 /// v0 -> v1: the lcl 0.1.0 schema, verbatim.
 ///
@@ -359,4 +359,14 @@ WHEN NEW.project_id IS NOT OLD.project_id
 BEGIN
     SELECT RAISE(ABORT, 'a milestone cannot move to another project');
 END;
+"#;
+
+/// v8 -> v9: an issue's ref, the id it had elsewhere (its Linear id, as
+/// BZR-1532, which commits and specs cite), and its creator. A ref is on at
+/// most one issue, ignoring case, for every writer. Existing issues have
+/// neither.
+const V9: &str = r#"
+ALTER TABLE issues ADD COLUMN ref TEXT;
+CREATE UNIQUE INDEX issues_ref ON issues(ref COLLATE NOCASE) WHERE ref IS NOT NULL;
+ALTER TABLE issues ADD COLUMN creator TEXT;
 "#;
