@@ -101,6 +101,13 @@ pub enum LclError {
     ExportBlocked { problems: Vec<String> },
     #[error("{0} already exists; pass --force to replace it")]
     OutputExists(String),
+    /// `lcl backup PATH` with something at PATH. It is never replaced.
+    #[error("{0} already exists; a backup never replaces a file")]
+    BackupExists(String),
+    /// A copy of a database that could not be written. Nothing is left at
+    /// `path`.
+    #[error("can't write {path}: {reason}")]
+    BackupFailed { path: String, reason: String },
     #[error("{0} can't be related to itself")]
     SelfRelation(String),
     /// `path` is the cycle the new row would close, as `A blocks B blocks A`.
@@ -361,7 +368,7 @@ impl LclError {
             | LclError::BadRegistryVersion(_)
             | LclError::BadRegistryVersionNumber(_)
             | LclError::ExportRoundTrip(_) => Other,
-            LclError::Io(_) => Io,
+            LclError::Io(_) | LclError::BackupFailed { .. } => Io,
             LclError::SchemaTooNew { .. }
             | LclError::UnknownStatus { .. }
             | LclError::UnknownPriority { .. }
@@ -395,6 +402,7 @@ impl LclError {
             | LclError::ImportKeyMismatch { .. }
             | LclError::ExportBlocked { .. }
             | LclError::OutputExists(_)
+            | LclError::BackupExists(_)
             | LclError::SelfRelation(_)
             | LclError::BlocksCycle { .. }
             | LclError::AlreadyDuplicate { .. }

@@ -167,6 +167,23 @@ enum Commands {
         #[arg(long, requires = "output")]
         force: bool,
     },
+    /// Copy this workspace's file to PATH, safely while lcl is in use.
+    ///
+    /// The copy is one committed state of the workspace: a write that is
+    /// under way is left out whole, and is not held up. It is written under
+    /// a temporary name in PATH's directory and given its name only when it
+    /// is complete and has passed SQLite's integrity check, so PATH is never
+    /// half a file. A PATH that exists is refused and left as it is.
+    ///
+    /// The copy is a workspace file: to restore it, put it where the
+    /// workspace's file is while no lcl is running (lcl workspace show
+    /// prints that path).
+    Backup {
+        /// Where to write the copy: a file that doesn't exist, in a
+        /// directory that does.
+        #[arg(value_name = "PATH")]
+        path: PathBuf,
+    },
     /// Restore a file written by lcl export (or a converter) into this
     /// workspace, which must be empty and have the file's key.
     ///
@@ -2575,6 +2592,22 @@ fn run(cli: Cli) -> Result<()> {
                         outln!("Exported {} to {path}", export.counts.phrase());
                     }
                 }
+            }
+        }
+        Commands::Backup { path } => {
+            let store = resolve_store(&cli.workspace)?;
+            let report = store.backup(&path)?;
+            let shown = path.display().to_string();
+            if cli.json {
+                let mut v = serde_json::to_value(&report)?;
+                v["path"] = serde_json::Value::String(shown);
+                print_json(&v)?;
+            } else {
+                outln!(
+                    "Backed up to {shown} ({} bytes, schema {})",
+                    report.bytes,
+                    report.schema_version
+                );
             }
         }
         Commands::Import { input, dry_run } => {

@@ -503,6 +503,7 @@ pinned! {
     doc_update => "doc update",
     doc_delete => "doc delete",
     search => "search",
+    backup => "backup",
     export => "export",
     import => "import",
 }
@@ -723,6 +724,10 @@ mod cases {
             j(&env, &["search", "words"]),
             j(&env, &["search", "nowhere"]),
         ]
+    }
+
+    pub fn backup() -> Vec<Value> {
+        vec![j(&rich().env, &["backup", "copy.sqlite"])]
     }
 
     pub fn export() -> Vec<Value> {
@@ -952,12 +957,14 @@ fn each_kind_of_error_has_its_exit_status() {
         (&["issue", "delete", "1"], 1, "conflict"),
         (&["project", "delete", "Parser"], 1, "conflict"),
         (&["issue", "relate", "1", "blocks", "3"], 1, "conflict"),
+        (&["backup", ".lcl/data.sqlite"], 1, "conflict"),
         // A file can't be written: 1, io.
         (
             &["export", "--output", missing_dir.to_str().unwrap()],
             1,
             "io",
         ),
+        (&["backup", missing_dir.to_str().unwrap()], 1, "io"),
     ];
     for (args, code, kind) in cases {
         let mut argv = args.to_vec();

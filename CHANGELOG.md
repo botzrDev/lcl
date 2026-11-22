@@ -6,6 +6,10 @@ All notable changes to lcl are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `lcl backup PATH` copies the workspace's file to PATH, safely while other lcl commands read and write it. The copy is one committed state. It is written under a temporary name and gets its name only when complete, so PATH is never half a file. A PATH that exists is refused with exit 1. With `--json` it prints `path`, `bytes` and `schema_version`.
+
 ### Fixed
 
 - On Windows, lcl finds the home directory through `USERPROFILE` when `HOME` is not set or is empty, so `lcl init` and `lcl workspace create` work in cmd and PowerShell. 0.3.0-alpha.1 exited 1 there. `HOME` still wins when it is set, on every platform, so a registry made under it stays where it is. With neither, the error names both; lcl never falls back to another directory.

@@ -200,7 +200,7 @@ fn clap_errors_are_one_json_line_under_json() {
         ),
         (
             vec!["--json"],
-            "'lcl' requires a subcommand but one was not provided\n  [subcommands: init, workspace, project, milestone, issue, comment, doc, label, cycle, search, export, import, tui, help]",
+            "'lcl' requires a subcommand but one was not provided\n  [subcommands: init, workspace, project, milestone, issue, comment, doc, label, cycle, search, export, backup, import, tui, help]",
         ),
     ];
     for (args, message) in &cases {

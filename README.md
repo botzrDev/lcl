@@ -36,7 +36,7 @@ Keep real data safe while you do:
 
 - Test with a throwaway `HOME`, so lcl can't reach your own workspaces: `export HOME=$(mktemp -d)`. `HOME` wins on Windows too; without it lcl uses `USERPROFILE` there.
 - A backup is `lcl export --output backup.jsonl`. `lcl import backup.jsonl` restores it into an empty workspace with the same key.
-- Copying `.lcl/` while no lcl is running is a backup too. Copy `data.sqlite-wal` with `data.sqlite` if it is there.
+- `lcl backup PATH` copies the workspace's file to PATH, also while lcl is in use. To restore it, put the copy where the workspace's file is while no lcl is running; `lcl workspace show` prints that path.
 
 What counts as a bug:
 

@@ -88,6 +88,12 @@ An issue matches when every word is in its title and description together, or ev
 
 `lcl import` restores that file into an empty workspace with the same key. Numbers, refs, creators, authors, and timestamps are kept as the file gives them. The file is checked whole before anything is written, and the write is one transaction. `--dry-run` checks and counts, and writes nothing. A stored value the import would refuse stops an export as well, and the export writes nothing.
 
+## Backup
+
+`lcl backup PATH` copies the workspace's file with SQLite's online backup API, through the open connection, so it is safe while other lcl processes write. It never uses `VACUUM INTO`: the search indexes name rows by rowid, and a vacuum may renumber them.
+
+The pages are read in one read transaction, so the copy is one committed state. It is written to a temporary file in PATH's directory, checked with `PRAGMA integrity_check`, synced, and then hard-linked to PATH. PATH is a complete workspace or is not there. A PATH that exists is never replaced. A backup that is killed can leave its temporary file, `.NAME.lcl-backup-PID-RANDOM.tmp`, beside PATH. `crates/lcl-core/src/backup.rs` states these rules and tests them.
+
 ## The terminal UI
 
 `lcl tui` lists issues. `j` and `k` move, `1` through `7` filter by status, `0` shows every status, `r` reloads, and `q` or Ctrl-C quits. It needs a terminal on both stdin and stdout. It does not create, edit, search, or comment. The command line does that.
@@ -110,7 +116,7 @@ Text on a terminal shows a control character as its picture, so ESC is `␛`. A 
 
 ## What this version does not do
 
-A delete is immediate. There is no trash. There is no `lcl backup`. A copy is `lcl export`, or a copy of the SQLite file and its WAL taken while no lcl is running.
+A delete is immediate. There is no trash.
 
 An upgrade changes the file in place. lcl does not write a snapshot beside it first.
 

@@ -473,6 +473,16 @@ An issue as a relation names it.
 }
 ```
 
+## Backup
+
+### `lcl backup`
+
+`path` is as typed. `bytes` is the copy's size, and `schema_version` its schema.
+
+```json
+{"path": "string", "bytes": "integer", "schema_version": "integer"}
+```
+
 ## Export and import
 
 ### `lcl export`
