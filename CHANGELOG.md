@@ -10,6 +10,7 @@ Found by rough handling before the alpha.
 
 ### Changed
 
+- The local tool is licensed Apache-2.0. The crates stay unpublished.
 - `issue create`, `issue update`, `doc create` and `doc update` refuse a blank `--title` with exit 2. `lcl import` and `lcl export` still take one, because 0.1.0 stored them.
 - An empty `.lcl/data.sqlite` is refused with exit 1 and left empty. 0.2.0 opened it as a workspace with no name and no key. `lcl init` replaces it.
 - An error prints its cause once. 0.2.0 printed a SQLite error three times, as `database error: X`, `X` and `Error code N: X`.

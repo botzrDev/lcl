@@ -1,0 +1,39 @@
+name: Bug
+description: A panic, a lost write, a wrong exit, or behavior the help text does not describe
+body:
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `lcl --version`
+      placeholder: lcl 0.2.0
+    validations:
+      required: true
+  - type: input
+    id: system
+    attributes:
+      label: System
+      description: Operating system and terminal
+    validations:
+      required: true
+  - type: textarea
+    id: commands
+    attributes:
+      label: Commands
+      description: From `lcl init` on, in order. A script is best.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: What happened
+      description: Exit status, and the whole of stdout and stderr.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
