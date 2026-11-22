@@ -114,8 +114,8 @@ fn comments_read_as_a_header_and_an_indented_body() {
     // JSON is as it was: the stored number, and the body as stored.
     let iid = issue_id(&env);
     let want = json!([
-        {"id": a, "issue_id": iid, "body": "first line\nsecond line\nthird line", "author": "ann", "created_at": T1},
-        {"id": b, "issue_id": iid, "body": "no author", "author": null, "created_at": T2},
+        {"id": a, "issue_id": iid, "body": "first line\nsecond line\nthird line", "author": "ann", "created_at": T1, "deleted_at": null},
+        {"id": b, "issue_id": iid, "body": "no author", "author": null, "created_at": T2, "deleted_at": null},
     ]);
     assert_eq!(
         env.lcl(&["--json", "issue", "comments", "1"])
@@ -168,7 +168,7 @@ fn comment_edit_replaces_the_text_and_nothing_else() {
     let out = env.lcl(&["--json", "comment", "edit", &a.to_uppercase(), "new text"]);
     assert_eq!(
         out.assert_ok().json(),
-        json!({"id": a, "issue_id": iid, "body": "new text", "author": "ann", "created_at": T1})
+        json!({"id": a, "issue_id": iid, "body": "new text", "author": "ann", "created_at": T1, "deleted_at": null})
     );
     // Stored, not only printed: read back after the edit by the id in
     // another case.
@@ -266,15 +266,29 @@ fn comment_delete_removes_one_comment() {
     );
     assert_eq!(
         trio(&env.lcl(&["comment", "delete", &a])),
-        (0, format!("Deleted comment {a}\n").as_str(), "")
+        (
+            0,
+            format!("Moved comment {a} to the trash; restore it with: lcl comment restore {a}\n")
+                .as_str(),
+            ""
+        )
     );
     assert_eq!(trio(&env.lcl(&["issue", "comments", "1"])), (0, "", ""));
     assert_eq!(updated_at(&env), 1000);
 
+    // Deleted again, it is in the trash already; purged, it is not found.
     assert_eq!(
         trio(&env.lcl(&["comment", "delete", &a])),
-        (1, "", format!("Error: comment {a} not found\n").as_str())
+        (
+            1,
+            "",
+            format!(
+                "Error: comment {a} is in the trash; restore it with: lcl comment restore {a}\n"
+            )
+            .as_str()
+        )
     );
+    env.lcl(&["comment", "purge", &a]).assert_ok();
     assert_eq!(
         trio(&env.lcl(&["--json", "comment", "delete", &a])),
         (
@@ -328,8 +342,7 @@ fn search_follows_comment_edits_and_deletes() {
     env.lcl(&["comment", "delete", &id]).assert_ok();
     assert_eq!(found("charlie"), Vec::<String>::new());
     fts_integrity(&db, &["comments_fts"]);
-    // The next comment takes the deleted one's rowid, so words of the
-    // deleted comment still in the index would now match it.
+    // In the trash it keeps its row, and the next comment gets a new one.
     let next = env
         .lcl(&["--json", "issue", "comment", "1", "echo"])
         .assert_ok()
@@ -337,9 +350,25 @@ fn search_follows_comment_edits_and_deletes() {
         .as_str()
         .expect("id")
         .to_string();
-    assert_eq!(rowid(&next), deleted);
+    assert_ne!(rowid(&next), deleted);
     assert_eq!(
         (found("charlie"), found("delta"), found("echo")),
+        (vec![], vec![], vec!["W-1".to_string()])
+    );
+    // Purged, its row is free: the next comment takes it, and the purged
+    // comment's words, were they still in the index, would match it.
+    env.lcl(&["comment", "delete", &next]).assert_ok();
+    env.lcl(&["comment", "purge", "--all"]).assert_ok();
+    let after = env
+        .lcl(&["--json", "issue", "comment", "1", "foxtrot"])
+        .assert_ok()
+        .json()["id"]
+        .as_str()
+        .expect("id")
+        .to_string();
+    assert_eq!(rowid(&after), deleted);
+    assert_eq!(
+        (found("charlie"), found("echo"), found("foxtrot")),
         (vec![], vec![], vec!["W-1".to_string()])
     );
     fts_integrity(&db, &["comments_fts"]);

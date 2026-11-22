@@ -797,6 +797,85 @@ pub fn undo_v11_schema(after: &mut Dump, before: &Dump) {
     }
 }
 
+/// Undoes migration 13's schema changes on an upgraded dump, after checking
+/// them, as `undo_v12_schema` does for issues: docs, comments and labels
+/// gained `deleted_at`, NULL in every row an upgrade finds, and the search
+/// triggers `docs_au` and `comments_au` fire only for an UPDATE OF their
+/// indexed columns. The column leaves the rows and the CREATE statements,
+/// and each trigger's text is put back to the one in `before`. Call it
+/// before `undo_v12_schema`.
+pub fn undo_v13_schema(after: &mut Dump, before: &Dump) {
+    let column =
+        ", deleted_at INTEGER CHECK (deleted_at IS NULL OR typeof(deleted_at) = 'integer')";
+    let sql_of = |dump: &Dump, name: &str| -> Option<String> {
+        dump.schema
+            .iter()
+            .find(|r| r["name"] == Value::Text(name.into()))
+            .map(|r| match &r["sql"] {
+                Value::Text(s) => s.clone(),
+                other => panic!("{name} sql is {other:?}"),
+            })
+    };
+    let set_sql = |dump: &mut Dump, name: &str, sql: String| {
+        let row = dump
+            .schema
+            .iter_mut()
+            .find(|r| r["name"] == Value::Text(name.into()))
+            .unwrap_or_else(|| panic!("{name} missing"));
+        row.insert("sql".into(), Value::Text(sql));
+    };
+    for table in ["docs", "comments", "labels"] {
+        let sql = sql_of(after, table).unwrap_or_else(|| panic!("{table} missing"));
+        assert!(sql.contains(column), "{table}: {sql}");
+        set_sql(after, table, sql.replace(column, ""));
+        for row in after.tables.get_mut(table).expect("rows") {
+            assert_eq!(
+                row.remove("deleted_at"),
+                Some(Value::Null),
+                "an upgraded row of {table} is live"
+            );
+        }
+    }
+    let body = |sql: &str| -> String {
+        let begin = sql.find("BEGIN").expect("a trigger body");
+        sql[begin..]
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    for (trigger, narrowed, table) in [
+        ("docs_au", "AFTER UPDATE OF title, content ON docs", "docs"),
+        (
+            "comments_au",
+            "AFTER UPDATE OF body ON comments",
+            "comments",
+        ),
+    ] {
+        // Gone already when `undo_v6_schema`, which takes out what V6
+        // added (comments_au among it), ran first.
+        let Some(sql) = sql_of(after, trigger) else {
+            assert_eq!(trigger, "comments_au");
+            continue;
+        };
+        assert!(sql.contains(narrowed), "{sql}");
+        match sql_of(before, trigger) {
+            Some(old) => {
+                assert!(old.contains(&format!("AFTER UPDATE ON {table}")), "{old}");
+                assert_eq!(body(&sql), body(&old));
+                set_sql(after, trigger, old);
+            }
+            // A file from before the trigger existed (comments_au came in
+            // V6): the callers account for what V6 added themselves, and
+            // compare with the text that fires on any UPDATE.
+            None => set_sql(
+                after,
+                trigger,
+                sql.replace(narrowed, &format!("AFTER UPDATE ON {table}")),
+            ),
+        }
+    }
+}
+
 /// Undoes migration 12's schema changes on an upgraded dump, after checking
 /// them. `issues` gained `deleted_at`, and every issue an upgrade finds is
 /// live, so the column is NULL in every row: it is taken out of the rows,

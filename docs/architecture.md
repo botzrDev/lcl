@@ -43,8 +43,9 @@ These rules hold for every writer, including import:
 - A milestone belongs to one project for good. An issue's milestone is in that issue's project.
 - Deleting an issue moves it to the trash: it sets `deleted_at` and changes nothing else. It is refused while the issue has sub-issues that are not in the trash. `issue restore` clears `deleted_at`, and is refused while the issue's parent is in the trash, so a live issue's parent is live.
 - An issue in the trash is in no list, search, count, child list or relation list, and does not block. Every command but `issue restore` and `issue purge` refuses one by name. It keeps its number, its ref, and its place in its project, milestone and cycles. `lcl export` leaves it out. 
-- `issue purge` removes an issue in the trash for good, in one transaction with its comments, relations, label links and cycle links. A live issue can't be purged. An issue is purged after its sub-issues, or with them under `--all`. Its number is never handed out again. Nothing purges by itself. `crates/lcl-core/src/trash.rs` states these rules and `crates/lcl-cli/tests/trash.rs` tests them.
-- Deleting a project is refused while it has issues or milestones. Deleting a milestone is refused while an issue has it. Deleting a cycle is refused while an issue is in it. Deleting a doc is refused while another doc sits under it.
+- `issue purge` removes an issue in the trash for good, in one transaction with its comments, relations, label links and cycle links. A live issue can't be purged. An issue is purged after its sub-issues, or with them under `--all`. Its number is never handed out again. Nothing purges by itself.
+- Docs, comments and labels have the same trash: a `deleted_at`, and `delete`, `restore` and `purge`. A live doc's parent is live. A comment is frozen while its issue is in the trash, and is purged with it. A label in the trash keeps its name and its links to issues, hidden; rewriting an issue's labels replaces only its links to live labels, so `label restore` puts the label back on every issue that had it. `crates/lcl-core/src/trash.rs` states all these rules; `crates/lcl-cli/tests/trash.rs` and `trash_others.rs` test them.
+- Deleting a project is refused while it has issues or milestones. Deleting a milestone is refused while an issue has it. Deleting a cycle is refused while an issue is in it. Deleting a doc is refused while a doc that is not in the trash sits under it.
 
 `--cycle` puts an issue in that cycle and takes it out of every other. `--no-cycle` clears them. An imported file may name more than one cycle on an issue; the table allows it. A comment's author defaults to `LCL_AUTHOR`, then `USER`. Adding, editing, or deleting a comment does not change the issue's `updated_at`.
 
@@ -122,7 +123,7 @@ Text on a terminal shows a control character as its picture, so ESC is `␛`. A 
 
 ## What this version does not do
 
-Deleting a doc, a comment or a label is immediate: only issues have a trash.
+Deleting a project, a milestone or a cycle is immediate, and refused while anything is in it. They have no trash.
 
 There is no install other than building this repository. The crates are unpublished. The name `lcl` on crates.io is someone else's crate. The binary in this repository is named `lcl`.
 

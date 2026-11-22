@@ -590,6 +590,9 @@ enum IssueCmd {
         /// The issue: KEY-N, #N, N or its UUID.
         #[arg(allow_negative_numbers = true)]
         id: IssueRef,
+        /// List the issue's comments that are in the trash, and no others.
+        #[arg(long)]
+        trashed: bool,
     },
 }
 
@@ -766,7 +769,11 @@ enum DocCmd {
         parent: Option<String>,
     },
     /// List docs: id and title, most recently updated first.
-    List,
+    List {
+        /// List the trash: only the docs doc delete moved there.
+        #[arg(long)]
+        trashed: bool,
+    },
     /// Show a doc: its title and content.
     Show {
         /// The doc's id, as doc list shows it.
@@ -793,10 +800,31 @@ enum DocCmd {
         #[arg(long)]
         no_parent: bool,
     },
-    /// Delete a doc.
+    /// Move a doc to the trash. Refused while docs that aren't in the trash are under it.
+    ///
+    /// The doc is left out of doc list and search, and a command that
+    /// names it is refused, until doc restore brings it back. doc list
+    /// --trashed shows the trash.
     Delete {
         /// The doc's id, as doc list shows it.
         id: String,
+    },
+    /// Bring a doc back from the trash, as it was. Refused while its parent is there.
+    Restore {
+        /// The doc's id, as doc list --trashed shows it.
+        id: String,
+    },
+    /// Remove a doc in the trash for good, or with --all every one. It can't be undone.
+    ///
+    /// Only a doc in the trash can be purged, and one with docs under it
+    /// goes after them, or with them under --all. Nothing is purged by itself.
+    #[command(group(ArgGroup::new("purge_what").required(true).args(["id", "all"])))]
+    Purge {
+        /// The doc's id, as doc list --trashed shows it.
+        id: Option<String>,
+        /// Purge every doc in the trash.
+        #[arg(long)]
+        all: bool,
     },
 }
 
@@ -812,12 +840,38 @@ enum LabelCmd {
         color: String,
     },
     /// List labels: id, name and color, by name.
-    List,
-    /// Delete a label by name (ignoring case) or id, removing it from every issue.
+    List {
+        /// List the trash: only the labels label delete moved there.
+        #[arg(long)]
+        trashed: bool,
+    },
+    /// Move a label to the trash, by name (ignoring case) or id. No issue shows it any more.
+    ///
+    /// Its name stays taken, and the issues that had it are remembered:
+    /// label restore puts it back on every one of them.
     Delete {
         /// The label's name (ignoring case) or id.
         #[arg(value_parser = parse_label_name)]
         name_or_id: String,
+    },
+    /// Bring a label back from the trash, onto every issue that had it.
+    Restore {
+        /// The label's name (ignoring case) or id.
+        #[arg(value_parser = parse_label_name)]
+        name_or_id: String,
+    },
+    /// Remove a label in the trash for good, or with --all every one. It can't be undone.
+    ///
+    /// Only a label in the trash can be purged. It goes with its links to
+    /// issues, and its name is free again. Nothing is purged by itself.
+    #[command(group(ArgGroup::new("purge_what").required(true).args(["name_or_id", "all"])))]
+    Purge {
+        /// The label's name (ignoring case) or id.
+        #[arg(value_parser = parse_label_name)]
+        name_or_id: Option<String>,
+        /// Purge every label in the trash.
+        #[arg(long)]
+        all: bool,
     },
 }
 
@@ -882,10 +936,26 @@ enum CommentCmd {
         #[arg(long, value_name = "PATH", value_parser = read_comment)]
         body_file: Option<String>,
     },
-    /// Delete a comment.
+    /// Move a comment to the trash. issue show, issue comments and search leave it out.
     Delete {
         /// The comment's id (a UUID, ignoring case), as issue comments --json shows it.
         id: String,
+    },
+    /// Bring a comment back from the trash, as it was.
+    Restore {
+        /// The comment's id (a UUID, ignoring case), as issue comments --trashed --json shows it.
+        id: String,
+    },
+    /// Remove a comment in the trash for good, or with --all every one. It can't be undone.
+    ///
+    /// Only a comment in the trash can be purged. Nothing is purged by itself.
+    #[command(group(ArgGroup::new("purge_what").required(true).args(["id", "all"])))]
+    Purge {
+        /// The comment's id (a UUID, ignoring case).
+        id: Option<String>,
+        /// Purge every comment in the trash.
+        #[arg(long)]
+        all: bool,
     },
 }
 
@@ -2146,7 +2216,7 @@ fn run(cli: Cli) -> Result<()> {
                 }
                 IssueCmd::Show { id } => {
                     let issue = store.resolve(&id)?;
-                    let comments = store.list_comments(issue.id.as_str())?;
+                    let comments = store.list_comments(issue.id.as_str(), false)?;
                     let children = store.children(issue.id.as_str())?;
                     let relations = store.relations(issue.id.as_str())?;
                     if cli.json {
@@ -2405,9 +2475,9 @@ fn run(cli: Cli) -> Result<()> {
                         outln!("Comment added");
                     }
                 }
-                IssueCmd::Comments { id } => {
+                IssueCmd::Comments { id, trashed } => {
                     let issue = store.resolve(&id)?;
-                    let comments = store.list_comments(issue.id.as_str())?;
+                    let comments = store.list_comments(issue.id.as_str(), trashed)?;
                     if cli.json {
                         print_json(&comments)?;
                     } else if !comments.is_empty() {
@@ -2439,7 +2509,34 @@ fn run(cli: Cli) -> Result<()> {
                     if cli.json {
                         print_json(&serde_json::json!({"deleted": c.id, "issue": issue}))?;
                     } else {
-                        outln!("Deleted comment {}", c.id);
+                        outln!(
+                            "Moved comment {0} to the trash; restore it with: lcl comment restore {0}",
+                            c.id
+                        );
+                    }
+                }
+                CommentCmd::Restore { id } => {
+                    let (c, _) = store.restore_comment(&id)?;
+                    if cli.json {
+                        print_json(&c)?;
+                    } else {
+                        outln!("Restored comment {}", c.id);
+                    }
+                }
+                CommentCmd::Purge { id, all: _ } => {
+                    let purged = match &id {
+                        Some(id) => store.purge_comment(id)?,
+                        None => store.purge_comments()?,
+                    };
+                    if cli.json {
+                        print_json(&purged)?;
+                    } else if purged.comments == 0 {
+                        outln!("No comments are in the trash");
+                    } else {
+                        outln!(
+                            "Purged {}",
+                            counted_list(&[(purged.comments, "comment", "comments")])
+                        );
                     }
                 }
             }
@@ -2461,6 +2558,7 @@ fn run(cli: Cli) -> Result<()> {
                         parent_id: parent,
                         created_at: 0,
                         updated_at: 0,
+                        deleted_at: None,
                     })?;
                     if cli.json {
                         print_json(&d)?;
@@ -2468,8 +2566,8 @@ fn run(cli: Cli) -> Result<()> {
                         outln!("Created doc {}", d.id);
                     }
                 }
-                DocCmd::List => {
-                    let docs = store.list_docs()?;
+                DocCmd::List { trashed } => {
+                    let docs = store.list_docs(trashed)?;
                     if cli.json {
                         print_json(&docs)?;
                     } else {
@@ -2509,11 +2607,35 @@ fn run(cli: Cli) -> Result<()> {
                     }
                 }
                 DocCmd::Delete { id } => {
-                    store.delete_doc(&id)?;
+                    let doc = store.delete_doc(&id)?;
                     if cli.json {
-                        print_json(&serde_json::json!({"deleted": id}))?;
+                        print_json(&serde_json::json!({"deleted": doc.id}))?;
                     } else {
-                        outln!("Deleted {}", id);
+                        outln!(
+                            "Moved doc {0} to the trash; restore it with: lcl doc restore {0}",
+                            doc.id
+                        );
+                    }
+                }
+                DocCmd::Restore { id } => {
+                    let doc = store.restore_doc(&id)?;
+                    if cli.json {
+                        print_json(&doc)?;
+                    } else {
+                        outln!("Restored doc {}", doc.id);
+                    }
+                }
+                DocCmd::Purge { id, all: _ } => {
+                    let purged = match &id {
+                        Some(id) => store.purge_doc(id)?,
+                        None => store.purge_docs()?,
+                    };
+                    if cli.json {
+                        print_json(&purged)?;
+                    } else if purged.docs == 0 {
+                        outln!("No docs are in the trash");
+                    } else {
+                        outln!("Purged {}", counted_list(&[(purged.docs, "doc", "docs")]));
                     }
                 }
             }
@@ -2526,6 +2648,7 @@ fn run(cli: Cli) -> Result<()> {
                         id: uuid::Uuid::new_v4().to_string(),
                         name,
                         color,
+                        deleted_at: None,
                     };
                     store.create_label(&l)?;
                     if cli.json {
@@ -2534,8 +2657,8 @@ fn run(cli: Cli) -> Result<()> {
                         outln!("Created label {}", l.name);
                     }
                 }
-                LabelCmd::List => {
-                    let ls = store.list_labels()?;
+                LabelCmd::List { trashed } => {
+                    let ls = store.list_labels(trashed)?;
                     if cli.json {
                         print_json(&ls)?;
                     } else {
@@ -2552,10 +2675,40 @@ fn run(cli: Cli) -> Result<()> {
                         )?;
                     } else {
                         outln!(
-                            "Deleted label {} (removed from {} issue{})",
+                            "Moved label {} to the trash (off {}); restore it with: lcl label restore {}",
                             label.name,
-                            issues,
-                            if issues == 1 { "" } else { "s" }
+                            counted_list(&[(issues, "issue", "issues")]),
+                            label.name
+                        );
+                    }
+                }
+                LabelCmd::Restore { name_or_id } => {
+                    let (label, issues) = store.restore_label(&name_or_id)?;
+                    if cli.json {
+                        print_json(
+                            &serde_json::json!({"restored": label.name, "id": label.id, "restored_to_issues": issues}),
+                        )?;
+                    } else {
+                        outln!(
+                            "Restored label {} (back on {})",
+                            label.name,
+                            counted_list(&[(issues, "issue", "issues")])
+                        );
+                    }
+                }
+                LabelCmd::Purge { name_or_id, all: _ } => {
+                    let purged = match &name_or_id {
+                        Some(name) => store.purge_label(name)?,
+                        None => store.purge_labels()?,
+                    };
+                    if cli.json {
+                        print_json(&purged)?;
+                    } else if purged.labels == 0 {
+                        outln!("No labels are in the trash");
+                    } else {
+                        outln!(
+                            "Purged {}",
+                            counted_list(&[(purged.labels, "label", "labels")])
                         );
                     }
                 }

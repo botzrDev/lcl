@@ -145,6 +145,7 @@ fn upgrades_a_0_1_0_database() {
     undo_v5_schema(&mut after, &mut before);
     undo_v6_schema(&mut after);
     undo_v7_schema(&mut after);
+    common::undo_v13_schema(&mut after, &before);
     common::undo_v12_schema(&mut after, &before);
     undo_v11_schema(&mut after, &before);
     undo_v10_schema(&mut after);

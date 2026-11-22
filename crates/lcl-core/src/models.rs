@@ -190,6 +190,9 @@ pub struct Label {
     pub id: String,
     pub name: String,
     pub color: String,
+    /// When it was moved to the trash; None while it is live.
+    #[serde(default)]
+    pub deleted_at: Option<i64>,
 }
 
 /// An issue as a user names it: parsed, but not yet looked up. Resolving it
@@ -612,6 +615,9 @@ pub struct Comment {
     pub body: String,
     pub author: Option<String>,
     pub created_at: i64,
+    /// When it was moved to the trash; None while it is live.
+    #[serde(default)]
+    pub deleted_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -622,6 +628,9 @@ pub struct Doc {
     pub parent_id: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
+    /// When it was moved to the trash; None while it is live.
+    #[serde(default)]
+    pub deleted_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -356,8 +356,19 @@ fn label_create_refuses_a_duplicate_name() {
     }
     let labels = env.lcl(&["label", "list", "--json"]).assert_ok().json();
     assert_eq!(labels.as_array().map(Vec::len), Some(1), "{labels:#}");
-    // After a delete the name is free again; a padded name is stored trimmed.
+    // A deleted label is in the trash and its name is still taken; the
+    // refusal names the way back. Purged, the name is free again; a padded
+    // name is stored trimmed.
     env.lcl(&["label", "delete", "hitl"]).assert_ok();
+    let taken = env.lcl(&["label", "create", "HITL"]);
+    assert_eq!(
+        (taken.code, taken.stderr.as_str()),
+        (
+            1,
+            "Error: label \"hitl\" is in the trash; restore it with: lcl label restore hitl\n"
+        )
+    );
+    env.lcl(&["label", "purge", "hitl"]).assert_ok();
     let created = env
         .lcl(&["label", "create", "  HITL ", "--json"])
         .assert_ok()
@@ -388,7 +399,10 @@ fn label_delete_cascades_and_counts() {
         .assert_ok()
         .stdout
         .clone();
-    assert_eq!(out, "Deleted label hitl (removed from 2 issues)\n");
+    assert_eq!(
+        out,
+        "Moved label hitl to the trash (off 2 issues); restore it with: lcl label restore hitl\n"
+    );
     assert_eq!(
         [labels_of(&env, 1), labels_of(&env, 2)],
         [json!(["bug"]), json!([])]
@@ -409,13 +423,29 @@ fn label_delete_cascades_and_counts() {
 
     assert_eq!(
         env.lcl(&["label", "delete", " lonely "]).assert_ok().stdout,
-        "Deleted label lonely (removed from 1 issue)\n"
+        "Moved label lonely to the trash (off 1 issue); restore it with: lcl label restore lonely\n"
     );
     assert_eq!(
         env.lcl(&["label", "delete", "unused"]).assert_ok().stdout,
-        "Deleted label unused (removed from 0 issues)\n"
+        "Moved label unused to the trash (off 0 issues); restore it with: lcl label restore unused\n"
     );
 
+    let conn = rusqlite::Connection::open(&db).expect("open db");
+    let left: i64 = conn
+        .query_row("SELECT count(*) FROM issue_labels", [], |r| r.get(0))
+        .expect("count");
+    // In the trash the labels keep their links, for label restore.
+    assert_eq!(left, 5);
+    drop(conn);
+    // Purged, the labels go with their links.
+    let purged = env
+        .lcl(&["label", "purge", "--all", "--json"])
+        .assert_ok()
+        .json();
+    assert_eq!(
+        purged,
+        json!({"purged": ["bug", "hitl", "lonely", "unused"], "labels": 4, "removed_from_issues": 5})
+    );
     let conn = rusqlite::Connection::open(&db).expect("open db");
     let left: i64 = conn
         .query_row("SELECT count(*) FROM issue_labels", [], |r| r.get(0))
@@ -792,6 +822,7 @@ fn upgrade_maps_0_1_0_labels() {
     undo_v5_schema(&mut after, &mut before);
     undo_v6_schema(&mut after);
     undo_v7_schema(&mut after);
+    common::undo_v13_schema(&mut after, &before);
     common::undo_v12_schema(&mut after, &before);
     undo_v11_schema(&mut after, &before);
     undo_v10_schema(&mut after);

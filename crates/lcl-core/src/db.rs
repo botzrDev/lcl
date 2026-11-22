@@ -402,6 +402,10 @@ impl Store {
     pub fn create_label(&mut self, l: &Label) -> Result<()> {
         self.write(|tx| {
             if let Some(existing) = label_by_name(tx, &l.name)? {
+                // A label in the trash keeps its name.
+                if existing.deleted_at.is_some() {
+                    return Err(LclError::LabelInTrash(existing.name));
+                }
                 return Err(LclError::LabelExists {
                     name: l.name.clone(),
                     existing: existing.name,
@@ -414,57 +418,22 @@ impl Store {
             Ok(())
         })
     }
-    pub fn list_labels(&self) -> Result<Vec<Label>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT id,name,color FROM labels ORDER BY name COLLATE NOCASE, name")?;
-        let rows = stmt.query_map([], |r| {
-            Ok(Label {
-                id: r.get(0)?,
-                name: r.get(1)?,
-                color: r.get(2)?,
-            })
-        })?;
+    /// The labels, by name: the live ones, or with `trashed` the ones in
+    /// the trash and no others.
+    pub fn list_labels(&self, trashed: bool) -> Result<Vec<Label>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {LABEL_COLS} FROM labels WHERE deleted_at IS {} NULL ORDER BY name COLLATE NOCASE, name",
+            if trashed { "NOT" } else { "" }
+        ))?;
+        let rows = stmt.query_map([], label_row)?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
     /// Fails with `UnknownLabel` unless every name names a label.
     pub fn require_labels(&self, names: &[String]) -> Result<()> {
         for name in names {
-            label_by_name(&self.conn, name)?.ok_or_else(|| LclError::UnknownLabel(name.clone()))?;
+            live_label(&self.conn, name)?;
         }
         Ok(())
-    }
-    /// Deletes the label named (ignoring case) or with id `name_or_id`. The
-    /// foreign key cascades it off every issue. Returns the label and how
-    /// many issues it was removed from.
-    pub fn delete_label(&mut self, name_or_id: &str) -> Result<(Label, i64)> {
-        self.write(|tx| {
-            let by_id = tx
-                .query_row(
-                    "SELECT id,name,color FROM labels WHERE id=?1",
-                    params![name_or_id],
-                    |r| {
-                        Ok(Label {
-                            id: r.get(0)?,
-                            name: r.get(1)?,
-                            color: r.get(2)?,
-                        })
-                    },
-                )
-                .optional()?;
-            let label = match by_id {
-                Some(l) => l,
-                None => label_by_name(tx, name_or_id)?
-                    .ok_or_else(|| LclError::LabelNotFound(name_or_id.to_string()))?,
-            };
-            let issues: i64 = tx.query_row(
-                "SELECT count(*) FROM issue_labels WHERE label_id=?1",
-                params![label.id],
-                |r| r.get(0),
-            )?;
-            tx.execute("DELETE FROM labels WHERE id=?1", params![label.id])?;
-            Ok((label, issues))
-        })
     }
 
     /// Inserts `issue` and returns it as stored. The id, the number and the
@@ -575,7 +544,7 @@ impl Store {
                 None => {}
             }
             for name in &filter.labels {
-                let label = label_by_name(conn, name)?.ok_or_else(|| LclError::UnknownLabel(name.clone()))?;
+                let label = live_label(conn, name)?;
                 conds.push("EXISTS (SELECT 1 FROM issue_labels il WHERE il.issue_id = i.id AND il.label_id = ?)".into());
                 args.push(Value::Text(label.id));
             }
@@ -1032,6 +1001,7 @@ impl Store {
                 body,
                 author,
                 created_at: crate::models::now(),
+                deleted_at: None,
             };
             tx.execute(
                 "INSERT INTO comments(id,issue_id,body,author,created_at) VALUES(?1,?2,?3,?4,?5)",
@@ -1046,6 +1016,9 @@ impl Store {
     pub fn edit_comment(&mut self, id: &str, body: String) -> Result<Comment> {
         self.write(|tx| {
             let mut c = find_comment(tx, id)?;
+            if c.deleted_at.is_some() {
+                return Err(LclError::CommentInTrash(c.id));
+            }
             crate::trash::refuse_trashed(tx, &c.issue_id)?;
             one_comment_row(
                 tx.execute(
@@ -1058,40 +1031,15 @@ impl Store {
             Ok(c)
         })
     }
-    /// Deletes the comment, leaving the issue's updated_at alone, and returns
-    /// it with its issue's `KEY-N` (None if that issue is gone). The search
-    /// index follows through the comments_ad trigger.
-    pub fn delete_comment(&mut self, id: &str) -> Result<(Comment, Option<String>)> {
-        self.write(|tx| {
-            let c = find_comment(tx, id)?;
-            crate::trash::refuse_trashed(tx, &c.issue_id)?;
-            let key = read_key(tx)?;
-            let number: Option<i64> = tx
-                .query_row(
-                    "SELECT number FROM issues WHERE id=?1",
-                    params![c.issue_id],
-                    |r| r.get(0),
-                )
-                .optional()?;
-            one_comment_row(
-                tx.execute("DELETE FROM comments WHERE id=?1", params![c.id])?,
-                &c.id,
-            )?;
-            Ok((c, number.map(|n| identifier(&key, n))))
-        })
-    }
-    pub fn list_comments(&self, issue_id: &str) -> Result<Vec<Comment>> {
-        // Oldest first; same-second comments in the order they were added.
-        let mut stmt = self.conn.prepare("SELECT id,issue_id,body,author,created_at FROM comments WHERE issue_id=?1 ORDER BY created_at, rowid")?;
-        let rows = stmt.query_map(params![issue_id], |r| {
-            Ok(Comment {
-                id: r.get(0)?,
-                issue_id: r.get(1)?,
-                body: r.get(2)?,
-                author: r.get(3)?,
-                created_at: r.get(4)?,
-            })
-        })?;
+    /// The issue's comments, oldest first: the live ones, or with `trashed`
+    /// the ones in the trash and no others.
+    pub fn list_comments(&self, issue_id: &str, trashed: bool) -> Result<Vec<Comment>> {
+        // Same-second comments come in the order they were added.
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {COMMENT_COLS} FROM comments WHERE issue_id=?1 AND deleted_at IS {} NULL ORDER BY created_at, rowid",
+            if trashed { "NOT" } else { "" }
+        ))?;
+        let rows = stmt.query_map(params![issue_id], comment_row)?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
@@ -1113,21 +1061,22 @@ impl Store {
             Ok(d)
         })
     }
+    /// The doc with this id; None if there is none. One in the trash is
+    /// refused, naming the restore command.
     pub fn get_doc(&self, id: &str) -> Result<Option<Doc>> {
-        read_doc(&self.conn, id)
+        match read_doc(&self.conn, id)? {
+            Some(d) if d.deleted_at.is_some() => Err(LclError::DocInTrash(d.id)),
+            found => Ok(found),
+        }
     }
-    pub fn list_docs(&self) -> Result<Vec<Doc>> {
-        let mut stmt = self.conn.prepare("SELECT id,title,content,parent_id,created_at,updated_at FROM docs ORDER BY updated_at DESC")?;
-        let rows = stmt.query_map([], |r| {
-            Ok(Doc {
-                id: r.get(0)?,
-                title: r.get(1)?,
-                content: r.get(2)?,
-                parent_id: r.get(3)?,
-                created_at: r.get(4)?,
-                updated_at: r.get(5)?,
-            })
-        })?;
+    /// The docs, most recently updated first: the live ones, or with
+    /// `trashed` the ones in the trash and no others.
+    pub fn list_docs(&self, trashed: bool) -> Result<Vec<Doc>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {DOC_COLS} FROM docs WHERE deleted_at IS {} NULL ORDER BY updated_at DESC",
+            if trashed { "NOT" } else { "" }
+        ))?;
+        let rows = stmt.query_map([], doc_row)?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
     /// Changes what is given. A new parent is checked as on create, and may
@@ -1141,6 +1090,9 @@ impl Store {
     ) -> Result<Doc> {
         self.write(|tx| {
             let mut d = read_doc(tx, id)?.ok_or_else(|| LclError::DocNotFound(id.to_string()))?;
+            if d.deleted_at.is_some() {
+                return Err(LclError::DocInTrash(d.id));
+            }
             if let Some(t) = title {
                 d.title = t;
             }
@@ -1158,25 +1110,6 @@ impl Store {
                 params![d.title, d.content, d.parent_id, d.updated_at, d.id],
             )?;
             Ok(d)
-        })
-    }
-    pub fn delete_doc(&mut self, id: &str) -> Result<()> {
-        self.write(|tx| {
-            if read_doc(tx, id)?.is_none() {
-                return Err(LclError::DocNotFound(id.to_string()));
-            }
-            let mut stmt = tx.prepare("SELECT id FROM docs WHERE parent_id = ?1 ORDER BY id")?;
-            let children: Vec<String> = stmt
-                .query_map(params![id], |r| r.get(0))?
-                .collect::<std::result::Result<_, _>>()?;
-            if !children.is_empty() {
-                return Err(LclError::DocHasChildren {
-                    doc: id.to_string(),
-                    children: children.join(", "),
-                });
-            }
-            tx.execute("DELETE FROM docs WHERE id=?1", params![id])?;
-            Ok(())
         })
     }
 
@@ -1313,7 +1246,7 @@ impl Store {
             let mut stmt = conn.prepare(
                 "SELECT c.issue_id, i.number, bm25(comments_fts) FROM comments_fts
                  JOIN comments c ON c.rowid = comments_fts.rowid JOIN issues i ON i.id = c.issue_id
-                 WHERE comments_fts MATCH ?1 AND i.deleted_at IS NULL",
+                 WHERE comments_fts MATCH ?1 AND i.deleted_at IS NULL AND c.deleted_at IS NULL",
             )?;
             for row in stmt.query_map(params![all], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, f64>(2)?)))? {
                 let (id, number, rank) = row?;
@@ -1369,7 +1302,7 @@ impl Store {
                 .collect();
 
             let mut stmt = conn.prepare(
-                "SELECT d.id FROM docs_fts JOIN docs d ON d.rowid = docs_fts.rowid WHERE docs_fts MATCH ?1 ORDER BY bm25(docs_fts), d.updated_at DESC",
+                "SELECT d.id FROM docs_fts JOIN docs d ON d.rowid = docs_fts.rowid WHERE docs_fts MATCH ?1 AND d.deleted_at IS NULL ORDER BY bm25(docs_fts), d.updated_at DESC",
             )?;
             let doc_ids: Vec<String> = stmt.query_map(params![all], |r| r.get(0))?.collect::<std::result::Result<_, _>>()?;
             let doc_total = doc_ids.len();
@@ -1432,22 +1365,41 @@ pub(crate) fn next_issue_number(conn: &Connection) -> Result<i64> {
     Ok(mark.max(past_max))
 }
 
+/// The columns `label_row` reads.
+pub(crate) const LABEL_COLS: &str = "id,name,color,deleted_at";
+
+pub(crate) fn label_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Label> {
+    Ok(Label {
+        id: r.get(0)?,
+        name: r.get(1)?,
+        color: r.get(2)?,
+        deleted_at: r.get(3)?,
+    })
+}
+
 /// The label named `name`, ignoring (ASCII) case: the same rule as the
 /// unique index on labels(name COLLATE NOCASE), so at most one matches.
-fn label_by_name(conn: &Connection, name: &str) -> Result<Option<Label>> {
+/// It may be in the trash: its name is taken either way.
+pub(crate) fn label_by_name(conn: &Connection, name: &str) -> Result<Option<Label>> {
     Ok(conn
         .query_row(
-            "SELECT id,name,color FROM labels WHERE name=?1 COLLATE NOCASE",
+            &format!("SELECT {LABEL_COLS} FROM labels WHERE name=?1 COLLATE NOCASE"),
             params![name],
-            |r| {
-                Ok(Label {
-                    id: r.get(0)?,
-                    name: r.get(1)?,
-                    color: r.get(2)?,
-                })
-            },
+            label_row,
         )
         .optional()?)
+}
+
+/// The live label named `name`, for a command that puts it on an issue or
+/// filters by it. No such label is `UnknownLabel`; one in the trash is
+/// `LabelInTrash`, which names the restore command.
+pub(crate) fn live_label(conn: &Connection, name: &str) -> Result<Label> {
+    let label =
+        label_by_name(conn, name)?.ok_or_else(|| LclError::UnknownLabel(name.to_string()))?;
+    if label.deleted_at.is_some() {
+        return Err(LclError::LabelInTrash(label.name));
+    }
+    Ok(label)
 }
 
 /// Applies `update` to the label names read with the issue. Every name in
@@ -1460,24 +1412,28 @@ fn apply_labels(conn: &Connection, labels: &mut Vec<String>, update: &LabelUpdat
         labels.clear();
     }
     for name in &update.remove {
-        label_by_name(conn, name)?.ok_or_else(|| LclError::UnknownLabel(name.clone()))?;
+        live_label(conn, name)?;
     }
     labels.retain(|n| !update.remove.iter().any(|r| r.eq_ignore_ascii_case(n)));
     labels.extend(update.add.iter().cloned());
     Ok(())
 }
 
-/// Makes the issue's labels exactly `names` (each matched ignoring case;
-/// repeats collapse). Must run inside the write transaction that reads the
-/// issue, so a concurrent add can't be lost.
+/// Makes the issue's live labels exactly `names` (each matched ignoring
+/// case; repeats collapse). Must run inside the write transaction that
+/// reads the issue, so a concurrent add can't be lost.
+///
+/// The issue's links to labels in the trash are left alone: they are not
+/// among the labels it was read with, and `label restore` must find them
+/// (see `crate::trash`).
 fn set_labels(conn: &Connection, issue_id: &str, names: &[String]) -> Result<()> {
     conn.execute(
-        "DELETE FROM issue_labels WHERE issue_id=?1",
+        "DELETE FROM issue_labels WHERE issue_id=?1
+         AND label_id IN (SELECT id FROM labels WHERE deleted_at IS NULL)",
         params![issue_id],
     )?;
     for name in names {
-        let label =
-            label_by_name(conn, name)?.ok_or_else(|| LclError::UnknownLabel(name.clone()))?;
+        let label = live_label(conn, name)?;
         conn.execute(
             "INSERT OR IGNORE INTO issue_labels(issue_id,label_id) VALUES(?1,?2)",
             params![issue_id, label.id],
@@ -1584,10 +1540,21 @@ pub(crate) fn ref_looks_own(key: &str, r: &str) -> bool {
 /// either case), checked as a parent for `doc` (None: a doc being created):
 /// it must exist, and must be neither the doc itself nor below it.
 fn check_doc_parent(conn: &Connection, doc: Option<&str>, parent: &str) -> Result<String> {
+    // A doc in the trash can't take a doc under it: a live doc's parent is
+    // live (see `crate::trash`).
     let find = |id: &str| -> Result<Option<String>> {
-        Ok(conn
-            .query_row("SELECT id FROM docs WHERE id=?1", params![id], |r| r.get(0))
-            .optional()?)
+        let found: Option<(String, Option<i64>)> = conn
+            .query_row(
+                "SELECT id, deleted_at FROM docs WHERE id=?1",
+                params![id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        match found {
+            Some((id, Some(_))) => Err(LclError::DocInTrash(id)),
+            Some((id, None)) => Ok(Some(id)),
+            None => Ok(None),
+        }
     };
     let found = match find(parent)? {
         Some(id) => Some(id),
@@ -2125,7 +2092,7 @@ fn attach_labels(conn: &Connection, issues: &mut [Issue]) -> Result<()> {
     let ids: Vec<&str> = issues.iter().map(|i| i.id.as_str()).collect();
     let mut stmt = conn.prepare(
         "SELECT il.issue_id, l.name FROM issue_labels il JOIN labels l ON l.id = il.label_id
-         WHERE il.issue_id IN (SELECT value FROM json_each(?1)) ORDER BY l.name COLLATE NOCASE, l.name",
+         WHERE il.issue_id IN (SELECT value FROM json_each(?1)) AND l.deleted_at IS NULL ORDER BY l.name COLLATE NOCASE, l.name",
     )?;
     let mut by_issue: HashMap<String, Vec<String>> = HashMap::new();
     for row in stmt.query_map(params![json_array(&ids)?], |r| {
@@ -2267,12 +2234,27 @@ fn one_comment_row(changed: usize, id: &str) -> Result<()> {
     }
 }
 
-/// The comment with this id, ignoring case (an exact match first).
-fn find_comment(conn: &Connection, id: &str) -> Result<Comment> {
+/// The columns `comment_row` reads.
+pub(crate) const COMMENT_COLS: &str = "id,issue_id,body,author,created_at,deleted_at";
+
+pub(crate) fn comment_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Comment> {
+    Ok(Comment {
+        id: r.get(0)?,
+        issue_id: r.get(1)?,
+        body: r.get(2)?,
+        author: r.get(3)?,
+        created_at: r.get(4)?,
+        deleted_at: r.get(5)?,
+    })
+}
+
+/// The comment with this id, ignoring case (an exact match first), live or
+/// in the trash.
+pub(crate) fn find_comment(conn: &Connection, id: &str) -> Result<Comment> {
     conn.query_row(
-        "SELECT id,issue_id,body,author,created_at FROM comments WHERE id = ?1 COLLATE NOCASE ORDER BY id = ?1 DESC, rowid LIMIT 1",
+        &format!("SELECT {COMMENT_COLS} FROM comments WHERE id = ?1 COLLATE NOCASE ORDER BY id = ?1 DESC, rowid LIMIT 1"),
         params![id],
-        |r| Ok(Comment { id: r.get(0)?, issue_id: r.get(1)?, body: r.get(2)?, author: r.get(3)?, created_at: r.get(4)? }),
+        comment_row,
     )
     .optional()?
     .ok_or_else(|| LclError::CommentNotFound(id.to_string()))
@@ -2362,22 +2344,30 @@ fn row_to_issue(r: &rusqlite::Row, key: &str) -> Result<Issue> {
     })
 }
 
-fn read_doc(conn: &Connection, id: &str) -> Result<Option<Doc>> {
-    let mut stmt = conn
-        .prepare("SELECT id,title,content,parent_id,created_at,updated_at FROM docs WHERE id=?1")?;
-    let mut rows = stmt.query(params![id])?;
-    if let Some(r) = rows.next()? {
-        Ok(Some(Doc {
-            id: r.get(0)?,
-            title: r.get(1)?,
-            content: r.get(2)?,
-            parent_id: r.get(3)?,
-            created_at: r.get(4)?,
-            updated_at: r.get(5)?,
-        }))
-    } else {
-        Ok(None)
-    }
+/// The columns `doc_row` reads.
+pub(crate) const DOC_COLS: &str = "id,title,content,parent_id,created_at,updated_at,deleted_at";
+
+pub(crate) fn doc_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Doc> {
+    Ok(Doc {
+        id: r.get(0)?,
+        title: r.get(1)?,
+        content: r.get(2)?,
+        parent_id: r.get(3)?,
+        created_at: r.get(4)?,
+        updated_at: r.get(5)?,
+        deleted_at: r.get(6)?,
+    })
+}
+
+/// The doc with exactly this id, live or in the trash.
+pub(crate) fn read_doc(conn: &Connection, id: &str) -> Result<Option<Doc>> {
+    Ok(conn
+        .query_row(
+            &format!("SELECT {DOC_COLS} FROM docs WHERE id=?1"),
+            params![id],
+            doc_row,
+        )
+        .optional()?)
 }
 
 fn user_version(conn: &Connection) -> Result<i64> {

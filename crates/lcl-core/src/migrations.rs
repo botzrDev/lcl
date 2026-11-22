@@ -44,6 +44,7 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
     Code(v10),
     Code(v11),
     Sql(V12),
+    Sql(V13),
 ];
 
 /// v11 -> v12: the trash. An issue with `deleted_at` set is in the trash
@@ -62,6 +63,31 @@ DROP TRIGGER IF EXISTS issues_au;
 CREATE TRIGGER IF NOT EXISTS issues_au AFTER UPDATE OF title, description ON issues BEGIN
     INSERT INTO issues_fts(issues_fts,rowid,title,description) VALUES ('delete',old.rowid,old.title,old.description);
     INSERT INTO issues_fts(rowid,title,description) VALUES (new.rowid,new.title,new.description);
+END;
+";
+
+/// v12 -> v13: the trash for docs, comments and labels, by the mechanism
+/// issues got in V12: a `deleted_at` that is a time or NULL. Every row
+/// there is starts live.
+///
+/// The two search triggers are narrowed as `issues_au` was, so that putting
+/// a doc or a comment in the trash, or taking it out, writes one field and
+/// leaves the index's rows untouched. `update_doc` names title and content,
+/// and `edit_comment` names body, so their updates re-index as before. Each
+/// trigger's text is the one it had (V1's, V6's) but for the `OF` clause.
+const V13: &str = "
+ALTER TABLE docs ADD COLUMN deleted_at INTEGER CHECK (deleted_at IS NULL OR typeof(deleted_at) = 'integer');
+ALTER TABLE comments ADD COLUMN deleted_at INTEGER CHECK (deleted_at IS NULL OR typeof(deleted_at) = 'integer');
+ALTER TABLE labels ADD COLUMN deleted_at INTEGER CHECK (deleted_at IS NULL OR typeof(deleted_at) = 'integer');
+DROP TRIGGER IF EXISTS docs_au;
+CREATE TRIGGER IF NOT EXISTS docs_au AFTER UPDATE OF title, content ON docs BEGIN
+    INSERT INTO docs_fts(docs_fts,rowid,title,content) VALUES ('delete',old.rowid,old.title,old.content);
+    INSERT INTO docs_fts(rowid,title,content) VALUES (new.rowid,new.title,new.content);
+END;
+DROP TRIGGER IF EXISTS comments_au;
+CREATE TRIGGER comments_au AFTER UPDATE OF body ON comments BEGIN
+    INSERT INTO comments_fts(comments_fts, rowid, body) VALUES ('delete', old.rowid, old.body);
+    INSERT INTO comments_fts(rowid, body) VALUES (new.rowid, new.body);
 END;
 ";
 

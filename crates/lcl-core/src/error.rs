@@ -129,6 +129,32 @@ pub enum LclError {
         "{issue} can't be restored while its parent {parent} is in the trash; restore {parent} first"
     )]
     ParentInTrash { issue: String, parent: String },
+    /// A command named a doc that is in the trash. Holds its id.
+    #[error("doc {0} is in the trash; restore it with: lcl doc restore {0}")]
+    DocInTrash(String),
+    /// A command named a comment that is in the trash. Holds its id.
+    #[error("comment {0} is in the trash; restore it with: lcl comment restore {0}")]
+    CommentInTrash(String),
+    /// A command named a label that is in the trash; its name stays taken.
+    #[error("label {0:?} is in the trash; restore it with: lcl label restore {word}", word = shell_word(.0))]
+    LabelInTrash(String),
+    /// `doc restore` of a doc whose parent is in the trash.
+    #[error(
+        "doc {doc} can't be restored while its parent {parent} is in the trash; restore {parent} first"
+    )]
+    DocParentInTrash { doc: String, parent: String },
+    /// A purge of a live doc, comment or label: only the trash is purged.
+    /// `what` names it, as `doc ID`; `delete` is the command that moves it
+    /// to the trash.
+    #[error(
+        "{what} is not in the trash; only what is in the trash can be purged ({delete} moves it there)"
+    )]
+    PurgeLiveItem { what: String, delete: String },
+    /// `doc purge` of a doc with docs under it, in the trash with it.
+    #[error(
+        "doc {doc} has docs under it in the trash: {children}; purge them first, or empty the trash with lcl doc purge --all"
+    )]
+    DocPurgeHasChildren { doc: String, children: String },
     /// `issue purge` of a live issue: only the trash is purged.
     #[error(
         "{0} is not in the trash; only an issue in the trash can be purged (lcl issue delete {0} moves it there)"
@@ -449,6 +475,12 @@ impl LclError {
             | LclError::NotInTrash(_)
             | LclError::ParentInTrash { .. }
             | LclError::PurgeLive(_)
+            | LclError::DocInTrash(_)
+            | LclError::CommentInTrash(_)
+            | LclError::LabelInTrash(_)
+            | LclError::DocParentInTrash { .. }
+            | LclError::PurgeLiveItem { .. }
+            | LclError::DocPurgeHasChildren { .. }
             | LclError::PurgeHasChildren { .. }
             | LclError::SelfRelation(_)
             | LclError::BlocksCycle { .. }

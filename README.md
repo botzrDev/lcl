@@ -69,7 +69,7 @@ Known limits:
 
 Schema 11 holds the ownership rules in the tables. An issue status is one of the seven canonical spellings. Parents, comments, doc parents and cycle memberships name rows that exist. Deleting a parent, a doc that still has children, or a cycle that still has issues is refused. A new parent link or blocks link that would close a cycle is refused in the write transaction.
 
-Schema 12 adds the trash. `lcl issue delete` sets the issue's `deleted_at` and changes nothing else; `lcl issue restore` clears it. An issue in the trash is left out of every list, search and count, and keeps its number and its ref. `lcl issue purge` is the only command that removes an issue for good, and only from the trash. Nothing is purged by itself.
+Schemas 12 and 13 add the trash, for issues and then for docs, comments and labels. `lcl issue delete` sets the issue's `deleted_at` and changes nothing else; `lcl issue restore` clears it. `doc`, `comment` and `label` have the same `delete`, `restore` and `purge`. An issue in the trash is left out of every list, search and count, and keeps its number and its ref. `lcl issue purge` is the only command that removes an issue for good, and only from the trash. Nothing is purged by itself.
 
 Search uses FTS5 tables keyed by rowid. lcl does not run `VACUUM`. On open it checks that each index still matches its rows.
 

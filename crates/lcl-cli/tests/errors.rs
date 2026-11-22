@@ -196,7 +196,7 @@ fn clap_errors_are_one_json_line_under_json() {
         ),
         (
             vec!["--json", "doc"],
-            "'lcl doc' requires a subcommand but one was not provided\n  [subcommands: create, list, show, update, delete, help]",
+            "'lcl doc' requires a subcommand but one was not provided\n  [subcommands: create, list, show, update, delete, restore, purge, help]",
         ),
         (
             vec!["--json"],

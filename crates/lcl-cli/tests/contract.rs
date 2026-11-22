@@ -482,6 +482,8 @@ pinned! {
     issue_comments => "issue comments",
     comment_edit => "comment edit",
     comment_delete => "comment delete",
+    comment_restore => "comment restore",
+    comment_purge => "comment purge",
     project_create => "project create",
     project_list => "project list",
     project_show => "project show",
@@ -495,6 +497,8 @@ pinned! {
     label_create => "label create",
     label_list => "label list",
     label_delete => "label delete",
+    label_restore => "label restore",
+    label_purge => "label purge",
     cycle_create => "cycle create",
     cycle_list => "cycle list",
     cycle_update => "cycle update",
@@ -504,6 +508,8 @@ pinned! {
     doc_show => "doc show",
     doc_update => "doc update",
     doc_delete => "doc delete",
+    doc_restore => "doc restore",
+    doc_purge => "doc purge",
     search => "search",
     backup => "backup",
     export => "export",
@@ -630,6 +636,21 @@ mod cases {
         vec![j(&rich.env, &["comment", "delete", &rich.comment])]
     }
 
+    pub fn comment_restore() -> Vec<Value> {
+        let rich = rich();
+        j(&rich.env, &["comment", "delete", &rich.comment]);
+        vec![j(&rich.env, &["comment", "restore", &rich.comment])]
+    }
+
+    pub fn comment_purge() -> Vec<Value> {
+        let rich = rich();
+        j(&rich.env, &["comment", "delete", &rich.comment]);
+        vec![
+            j(&rich.env, &["comment", "purge", &rich.comment]),
+            j(&rich.env, &["comment", "purge", "--all"]),
+        ]
+    }
+
     pub fn project_create() -> Vec<Value> {
         vec![j(
             &rich().env,
@@ -697,6 +718,21 @@ mod cases {
         vec![j(&rich().env, &["label", "delete", "bug"])]
     }
 
+    pub fn label_restore() -> Vec<Value> {
+        let env = rich().env;
+        j(&env, &["label", "delete", "bug"]);
+        vec![j(&env, &["label", "restore", "bug"])]
+    }
+
+    pub fn label_purge() -> Vec<Value> {
+        let env = rich().env;
+        j(&env, &["label", "delete", "bug"]);
+        vec![
+            j(&env, &["label", "purge", "bug"]),
+            j(&env, &["label", "purge", "--all"]),
+        ]
+    }
+
     pub fn cycle_create() -> Vec<Value> {
         vec![j(&rich().env, &["cycle", "create", "Sprint 2"])]
     }
@@ -740,6 +776,21 @@ mod cases {
     pub fn doc_delete() -> Vec<Value> {
         let rich = rich();
         vec![j(&rich.env, &["doc", "delete", &rich.child])]
+    }
+
+    pub fn doc_restore() -> Vec<Value> {
+        let rich = rich();
+        j(&rich.env, &["doc", "delete", &rich.child]);
+        vec![j(&rich.env, &["doc", "restore", &rich.child])]
+    }
+
+    pub fn doc_purge() -> Vec<Value> {
+        let rich = rich();
+        j(&rich.env, &["doc", "delete", &rich.child]);
+        vec![
+            j(&rich.env, &["doc", "purge", &rich.child]),
+            j(&rich.env, &["doc", "purge", "--all"]),
+        ]
     }
 
     pub fn search() -> Vec<Value> {
@@ -810,8 +861,21 @@ mod objects {
 
     #[test]
     fn object_comment() {
-        let comments = j(&rich().env, &["issue", "comments", "1"]);
-        pin_object("Comment", comments.as_array().expect("comments"));
+        let rich = rich();
+        let mut comments = j(&rich.env, &["issue", "comments", "1"])
+            .as_array()
+            .expect("comments")
+            .clone();
+        // And one in the trash, for `deleted_at`.
+        j(&rich.env, &["comment", "delete", &rich.comment]);
+        comments.extend(
+            j(&rich.env, &["issue", "comments", "1", "--trashed"])
+                .as_array()
+                .expect("comments")
+                .clone(),
+        );
+        assert_eq!(comments.len(), 3);
+        pin_object("Comment", &comments);
     }
 
     #[test]
@@ -843,14 +907,38 @@ mod objects {
 
     #[test]
     fn object_label() {
-        let labels = j(&rich().env, &["label", "list"]);
-        pin_object("Label", labels.as_array().expect("labels"));
+        let env = rich().env;
+        let mut labels = j(&env, &["label", "list"])
+            .as_array()
+            .expect("labels")
+            .clone();
+        j(&env, &["label", "delete", "bug"]);
+        labels.extend(
+            j(&env, &["label", "list", "--trashed"])
+                .as_array()
+                .expect("labels")
+                .clone(),
+        );
+        assert_eq!(labels.len(), 2);
+        pin_object("Label", &labels);
     }
 
     #[test]
     fn object_doc() {
-        let docs = j(&rich().env, &["doc", "list"]);
-        pin_object("Doc", docs.as_array().expect("docs"));
+        let rich = rich();
+        let mut docs = j(&rich.env, &["doc", "list"])
+            .as_array()
+            .expect("docs")
+            .clone();
+        j(&rich.env, &["doc", "delete", &rich.child]);
+        docs.extend(
+            j(&rich.env, &["doc", "list", "--trashed"])
+                .as_array()
+                .expect("docs")
+                .clone(),
+        );
+        assert_eq!(docs.len(), 3);
+        pin_object("Doc", &docs);
     }
 
     /// Every object in the note is pinned above or is one of the three that
@@ -999,6 +1087,12 @@ fn each_kind_of_error_has_its_exit_status() {
         (&["issue", "show", "5"], 1, "conflict"),
         (&["issue", "update", "5", "--title", "t"], 1, "conflict"),
         (&["issue", "restore", "1"], 1, "conflict"),
+        // The same for a doc, a comment and a label: live ones aren't purged.
+        (&["doc", "purge", &rich.notes], 1, "conflict"),
+        (&["comment", "purge", &rich.comment], 1, "conflict"),
+        (&["label", "purge", "bug"], 1, "conflict"),
+        (&["label", "restore", "bug"], 1, "conflict"),
+        (&["label", "purge"], 2, "usage"),
         // Only the trash is purged; one of an issue and --all is needed.
         (&["issue", "purge", "1"], 1, "conflict"),
         (&["issue", "purge"], 2, "usage"),

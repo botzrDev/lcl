@@ -1925,7 +1925,7 @@ fn export_in(conn: &Connection) -> Result<(String, Counts)> {
     let mut label_names: HashMap<String, String> = HashMap::new();
     {
         let mut stmt = conn
-            .prepare("SELECT id, name, color FROM labels ORDER BY name COLLATE NOCASE, name, id")?;
+            .prepare("SELECT id, name, color FROM labels WHERE deleted_at IS NULL ORDER BY name COLLATE NOCASE, name, id")?;
         let rows = stmt.query_map([], |r| {
             Ok((
                 r.get::<_, String>(0)?,
@@ -2175,10 +2175,12 @@ fn export_in(conn: &Connection) -> Result<(String, Counts)> {
     // Links of a trashed issue are left out with it (see `crate::trash`).
     const NOT_TRASHED: &str =
         "WHERE issue_id NOT IN (SELECT id FROM issues WHERE deleted_at IS NOT NULL)";
+    const NO_TRASHED_LABEL: &str =
+        "AND label_id NOT IN (SELECT id FROM labels WHERE deleted_at IS NOT NULL)";
     let mut labels_of: HashMap<String, Vec<String>> = HashMap::new();
     {
         let mut stmt = conn.prepare(&format!(
-            "SELECT issue_id, label_id FROM issue_labels {NOT_TRASHED} ORDER BY issue_id, label_id"
+            "SELECT issue_id, label_id FROM issue_labels {NOT_TRASHED} {NO_TRASHED_LABEL} ORDER BY issue_id, label_id"
         ))?;
         let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
         for row in rows {
@@ -2376,7 +2378,7 @@ fn export_in(conn: &Connection) -> Result<(String, Counts)> {
     }
 
     {
-        let mut stmt = conn.prepare("SELECT i.number, c.body, c.author, c.created_at, c.id, c.issue_id FROM comments c LEFT JOIN issues i ON i.id = c.issue_id WHERE i.deleted_at IS NULL ORDER BY i.number, c.created_at, c.rowid")?;
+        let mut stmt = conn.prepare("SELECT i.number, c.body, c.author, c.created_at, c.id, c.issue_id FROM comments c LEFT JOIN issues i ON i.id = c.issue_id WHERE i.deleted_at IS NULL AND c.deleted_at IS NULL ORDER BY i.number, c.created_at, c.rowid")?;
         let rows = stmt.query_map([], |r| {
             Ok((
                 r.get::<_, Option<i64>>(0)?,
@@ -2501,7 +2503,7 @@ fn export_in(conn: &Connection) -> Result<(String, Counts)> {
     }
 
     {
-        let mut stmt = conn.prepare("SELECT id, title, content, parent_id, created_at, updated_at FROM docs ORDER BY created_at, id")?;
+        let mut stmt = conn.prepare("SELECT id, title, content, parent_id, created_at, updated_at FROM docs WHERE deleted_at IS NULL ORDER BY created_at, id")?;
         let rows = stmt.query_map([], |r| {
             Ok((
                 r.get::<_, String>(0)?,

@@ -32,7 +32,7 @@ With `--json`, an error is one line: the last line of stderr, and the only one t
 
 - `usage` comes with exit 2. Every other kind comes with exit 1.
 - `not_found`: a named issue, label, project, milestone, cycle, doc, comment or workspace does not exist.
-- `conflict`: the change is refused because of what is stored, as deleting a project that still has issues. A command that names an issue in the trash is a conflict, and its message names `lcl issue restore`.
+- `conflict`: the change is refused because of what is stored, as deleting a project that still has issues. A command that names an issue, a doc, a comment or a label in the trash is a conflict, and its message names the `restore` command.
 - `schema`: the file's schema is newer than this build reads, or is not a schema lcl wrote.
 - `io`: a file could not be read or written.
 
@@ -108,10 +108,10 @@ An issue as a relation names it.
 
 ### `Comment`
 
-`issue_id` is the issue's `id`, not its `KEY-N`.
+`issue_id` is the issue's `id`, not its `KEY-N`. `deleted_at` is when the comment went to the trash, and null otherwise; so too for a label and a doc. Only a `--trashed` listing prints one that is there.
 
 ```json
-{"id": "string", "issue_id": "string", "body": "string", "author": "string|null", "created_at": "integer"}
+{"id": "string", "issue_id": "string", "body": "string", "author": "string|null", "created_at": "integer", "deleted_at": "integer|null"}
 ```
 
 ### `Project`
@@ -174,13 +174,13 @@ An issue as a relation names it.
 ### `Label`
 
 ```json
-{"id": "string", "name": "string", "color": "string"}
+{"id": "string", "name": "string", "color": "string", "deleted_at": "integer|null"}
 ```
 
 ### `Doc`
 
 ```json
-{"id": "string", "title": "string", "content": "string", "parent_id": "string|null", "created_at": "integer", "updated_at": "integer"}
+{"id": "string", "title": "string", "content": "string", "parent_id": "string|null", "created_at": "integer", "updated_at": "integer", "deleted_at": "integer|null"}
 ```
 
 ## Workspaces
@@ -300,6 +300,8 @@ What was removed for good: `purged` holds the identifiers, lowest number first, 
 
 ### `lcl issue comments`
 
+With `--trashed`, the issue's comments that are in the trash, and no others.
+
 ```json
 ["Comment"]
 ```
@@ -314,10 +316,24 @@ What was removed for good: `purged` holds the identifiers, lowest number first, 
 
 ### `lcl comment delete`
 
-`deleted` is the comment's id and `issue` the issue's identifier.
+`deleted` is the comment's id and `issue` the issue's identifier. The comment is in the trash, and `lcl comment restore` brings it back.
 
 ```json
 {"deleted": "string", "issue": "string"}
+```
+
+### `lcl comment restore`
+
+```json
+"Comment"
+```
+
+### `lcl comment purge`
+
+What was removed for good: `purged` holds the ids, oldest comment first.
+
+```json
+{"purged": ["string"], "comments": "integer"}
 ```
 
 ## Projects and milestones
@@ -400,16 +416,34 @@ What was removed for good: `purged` holds the identifiers, lowest number first, 
 
 ### `lcl label list`
 
+With `--trashed`, the labels in the trash, and no others.
+
 ```json
 ["Label"]
 ```
 
 ### `lcl label delete`
 
-`deleted` is the name.
+`deleted` is the name. `removed_from_issues` counts the issues that showed the label. The label is in the trash, and `lcl label restore` puts it back on them.
 
 ```json
 {"deleted": "string", "id": "string", "removed_from_issues": "integer"}
+```
+
+### `lcl label restore`
+
+`restored` is the name. `restored_to_issues` counts the issues that show the label again.
+
+```json
+{"restored": "string", "id": "string", "restored_to_issues": "integer"}
+```
+
+### `lcl label purge`
+
+What was removed for good: `purged` holds the names, and `removed_from_issues` counts the links to issues that went with them.
+
+```json
+{"purged": ["string"], "labels": "integer", "removed_from_issues": "integer"}
 ```
 
 ### `lcl cycle create`
@@ -450,6 +484,8 @@ What was removed for good: `purged` holds the identifiers, lowest number first, 
 
 ### `lcl doc list`
 
+With `--trashed`, the docs in the trash, and no others.
+
 ```json
 ["Doc"]
 ```
@@ -468,10 +504,24 @@ What was removed for good: `purged` holds the identifiers, lowest number first, 
 
 ### `lcl doc delete`
 
-`deleted` is the id.
+`deleted` is the id. The doc is in the trash, and `lcl doc restore` brings it back.
 
 ```json
 {"deleted": "string"}
+```
+
+### `lcl doc restore`
+
+```json
+"Doc"
+```
+
+### `lcl doc purge`
+
+What was removed for good: `purged` holds the ids.
+
+```json
+{"purged": ["string"], "docs": "integer"}
 ```
 
 ## Search

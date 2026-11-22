@@ -14,10 +14,11 @@ All notable changes to lcl are recorded here. The format follows
 - `lcl issue list --trashed` lists the trash, and only the trash.
 - `lcl issue purge ID` removes one issue in the trash for good, with its comments, relations, label links and cycle links. `lcl issue purge --all` empties the trash. It can't be undone, and it is the only command that removes an issue permanently. A live issue can't be purged: delete it first. An issue whose sub-issues are in the trash is purged after them, or with them under `--all`. A purged issue's number is never used again. Nothing is purged by itself. With `--json` it prints `purged`, `issues`, `comments` and `relations`.
 - An issue's JSON has `deleted_at`: when it went to the trash, or null.
+- Docs, comments and labels have the same trash. `lcl doc restore ID`, `lcl comment restore ID` and `lcl label restore NAME` bring one back as it was. `lcl doc purge`, `lcl comment purge` and `lcl label purge` remove one in the trash for good, or every one with `--all`. `lcl doc list --trashed`, `lcl label list --trashed` and `lcl issue comments ID --trashed` list what is there. Their JSON has `deleted_at` too.
 
 ### Upgrading
 
-- The first command that opens a workspace upgrades it to schema 12, which adds the trash. Every issue starts out of it.
+- The first command that opens a workspace upgrades it to schema 13. Schema 12 adds the trash for issues and schema 13 for docs, comments and labels. Everything starts out of it.
 
 You no longer need to back up by hand before an upgrade.
 
@@ -39,6 +40,11 @@ You no longer need to back up by hand before an upgrade.
 - `issue delete` is refused only while the issue has sub-issues that are not in the trash. `issue restore` is refused while the issue's parent is in the trash.
 - An issue in the trash keeps its number and its ref, and stays in its project, milestone and cycles. `project delete`, `milestone delete` and `cycle delete` still count it, and say how many of the issues they count are in the trash.
 - `lcl export` leaves out issues in the trash, with their comments and relations. `lcl-export/1` is unchanged. `lcl import` refuses a workspace whose only issues are in the trash, as it refuses any workspace that isn't empty.
+- `lcl doc delete`, `lcl comment delete` and `lcl label delete` move to the trash and no longer remove. Each prints the command that restores. Their `--json` output is unchanged.
+- `lcl label delete` no longer takes the label off its issues for good. No issue shows it while it is in the trash, and `lcl label restore` puts it back on every issue that had it. Its name stays taken: `lcl label create` with that name exits 1 and names `lcl label restore`.
+- A doc, comment or label in the trash is left out of lists, `issue show`, search and `lcl export`. A command that names one exits 1, kind `conflict`, and names the restore command. 0.3.0-alpha.1 said `not found`.
+- `doc delete` is refused only while docs that are not in the trash are under the doc. `doc restore` is refused while the doc's parent is in the trash.
+- A comment of an issue in the trash can't be edited, deleted or restored until the issue is restored. `lcl issue purge` removes all of an issue's comments.
 - Every upgrade of a workspace prints one line on stderr, naming the snapshot. Before, an upgrade with nothing to repair printed nothing.
 - An upgrade of the registry prints one line on stderr too.
 
