@@ -1364,14 +1364,16 @@ fn counts_line(c: &IssueCounts) -> String {
     }
 }
 
-/// $HOME, where lcl keeps ~/.lcl. Unset or empty is an error, never a
-/// fallback directory; only what needs ~/.lcl asks for it, so a workspace
-/// in the current directory works without HOME.
+/// The home directory, where lcl keeps ~/.lcl: $HOME, or on Windows, when
+/// HOME is not set, %USERPROFILE% (see `registry::home_dir`). Neither is an
+/// error, never a fallback directory; only what needs ~/.lcl asks for it,
+/// so a workspace in the current directory works without one.
 fn home() -> Result<PathBuf, LclError> {
-    match std::env::var_os("HOME") {
-        Some(h) if !h.is_empty() => Ok(PathBuf::from(h)),
-        _ => Err(LclError::NoHome),
-    }
+    registry::home_dir(
+        std::env::var_os("HOME"),
+        std::env::var_os("USERPROFILE"),
+        cfg!(windows),
+    )
 }
 
 /// An error from the registry under `home`. SQLite's and the file system's

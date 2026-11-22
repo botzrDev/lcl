@@ -969,7 +969,7 @@ fn no_home_is_an_error_only_where_home_is_needed() {
     workspace(&env, "alpha", "ALPHA");
     env.lcl(&["init", "here", "--key", "HERE"]).assert_ok();
     env.create("in the cwd workspace");
-    let message = "Error: HOME is not set; lcl keeps its workspace registry in $HOME/.lcl\n";
+    let message = "Error: neither HOME nor USERPROFILE gives a home directory; lcl keeps its workspace registry in $HOME/.lcl, or on Windows, when HOME is not set, in %USERPROFILE%\\.lcl\n";
     let fresh = common::temp_dir();
     for (label, unset) in [("HOME unset", true), ("HOME empty", false)] {
         let without = |args: &[&str], cwd: &Path| {
@@ -1202,4 +1202,83 @@ fn concurrent_creates_of_one_name_make_one() {
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
         .collect();
     assert_eq!(left, ["same.sqlite"], "temporary files left behind");
+}
+
+/// With HOME unset or empty, Windows finds the home directory through
+/// USERPROFILE, as cmd and PowerShell need: `init` and `workspace create`
+/// work, and the registry is under it. Elsewhere USERPROFILE is not a home
+/// directory, and the same commands fail without making anything. HOME, when
+/// set, wins on every platform.
+#[test]
+fn userprofile_is_the_home_directory_on_windows_when_home_is_not_set() {
+    for unset in [true, false] {
+        let env = Env::new();
+        let profile = common::temp_dir();
+        let with_profile = |args: &[&str]| {
+            env.lcl_with(args, |cmd| {
+                cmd.env("USERPROFILE", profile.path());
+                if unset {
+                    cmd.env_remove("HOME");
+                } else {
+                    cmd.env("HOME", "");
+                }
+            })
+        };
+        let init = with_profile(&["init", "here", "--key", "HERE"]);
+        let create = with_profile(&["workspace", "create", "glob", "--key", "GLB"]);
+        let under_profile = profile.path().join(".lcl").join("index.sqlite");
+        if cfg!(windows) {
+            init.assert_ok();
+            create.assert_ok();
+            assert!(under_profile.exists(), "no registry under USERPROFILE");
+            assert!(
+                profile
+                    .path()
+                    .join(".lcl")
+                    .join("projects")
+                    .join("glob.sqlite")
+                    .exists()
+            );
+            let list = with_profile(&["workspace", "list", "--json"])
+                .assert_ok()
+                .json();
+            assert_eq!(list.as_array().map(Vec::len), Some(2), "{list:#}");
+            with_profile(&["-w", "glob", "issue", "create", "--title", "t"]).assert_ok();
+        } else {
+            for out in [&init, &create] {
+                assert_eq!(out.code, 1, "{out:#?}");
+                assert!(
+                    out.stderr
+                        .contains("neither HOME nor USERPROFILE gives a home directory"),
+                    "{out:#?}"
+                );
+            }
+            assert!(
+                !profile.path().join(".lcl").exists(),
+                "USERPROFILE was used off Windows"
+            );
+            assert!(
+                !env.cwd.path().join(".lcl").exists(),
+                "a refused init made .lcl"
+            );
+        }
+        // Nothing went to HOME, which was not given.
+        assert!(!env.home.path().join(".lcl").exists());
+
+        // HOME set: it wins, and USERPROFILE is left alone.
+        let other = common::temp_dir();
+        let out = env.lcl_with(&["workspace", "create", "viahome", "--key", "VH"], |cmd| {
+            cmd.env("USERPROFILE", other.path());
+        });
+        out.assert_ok();
+        assert!(
+            env.home
+                .path()
+                .join(".lcl")
+                .join("projects")
+                .join("viahome.sqlite")
+                .exists()
+        );
+        assert!(!other.path().join(".lcl").exists());
+    }
 }

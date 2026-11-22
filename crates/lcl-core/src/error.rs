@@ -178,8 +178,10 @@ pub enum LclError {
     WorkspaceNotFound { name: String, path: String },
     #[error("no workspace found; run lcl init or pass --workspace")]
     NoWorkspace,
-    /// HOME unset or empty, where lcl needs it.
-    #[error("HOME is not set; lcl keeps its workspace registry in $HOME/.lcl")]
+    /// No home directory, where lcl needs one: see `registry::home_dir`.
+    #[error(
+        "neither HOME nor USERPROFILE gives a home directory; lcl keeps its workspace registry in $HOME/.lcl, or on Windows, when HOME is not set, in %USERPROFILE%\\.lcl"
+    )]
     NoHome,
     /// A --project, or a project argument, naming no project. `workspace`:
     /// the name is a registered workspace's, so whoever typed it may mean

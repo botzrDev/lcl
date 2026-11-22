@@ -20,7 +20,7 @@ A workspace made with `lcl init` is `.lcl/data.sqlite` in that directory. Comman
 
 `~/.lcl/index.sqlite` is the registry. It records each workspace's name, key, and path. It is not a workspace: its schema is its own, at registry version 2, stored in `registry_meta`. `--workspace` and `LCL_WORKSPACE` look a name up there.
 
-`HOME` must be set and non-empty for anything that uses `~/.lcl`. An empty or unset `HOME` is an error. A workspace found from the current directory does not need `HOME`. `USERPROFILE` is not read, so a Windows prompt that only sets `USERPROFILE` cannot open the registry.
+The home directory is `HOME` when it is set and non-empty, on every platform. On Windows, when it is not, it is `USERPROFILE`. With neither, anything that uses `~/.lcl` is an error that names both; lcl never falls back to another directory. `registry::home_dir` is that rule, as a pure function. A workspace found from the current directory does not need `HOME`.
 
 While a workspace is open it is in WAL mode. `data.sqlite-wal` and `data.sqlite-shm` may sit beside the file. Copy those with the database if you copy it by hand, and only while no lcl is running.
 

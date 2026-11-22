@@ -6,6 +6,10 @@ All notable changes to lcl are recorded here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- On Windows, lcl finds the home directory through `USERPROFILE` when `HOME` is not set or is empty, so `lcl init` and `lcl workspace create` work in cmd and PowerShell. 0.3.0-alpha.1 exited 1 there. `HOME` still wins when it is set, on every platform, so a registry made under it stays where it is. With neither, the error names both; lcl never falls back to another directory.
+
 ## [0.3.0-alpha.1] - 2026-11-23
 
 The first alpha. Found by rough handling before it.

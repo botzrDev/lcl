@@ -34,6 +34,30 @@ type Migration = fn(&Transaction<'_>) -> Result<()>;
 /// Registry migrations: entry `n` takes the registry from vn to v(n+1).
 const MIGRATIONS: &[Migration] = &[v1, v2];
 
+/// The home directory, where lcl keeps `.lcl`, from the two environment
+/// variables that can name it. A pure function of its arguments: the
+/// caller reads the environment and says whether this is Windows.
+///
+/// - `HOME`, when it is set and not empty, on every platform. A registry
+///   that an earlier lcl made under `HOME` stays where it is, on Windows
+///   too (Git Bash and MSYS set `HOME` there).
+/// - Else, on Windows only, `USERPROFILE`, when it is set and not empty:
+///   cmd and PowerShell set it and not `HOME`.
+/// - Else an error that names both. Never the current directory, a
+///   temporary directory, or any other guess: a registry in a place the
+///   next run would not look is worse than none.
+pub fn home_dir(
+    home: Option<std::ffi::OsString>,
+    userprofile: Option<std::ffi::OsString>,
+    windows: bool,
+) -> Result<PathBuf> {
+    let given = |v: Option<std::ffi::OsString>| v.filter(|v| !v.is_empty());
+    given(home)
+        .or_else(|| given(userprofile).filter(|_| windows))
+        .map(PathBuf::from)
+        .ok_or(LclError::NoHome)
+}
+
 /// lcl's global directory, `<home>/.lcl`.
 pub fn lcl_dir(home: &Path) -> PathBuf {
     home.join(".lcl")
@@ -727,6 +751,51 @@ fn stored_name(path: &Path) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    /// `home_dir` over every combination of unset, empty and set, on
+    /// Windows and elsewhere.
+    #[test]
+    fn home_dir_takes_home_then_userprofile_on_windows_and_never_guesses() {
+        use std::ffi::OsString;
+        let states: [(&str, Option<OsString>); 3] = [
+            ("unset", None),
+            ("empty", Some(OsString::new())),
+            ("set", Some(OsString::from("/h"))),
+        ];
+        let profiles: [(&str, Option<OsString>); 3] = [
+            ("unset", None),
+            ("empty", Some(OsString::new())),
+            ("set", Some(OsString::from("C:\\Users\\u"))),
+        ];
+        let mut cases = 0;
+        for windows in [false, true] {
+            for (h, home) in &states {
+                for (p, profile) in &profiles {
+                    let got = home_dir(home.clone(), profile.clone(), windows);
+                    let want = match (*h, *p, windows) {
+                        // HOME wins whenever it is set and not empty.
+                        ("set", _, _) => Some(PathBuf::from("/h")),
+                        // Otherwise USERPROFILE, on Windows only.
+                        (_, "set", true) => Some(PathBuf::from("C:\\Users\\u")),
+                        _ => None,
+                    };
+                    let what = format!("HOME {h}, USERPROFILE {p}, windows {windows}");
+                    match (got, want) {
+                        (Ok(got), Some(want)) => assert_eq!(got, want, "{what}"),
+                        (Err(LclError::NoHome), None) => {}
+                        (got, want) => panic!("{what}: got {got:?}, want {want:?}"),
+                    }
+                    cases += 1;
+                }
+            }
+        }
+        assert_eq!(cases, 18);
+        let message = LclError::NoHome.to_string();
+        assert!(
+            message.contains("HOME") && message.contains("USERPROFILE"),
+            "{message}"
+        );
+    }
+
     use super::*;
 
     #[test]

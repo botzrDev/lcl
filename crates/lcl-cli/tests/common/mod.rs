@@ -193,6 +193,9 @@ impl Env {
         let mut cmd = Command::new(program);
         cmd.current_dir(self.cwd.path())
             .env("HOME", self.home.path())
+            // On Windows lcl falls back to USERPROFILE when HOME is not
+            // set: a test that unsets HOME must not reach the real one.
+            .env_remove("USERPROFILE")
             // `--workspace` reads LCL_WORKSPACE, or else the deprecated
             // LCL_PROJECT; an exported value must not select a workspace
             // behind the test's back. Likewise LCL_STDIN_WAIT.

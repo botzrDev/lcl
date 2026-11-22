@@ -133,7 +133,7 @@ fn errors_after_parsing_are_one_json_line_under_json() {
             "",
             json_error(
                 "other",
-                "HOME is not set; lcl keeps its workspace registry in $HOME/.lcl"
+                "neither HOME nor USERPROFILE gives a home directory; lcl keeps its workspace registry in $HOME/.lcl, or on Windows, when HOME is not set, in %USERPROFILE%\\.lcl"
             )
             .as_str()
         )

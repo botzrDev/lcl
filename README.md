@@ -34,7 +34,7 @@ This is an alpha. Try to break it: odd values, huge files, many commands at once
 
 Keep real data safe while you do:
 
-- Test with a throwaway `HOME`, so lcl can't reach your own workspaces: `export HOME=$(mktemp -d)`.
+- Test with a throwaway `HOME`, so lcl can't reach your own workspaces: `export HOME=$(mktemp -d)`. `HOME` wins on Windows too; without it lcl uses `USERPROFILE` there.
 - A backup is `lcl export --output backup.jsonl`. `lcl import backup.jsonl` restores it into an empty workspace with the same key.
 - Copying `.lcl/` while no lcl is running is a backup too. Copy `data.sqlite-wal` with `data.sqlite` if it is there.
 
