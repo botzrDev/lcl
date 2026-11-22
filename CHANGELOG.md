@@ -4,6 +4,28 @@ All notable changes to lcl are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+Found by rough handling before the alpha.
+
+### Changed
+
+- `issue create`, `issue update`, `doc create` and `doc update` refuse a blank `--title` with exit 2. `lcl import` and `lcl export` still take one, because 0.1.0 stored them.
+- An empty `.lcl/data.sqlite` is refused with exit 1 and left empty. 0.2.0 opened it as a workspace with no name and no key. `lcl init` replaces it.
+- An error prints its cause once. 0.2.0 printed a SQLite error three times, as `database error: X`, `X` and `Error code N: X`.
+- An error from the registry that names no file now starts `open the workspace registry PATH`.
+- `doc update` of a doc that doesn't exist says `doc ID not found`, as `doc show` and `doc delete` do. 0.2.0 said `not found: ID`.
+- A cycle named in an error shows at most its first five and last five steps, as in `W-1 -> … 91 more … -> W-1`.
+- On a terminal, a control character in text lcl prints shows as its picture, so ESC is `␛`. A newline and a tab stay. Output to a pipe or a file is unchanged, byte for byte, and so is `--json`.
+
+### Fixed
+
+- A command no longer fails at once with `database is locked` when it starts while another lcl is opening the same workspace, as after a killed lcl. It waits, as a write does.
+- `lcl import` and `lcl export` take time in proportion to the workspace. A chain of 50,000 sub-issues took over ten minutes to import; it takes about a second. A long chain of blocks or duplicate-of relations is checked in one pass too.
+- `lcl tui` without a terminal says so. 0.2.0 said `No such device or address (os error 6)`.
+- The TUI lays out only the rows on screen. With 20,000 issues each key took 45 ms; it takes under 1 ms.
+- Creating an issue after number 9223372036854775807 says the workspace has run out of numbers. 0.2.0 printed a SQLite type error.
+
 ## [0.2.0] - 2026-11-12
 
 Everything below is relative to 0.1.0. Builds between 0.1.0 and 0.2.0 were

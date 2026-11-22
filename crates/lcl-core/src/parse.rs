@@ -61,6 +61,18 @@ fn non_blank(s: &str, blank: &str) -> Result<String, InvalidValue> {
     }
 }
 
+/// An issue's or a doc's title, as given: it isn't trimmed, but one that is
+/// empty or all whitespace is refused. The command line's rule only:
+/// `import` and `export` take a blank title, because 0.1.0 stored them and
+/// an upgraded workspace must still export.
+pub fn title(s: &str) -> Result<String, InvalidValue> {
+    if s.trim().is_empty() {
+        Err(invalid("a title can't be blank"))
+    } else {
+        Ok(s.to_string())
+    }
+}
+
 /// A label name, trimmed; blank is refused.
 pub fn label_name(s: &str) -> Result<String, InvalidValue> {
     non_blank(s, "a label name can't be empty")

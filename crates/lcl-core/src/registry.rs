@@ -17,7 +17,7 @@
 //! (`projects` and the workspace tables) stay there, and are never read or
 //! written again, except that the registry's V1 copies the `projects` rows.
 
-use crate::db::{BUSY_TIMEOUT, Store, use_wal};
+use crate::db::{BUSY_TIMEOUT, Store, retry_busy, use_wal};
 use crate::error::{LclError, Result};
 use crate::models::now;
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
@@ -192,14 +192,16 @@ impl Registry {
     pub fn open(home: &Path) -> Result<Self> {
         let path = index_path(home);
         std::fs::create_dir_all(lcl_dir(home))?;
-        let mut conn = Connection::open(&path)?;
-        conn.busy_timeout(BUSY_TIMEOUT)?;
-        check_supported(&path, registry_version(&conn)?)?;
-        use_wal(&conn)?;
-        migrate(&mut conn, &path)?;
-        Ok(Registry {
-            conn,
-            home: home.to_path_buf(),
+        retry_busy(|| {
+            let mut conn = Connection::open(&path)?;
+            conn.busy_timeout(BUSY_TIMEOUT)?;
+            check_supported(&path, registry_version(&conn)?)?;
+            use_wal(&conn)?;
+            migrate(&mut conn, &path)?;
+            Ok(Registry {
+                conn,
+                home: home.to_path_buf(),
+            })
         })
     }
 
@@ -320,7 +322,11 @@ impl Registry {
             created,
         };
 
-        if std::fs::symlink_metadata(path).is_ok() {
+        // An empty file is no workspace (lcl never leaves one: it builds a
+        // workspace under another name and renames it into place), so it is
+        // replaced like a missing one.
+        let exists = std::fs::symlink_metadata(path).is_ok_and(|m| !(m.is_file() && m.len() == 0));
+        if exists {
             // Opening an old file upgrades it, and `open` may say so, even
             // when init then refuses: an upgrade is neither a rename nor a
             // re-key.

@@ -21,7 +21,7 @@
 use crate::db::{
     NEXT_ISSUE_NUMBER, Store, next_issue_number, put_meta, read_key, read_meta, ref_looks_own,
 };
-use crate::error::{LclError, Result};
+use crate::error::{LclError, Result, chain};
 use crate::models::{InvalidValue, Priority, ProjectStatus, Status, identifier, now};
 use crate::parse;
 use rusqlite::{Connection, TransactionBehavior, params};
@@ -1040,6 +1040,7 @@ fn read_doc(r: &mut Rec, now: i64) -> Result<DocRec> {
 // ---------------------------------------------------------------- references
 
 /// Why a relation can't be added to the ones before it.
+#[derive(Debug)]
 enum EdgeError {
     SelfRelation,
     /// The same row already came, at `at`.
@@ -1067,9 +1068,58 @@ struct Graph {
     rows: HashMap<(i64, Kind, i64), usize>,
     blocks: HashMap<i64, Vec<i64>>,
     duplicate_of: HashMap<i64, (i64, usize)>,
+    /// Set when every blocks row to come is known to make no cycle between
+    /// them, and so with duplicate rows: `add` then skips its search for
+    /// one, which costs a walk of the chain for each row added to it.
+    blocks_acyclic: bool,
+    duplicates_acyclic: bool,
+}
+
+/// Whether the links `from -> to` make no cycle (Kahn's algorithm).
+fn acyclic(links: impl Iterator<Item = (i64, i64)>) -> bool {
+    let mut out: HashMap<i64, Vec<i64>> = HashMap::new();
+    let mut incoming: HashMap<i64, usize> = HashMap::new();
+    for (from, to) in links {
+        out.entry(from).or_default().push(to);
+        incoming.entry(from).or_default();
+        *incoming.entry(to).or_default() += 1;
+    }
+    let mut free: Vec<i64> = incoming
+        .iter()
+        .filter(|(_, n)| **n == 0)
+        .map(|(node, _)| *node)
+        .collect();
+    let mut left = incoming.len();
+    while let Some(node) = free.pop() {
+        left -= 1;
+        for to in out.get(&node).into_iter().flatten() {
+            let n = incoming.get_mut(to).expect("every link's end is counted");
+            *n -= 1;
+            if *n == 0 {
+                free.push(*to);
+            }
+        }
+    }
+    left == 0
 }
 
 impl Graph {
+    /// A graph for exactly these rows, added one at a time with `add`. It
+    /// looks at them all first, so rows that make no cycle are added without
+    /// a search each.
+    fn expecting(rows: impl Iterator<Item = (Kind, i64, i64)> + Clone) -> Graph {
+        let of = |kind: Kind| {
+            rows.clone()
+                .filter(move |(k, _, _)| *k == kind)
+                .map(|(_, from, to)| (from, to))
+        };
+        Graph {
+            blocks_acyclic: acyclic(of(Kind::Blocks)),
+            duplicates_acyclic: acyclic(of(Kind::Duplicate)),
+            ..Graph::default()
+        }
+    }
+
     fn add(
         &mut self,
         kind: Kind,
@@ -1089,7 +1139,9 @@ impl Graph {
         }
         match kind {
             Kind::Blocks => {
-                if let Some(path) = self.blocks_path(to, from) {
+                if !self.blocks_acyclic
+                    && let Some(path) = self.blocks_path(to, from)
+                {
                     return Err(EdgeError::BlocksCycle {
                         path: std::iter::once(from).chain(path).collect(),
                     });
@@ -1102,7 +1154,10 @@ impl Graph {
                 }
                 // Each issue has one target at most: the chain from `to` is a line.
                 let mut path = vec![from, to];
-                let mut next = self.duplicate_of.get(&to).map(|(t, _)| *t);
+                let mut next = match self.duplicates_acyclic {
+                    true => None,
+                    false => self.duplicate_of.get(&to).map(|(t, _)| *t),
+                };
                 while let Some(n) = next {
                     path.push(n);
                     if n == from {
@@ -1152,7 +1207,8 @@ impl Graph {
 /// What an import says about a relation that can't be added.
 fn edge_message(key: &str, e: &EdgeError, kind: Kind, from: i64, to: i64) -> String {
     let id = |n: i64| identifier(key, n);
-    let named = |path: &[i64], sep: &str| path.iter().map(|n| id(*n)).collect::<Vec<_>>().join(sep);
+    let named =
+        |path: &[i64], sep: &str| chain(&path.iter().map(|n| id(*n)).collect::<Vec<_>>(), sep);
     match e {
         EdgeError::SelfRelation => LclError::SelfRelation(id(from)).to_string(),
         EdgeError::Twice { at } => format!(
@@ -1201,6 +1257,40 @@ fn loop_through<T: Copy + Eq + std::hash::Hash>(
         at = up(n);
     }
     None
+}
+
+/// Every node that is on a loop of `up` links. One pass over the links, where
+/// calling `loop_through` for each node would walk a long chain once per
+/// node on it.
+fn on_loops<T: Copy + Eq + std::hash::Hash>(
+    nodes: impl IntoIterator<Item = T>,
+    up: impl Fn(T) -> Option<T>,
+) -> HashSet<T> {
+    let mut done: HashSet<T> = HashSet::new();
+    let mut looped = HashSet::new();
+    for start in nodes {
+        if done.contains(&start) {
+            continue;
+        }
+        // The walk from `start`, and each node's place on it.
+        let mut walk = vec![start];
+        let mut place = HashMap::from([(start, 0)]);
+        let mut at = up(start);
+        while let Some(n) = at {
+            if let Some(&from) = place.get(&n) {
+                looped.extend(walk[from..].iter().copied());
+                break;
+            }
+            if done.contains(&n) {
+                break;
+            }
+            place.insert(n, walk.len());
+            walk.push(n);
+            at = up(n);
+        }
+        done.extend(walk);
+    }
+    looped
 }
 
 /// Every reference between records: names and numbers that must exist,
@@ -1282,6 +1372,8 @@ fn check_references(file: &File, comment_lines: &[usize]) -> Result<()> {
             docs.insert(id, (d.line, d.parent.as_deref()));
         }
     }
+    let doc_up = |n: &str| docs.get(n).and_then(|(_, p)| *p);
+    let looped_docs = on_loops(docs.keys().copied(), doc_up);
     for d in &file.docs {
         let Some(parent) = &d.parent else { continue };
         if !docs.contains_key(parent.as_str()) {
@@ -1299,11 +1391,14 @@ fn check_references(file: &File, comment_lines: &[usize]) -> Result<()> {
                     LclError::DocSelfParent(id.clone()).to_string(),
                 ));
             }
-            if let Some(path) = loop_through(id.as_str(), |n| docs.get(n).and_then(|(_, p)| *p)) {
+            if looped_docs.contains(id.as_str())
+                && let Some(path) = loop_through(id.as_str(), doc_up)
+            {
+                let path: Vec<String> = path.into_iter().map(String::from).collect();
                 return Err(bad(
                     d.line,
                     "parent",
-                    format!("doc parents make a cycle: {}", path.join(" -> ")),
+                    format!("doc parents make a cycle: {}", chain(&path, " -> ")),
                 ));
             }
         }
@@ -1346,6 +1441,7 @@ fn check_references(file: &File, comment_lines: &[usize]) -> Result<()> {
             refs.insert(r.to_ascii_lowercase(), (r, i.number));
         }
     }
+    let looped_issues = on_loops(parents.keys().copied(), |n| parents.get(&n).copied());
     for i in &file.issues {
         if let Some(p) = i.parent {
             if p == i.number {
@@ -1362,12 +1458,14 @@ fn check_references(file: &File, comment_lines: &[usize]) -> Result<()> {
                     format!("there is no issue {} in the file", id(p)),
                 ));
             }
-            if let Some(path) = loop_through(i.number, |n| parents.get(&n).copied()) {
+            if looped_issues.contains(&i.number)
+                && let Some(path) = loop_through(i.number, |n| parents.get(&n).copied())
+            {
                 let path: Vec<String> = path.into_iter().map(id).collect();
                 let e = LclError::ParentCycle {
                     issue: id(i.number),
                     parent: id(p),
-                    path: path.join(" -> "),
+                    path: chain(&path, " -> "),
                 };
                 return Err(bad(i.line, "parent", e.to_string()));
             }
@@ -1456,7 +1554,7 @@ fn check_references(file: &File, comment_lines: &[usize]) -> Result<()> {
         }
     }
 
-    let mut graph = Graph::default();
+    let mut graph = Graph::expecting(file.relations.iter().map(|r| (r.kind, r.from, r.to)));
     for r in &file.relations {
         for (field, n) in [("from", r.from), ("to", r.to)] {
             if !numbers.contains_key(&n) {
@@ -1646,7 +1744,27 @@ fn insert(conn: &Connection, file: &File, at: i64) -> Result<i64> {
             conn.prepare("INSERT INTO issue_labels(issue_id, label_id) VALUES (?1, ?2)")?;
         let mut cycle =
             conn.prepare("INSERT INTO issue_cycles(issue_id, cycle_id) VALUES (?1, ?2)")?;
+        // Parents first. A row inserted before the one its parent_id names
+        // leaves a foreign key waiting, and while one waits, SQLite scans
+        // the table for each row inserted: a long chain listed child first
+        // would cost a scan for every issue in the file.
+        let by_number: HashMap<i64, &IssueRec> =
+            file.issues.iter().map(|i| (i.number, i)).collect();
+        let mut placed: HashSet<i64> = HashSet::new();
+        let mut parents_first: Vec<&IssueRec> = Vec::with_capacity(file.issues.len());
         for i in &file.issues {
+            // check_references found every parent and no loop.
+            let mut above = vec![];
+            let mut at = Some(i);
+            while let Some(i) = at
+                && placed.insert(i.number)
+            {
+                above.push(i);
+                at = i.parent.map(|p| by_number[&p]);
+            }
+            parents_first.extend(above.into_iter().rev());
+        }
+        for i in parents_first {
             let id = &issue_ids[&i.number];
             let parent = i.parent.map(|p| &issue_ids[&p]);
             let project = i
@@ -2096,6 +2214,7 @@ fn export_in(conn: &Connection) -> Result<(String, Counts)> {
         .iter()
         .filter_map(|i| Some((i.number, *numbers.get(i.parent_id.as_deref()?)?)))
         .collect();
+    let looped_issues = on_loops(parent_of.keys().copied(), |n| parent_of.get(&n).copied());
     for i in issues {
         let ident = id(i.number);
         let what = format!("issue {ident}");
@@ -2156,9 +2275,11 @@ fn export_in(conn: &Connection) -> Result<(String, Counts)> {
             None => None,
             Some(p) => match numbers.get(p.as_str()) {
                 Some(n) => {
-                    if let Some(path) = loop_through(i.number, |n| parent_of.get(&n).copied()) {
+                    if looped_issues.contains(&i.number)
+                        && let Some(path) = loop_through(i.number, |n| parent_of.get(&n).copied())
+                    {
                         let path: Vec<String> = path.into_iter().map(id).collect();
-                        problems.push(format!("{what}: its parents make a cycle ({}); fix it with lcl issue update {ident} --no-parent", path.join(" -> ")));
+                        problems.push(format!("{what}: its parents make a cycle ({}); fix it with lcl issue update {ident} --no-parent", chain(&path, " -> ")));
                     }
                     Some(*n)
                 }
@@ -2328,7 +2449,7 @@ fn export_in(conn: &Connection) -> Result<(String, Counts)> {
             }
         }
         rels.sort_by(|x, y| (x.0, x.1.as_str(), x.2).cmp(&(y.0, y.1.as_str(), y.2)));
-        let mut graph = Graph::default();
+        let mut graph = Graph::expecting(rels.iter().map(|&(from, kind, to)| (kind, from, to)));
         for (i, &(from, kind, to)) in rels.iter().enumerate() {
             if let Err(e) = graph.add(kind, from, to, i) {
                 let typed = match kind {
@@ -2338,14 +2459,11 @@ fn export_in(conn: &Connection) -> Result<(String, Counts)> {
                 let why = match &e {
                     EdgeError::BlocksCycle { path } => format!(
                         "the blocks relations make a cycle ({})",
-                        path.iter()
-                            .map(|n| id(*n))
-                            .collect::<Vec<_>>()
-                            .join(" blocks ")
+                        chain(&path.iter().map(|n| id(*n)).collect::<Vec<_>>(), " blocks ")
                     ),
                     EdgeError::DuplicateCycle { path } => format!(
                         "the duplicate-of relations make a cycle ({})",
-                        path.iter().map(|n| id(*n)).collect::<Vec<_>>().join(" -> ")
+                        chain(&path.iter().map(|n| id(*n)).collect::<Vec<_>>(), " -> ")
                     ),
                     EdgeError::SecondTarget { current, .. } => {
                         format!("{} is also a duplicate of {}", id(from), id(*current))
@@ -2394,6 +2512,8 @@ fn export_in(conn: &Connection) -> Result<(String, Counts)> {
             .iter()
             .map(|d| (d.0.as_str(), d.3.as_deref()))
             .collect();
+        let doc_up = |n: &str| parent_of.get(n).copied().flatten();
+        let looped_docs = on_loops(parent_of.keys().copied(), doc_up);
         for (did, title, content, parent, created, updated) in &docs {
             if parse::uuid(did).ok().as_deref() != Some(did.as_str()) {
                 problems.push(by_hand(
@@ -2405,10 +2525,11 @@ fn export_in(conn: &Connection) -> Result<(String, Counts)> {
             if let Some(p) = parent {
                 if !parent_of.contains_key(p.as_str()) {
                     problems.push(format!("doc {did}: parent {p} is not a doc; fix it with lcl doc update {did} --no-parent"));
-                } else if let Some(path) =
-                    loop_through(did.as_str(), |n| parent_of.get(n).copied().flatten())
+                } else if looped_docs.contains(did.as_str())
+                    && let Some(path) = loop_through(did.as_str(), doc_up)
                 {
-                    problems.push(format!("doc {did}: its parents make a cycle ({}); fix it with lcl doc update {did} --no-parent", path.join(" -> ")));
+                    let path: Vec<String> = path.into_iter().map(String::from).collect();
+                    problems.push(format!("doc {did}: its parents make a cycle ({}); fix it with lcl doc update {did} --no-parent", chain(&path, " -> ")));
                 }
             }
             counts.docs += 1;
@@ -2454,5 +2575,101 @@ mod erased {
         fn json(&self) -> String {
             serde_json::to_string(self).expect("a line of plain fields serializes")
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn loops(links: &[(i64, i64)]) -> Vec<i64> {
+        let up: HashMap<i64, i64> = links.iter().copied().collect();
+        let mut found: Vec<i64> = on_loops(up.keys().copied(), |n| up.get(&n).copied())
+            .into_iter()
+            .collect();
+        found.sort();
+        found
+    }
+
+    /// `on_loops` agrees with `loop_through` asked of every node.
+    #[test]
+    fn on_loops_finds_exactly_the_nodes_on_a_loop() {
+        assert_eq!(loops(&[]), [] as [i64; 0]);
+        assert_eq!(loops(&[(1, 2), (2, 3)]), [] as [i64; 0]);
+        assert_eq!(loops(&[(1, 1)]), [1]);
+        assert_eq!(loops(&[(1, 2), (2, 1)]), [1, 2]);
+        // A tail into a loop is not on it; a dangling link ends a walk.
+        assert_eq!(
+            loops(&[(5, 4), (4, 1), (1, 2), (2, 3), (3, 1), (9, 8)]),
+            [1, 2, 3]
+        );
+        // Two loops, and a chain that joins a walk already made.
+        assert_eq!(
+            loops(&[(1, 2), (2, 1), (3, 4), (4, 3), (6, 5), (7, 6), (5, 1)]),
+            [1, 2, 3, 4]
+        );
+        let links = [(5, 4), (4, 1), (1, 2), (2, 3), (3, 1), (7, 7), (8, 9)];
+        let up: HashMap<i64, i64> = links.iter().copied().collect();
+        let one_by_one: Vec<i64> = (1..=9)
+            .filter(|n| loop_through(*n, |n| up.get(&n).copied()).is_some())
+            .collect();
+        assert_eq!(loops(&links), one_by_one);
+    }
+
+    #[test]
+    fn acyclic_tells_a_cycle_from_a_diamond() {
+        assert!(acyclic([].into_iter()));
+        assert!(acyclic([(1, 2), (1, 3), (2, 4), (3, 4)].into_iter()));
+        assert!(acyclic([(1, 2), (1, 2)].into_iter()));
+        assert!(!acyclic([(1, 1)].into_iter()));
+        assert!(!acyclic([(1, 2), (2, 3), (3, 1), (4, 5)].into_iter()));
+    }
+
+    /// Knowing the rows make no cycle changes no answer `add` gives.
+    #[test]
+    fn a_graph_expecting_its_rows_answers_as_one_that_searches() {
+        let sets: [&[(Kind, i64, i64)]; 4] = [
+            &[
+                (Kind::Blocks, 1, 2),
+                (Kind::Blocks, 2, 3),
+                (Kind::Blocks, 1, 3),
+            ],
+            &[
+                (Kind::Blocks, 1, 2),
+                (Kind::Blocks, 2, 3),
+                (Kind::Blocks, 3, 1),
+            ],
+            &[
+                (Kind::Duplicate, 1, 2),
+                (Kind::Duplicate, 2, 3),
+                (Kind::Duplicate, 1, 3),
+            ],
+            &[
+                (Kind::Duplicate, 1, 2),
+                (Kind::Duplicate, 2, 1),
+                (Kind::Related, 2, 1),
+            ],
+        ];
+        for rows in sets {
+            let mut searching = Graph::default();
+            let mut expecting = Graph::expecting(rows.iter().copied());
+            for (at, &(kind, from, to)) in rows.iter().enumerate() {
+                let a = searching
+                    .add(kind, from, to, at)
+                    .map_err(|e| format!("{e:?}"));
+                let b = expecting
+                    .add(kind, from, to, at)
+                    .map_err(|e| format!("{e:?}"));
+                assert_eq!(a, b, "{rows:?} row {at}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_long_chain_is_named_by_its_ends() {
+        let steps = |n: usize| (1..=n).map(|i| i.to_string()).collect::<Vec<_>>();
+        assert_eq!(chain(&steps(3), " -> "), "1 -> 2 -> 3");
+        assert_eq!(chain(&steps(11), "-"), "1-2-3-4-5-6-7-8-9-10-11");
+        assert_eq!(chain(&steps(12), "-"), "1-2-3-4-5-… 2 more …-8-9-10-11-12");
     }
 }

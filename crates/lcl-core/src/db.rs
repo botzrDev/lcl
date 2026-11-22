@@ -41,6 +41,29 @@ pub(crate) fn use_wal(conn: &Connection) -> Result<()> {
     }
 }
 
+/// Runs `open`, a whole open of a database file, again while SQLite refuses
+/// it as busy. The busy timeout covers a lock another lcl holds, but not
+/// every moment of an open: SQLite gives up at once, without waiting, when it
+/// meets another connection recovering the write-ahead log (after a killed
+/// lcl, say). Nothing is half done when that happens, so the open starts
+/// again, for as long as a write would have waited.
+pub(crate) fn retry_busy<T>(mut open: impl FnMut() -> Result<T>) -> Result<T> {
+    let started = Instant::now();
+    let mut pause = Duration::from_millis(5);
+    loop {
+        match open() {
+            Err(LclError::Db(e))
+                if e.sqlite_error_code() == Some(ErrorCode::DatabaseBusy)
+                    && started.elapsed() < BUSY_TIMEOUT =>
+            {
+                std::thread::sleep(pause);
+                pause = (pause * 2).min(Duration::from_millis(100));
+            }
+            other => return other,
+        }
+    }
+}
+
 /// The `meta` key holding the next issue number to hand out (seeded by
 /// migration 2; the name must match it). It only ever grows: deleting an issue
 /// never lowers it, so no number is handed out twice.
@@ -291,7 +314,7 @@ impl Store {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        Self::init(Connection::open(path)?)
+        retry_busy(|| Self::init(Connection::open(path)?))
     }
 
     pub fn open_in_memory() -> Result<Self> {
@@ -497,7 +520,7 @@ impl Store {
             )?;
             set_labels(tx, issue.id.as_str(), &issue.labels)?;
             place_cycle(tx, issue.id.as_str(), &placement.cycle)?;
-            put_meta(tx, NEXT_ISSUE_NUMBER, &(next + 1).to_string())?;
+            put_meta(tx, NEXT_ISSUE_NUMBER, &next.saturating_add(1).to_string())?;
             reread(tx, &key, issue.id.as_str())
         })
     }
@@ -1133,7 +1156,7 @@ impl Store {
         parent: Change<String>,
     ) -> Result<Doc> {
         self.write(|tx| {
-            let mut d = read_doc(tx, id)?.ok_or_else(|| LclError::NotFound(id.to_string()))?;
+            let mut d = read_doc(tx, id)?.ok_or_else(|| LclError::DocNotFound(id.to_string()))?;
             if let Some(t) = title {
                 d.title = t;
             }
@@ -1413,10 +1436,11 @@ pub(crate) fn next_issue_number(conn: &Connection) -> Result<i64> {
         })?,
         None => 1,
     };
-    let past_max: i64 =
-        conn.query_row("SELECT COALESCE(MAX(number),0)+1 FROM issues", [], |r| {
-            r.get(0)
-        })?;
+    let max: Option<i64> = conn.query_row("SELECT MAX(number) FROM issues", [], |r| r.get(0))?;
+    let past_max = max
+        .unwrap_or(0)
+        .checked_add(1)
+        .ok_or(LclError::NumbersExhausted)?;
     Ok(mark.max(past_max))
 }
 
@@ -1588,7 +1612,7 @@ fn check_doc_parent(conn: &Connection, doc: Option<&str>, parent: &str) -> Resul
             return Err(LclError::DocParentCycle {
                 doc: doc.to_string(),
                 parent: parent_id,
-                path: path.join(" -> "),
+                path: crate::error::chain(&path, " -> "),
             });
         }
         // A dangling link, or a loop above that doesn't pass through this
@@ -1640,7 +1664,7 @@ fn check_parent(
             return Err(LclError::ParentCycle {
                 issue: identifier(key, child.number),
                 parent: identifier(key, parent_number),
-                path: path.join(" -> "),
+                path: crate::error::chain(&path, " -> "),
             });
         }
         // A dangling link, or a loop above that doesn't pass through this
@@ -1721,7 +1745,7 @@ fn check_edge(conn: &Connection, key: &str, e: &Edge) -> Result<()> {
                 return Err(LclError::BlocksCycle {
                     blocker: e.from.identifier.clone(),
                     blocked: e.to.identifier.clone(),
-                    path: names.join(" blocks "),
+                    path: crate::error::chain(&names, " blocks "),
                 });
             }
         }
@@ -1753,7 +1777,7 @@ fn check_edge(conn: &Connection, key: &str, e: &Edge) -> Result<()> {
                     return Err(LclError::DuplicateCycle {
                         issue: e.from.identifier.clone(),
                         target: e.to.identifier.clone(),
-                        path: path.join(" -> "),
+                        path: crate::error::chain(&path, " -> "),
                     });
                 }
                 // A loop that doesn't pass through `from` (only a hand edit

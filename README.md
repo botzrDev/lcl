@@ -4,6 +4,65 @@ lcl is a local tracker with one SQLite file per workspace. Issues, projects, mil
 
 The command line is the interface. `lcl --json` prints one JSON value on stdout, and on failure one JSON error on stderr. Exit 0 is success, 1 is a conflict or a failure against stored data, and 2 is a wrong command line.
 
+## Install
+
+lcl needs Rust 1.98 or later.
+
+    cargo install --path crates/lcl-cli --locked
+
+That puts `lcl` in `~/.cargo/bin`. `lcl --version` prints the version.
+
+## Quick start
+
+    cd my-project
+    lcl init --key MP
+    lcl label create bug
+    lcl issue create --title "Login fails" --priority high --label bug
+    lcl issue update MP-1 --status "in progress" --assignee ann
+    lcl issue comment MP-1 "Reproduced on main"
+    lcl issue list
+    lcl search login
+    lcl tui
+
+`lcl init` makes the workspace at `.lcl/data.sqlite` and registers its name in `~/.lcl/index.sqlite`. Commands run in that directory or below it use that workspace. From anywhere else, name it with `--workspace NAME`. `lcl workspace create NAME --key KEY` makes a workspace under `~/.lcl/projects` instead.
+
+`lcl help`, and `--help` on any command, list every flag.
+
+## Alpha testing
+
+This is an alpha. Try to break it: odd values, huge files, many commands at once, killed processes, full disks, hand-edited files.
+
+Keep real data safe while you do:
+
+- Test with a throwaway `HOME`, so lcl can't reach your own workspaces: `export HOME=$(mktemp -d)`.
+- A backup is `lcl export --output backup.jsonl`. `lcl import backup.jsonl` restores it into an empty workspace with the same key.
+- Copying `.lcl/` while no lcl is running is a backup too. Copy `data.sqlite-wal` with `data.sqlite` if it is there.
+
+What counts as a bug:
+
+- A panic, or any exit status other than 0, 1 or 2.
+- A hang, or a command that takes seconds on a workspace of a few thousand issues.
+- An error that doesn't say what to do, or that names no file when a file is at fault.
+- A write that is lost, half done, or done twice. `sqlite3 .lcl/data.sqlite "PRAGMA integrity_check; PRAGMA foreign_key_check"` should print only `ok`.
+- A workspace that `lcl export` refuses, or whose export does not import and export again to the same bytes.
+- `--json` output that isn't one JSON value on stdout, or an error that isn't one JSON line on stderr.
+- Anything the help text or `CHANGELOG.md` says that the program doesn't do.
+
+A report needs:
+
+- `lcl --version`, the operating system and the terminal.
+- The commands, in order, from `lcl init` on. A script is best.
+- What happened, with the whole of stdout and stderr and the exit status, and what you expected.
+- `lcl workspace show --json`, and the export if the workspace can be shared.
+
+Known limits:
+
+- Text sizes and name lengths have no limit. A value larger than the system lets a command line carry goes in through `--description-file`, `--content-file` or `--body-file`.
+- `lcl import` and `lcl export` take a blank title, which the command line refuses: 0.1.0 stored them.
+- `issue update` with no flags changes nothing but the issue's `updated_at`.
+- A hand-edited value of the wrong type (text where a number goes) stops the commands that read it, with SQLite's own message.
+- The TUI is read-only.
+
 ## Schema
 
 `PRAGMA user_version` is the schema version. Opening a workspace applies the pending migrations in one transaction. Migrations are append-only: a shipped step is never edited. A file from a newer lcl is refused and left untouched.
@@ -15,4 +74,3 @@ Search uses FTS5 tables keyed by rowid. lcl does not run `VACUUM`. On open it ch
 ## Boundaries
 
 lcl is one process and one file. It is not a multi-user server. It does not reuse issue numbers. It does not vacuum a workspace.
-w

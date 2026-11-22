@@ -643,11 +643,11 @@ fn a_read_only_workspace_is_kind_io() {
     let err: Value =
         serde_json::from_str(out.stderr.strip_suffix('\n').expect("one line")).expect("JSON");
     assert_eq!(err["error"]["kind"], "io", "{err}");
-    // The rest is rusqlite's and SQLite's own chain of causes.
-    let message = err["error"]["message"].as_str().expect("message");
-    assert!(
-        message.starts_with("database error: attempt to write a readonly database\n"),
-        "{message}"
+    // lcl's message already holds SQLite's; the causes beneath it, which
+    // only repeat it, aren't printed.
+    assert_eq!(
+        err["error"]["message"],
+        "database error: attempt to write a readonly database"
     );
     std::fs::set_permissions(&db, std::fs::Permissions::from_mode(0o644)).expect("chmod 0644");
 }

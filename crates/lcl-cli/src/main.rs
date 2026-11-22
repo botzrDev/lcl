@@ -19,9 +19,15 @@ use std::time::Duration;
 /// `println!` that returns the error when stdout fails (`?`), as
 /// StdoutClosed when its reader went away, instead of panicking.
 macro_rules! outln {
-    ($($arg:tt)*) => {
-        writeln!(std::io::stdout(), $($arg)*).map_err(|e| stdout_failed(e, "can't write to stdout"))?
-    };
+    ($($arg:tt)*) => {{
+        let stdout = std::io::stdout();
+        if stdout.is_terminal() {
+            writeln!(&stdout, "{}", for_terminal(&format!($($arg)*), true))
+        } else {
+            writeln!(&stdout, $($arg)*)
+        }
+        .map_err(|e| stdout_failed(e, "can't write to stdout"))?
+    }};
 }
 
 #[derive(Parser)]
@@ -279,8 +285,8 @@ enum IssueCmd {
     // there, rather than being taken for a flag.
     /// Create an issue. It gets the next number: a number is never handed out twice.
     Create {
-        /// The issue's title.
-        #[arg(long)]
+        /// The issue's title. Not blank.
+        #[arg(long, value_parser = parse_title)]
         title: String,
         /// The description inline. For long text, use --description-file.
         #[arg(long, value_parser = inline_description, conflicts_with = "description_file")]
@@ -392,8 +398,8 @@ enum IssueCmd {
         /// The issue: KEY-N, #N, N or its UUID.
         #[arg(allow_negative_numbers = true)]
         id: IssueRef,
-        /// Its new title.
-        #[arg(long)]
+        /// Its new title. Not blank.
+        #[arg(long, value_parser = parse_title)]
         title: Option<String>,
         /// The description inline; "" clears it. For long text, use --description-file.
         #[arg(long, value_parser = inline_description, conflicts_with = "description_file")]
@@ -691,8 +697,8 @@ enum MilestoneCmd {
 enum DocCmd {
     /// Create a doc, at the top level or under another doc.
     Create {
-        /// The doc's title.
-        #[arg(long)]
+        /// The doc's title. Not blank.
+        #[arg(long, value_parser = parse_title)]
         title: String,
         /// The content inline. For long text, use --content-file.
         #[arg(long, value_parser = inline_content, conflicts_with = "content_file")]
@@ -715,8 +721,8 @@ enum DocCmd {
     Update {
         /// The doc's id, as doc list shows it.
         id: String,
-        /// Its new title.
-        #[arg(long)]
+        /// Its new title. Not blank.
+        #[arg(long, value_parser = parse_title)]
         title: Option<String>,
         /// The content inline; "" clears it. For long text, use --content-file.
         #[arg(long, value_parser = inline_content, conflicts_with = "content_file")]
@@ -848,6 +854,10 @@ fn parse_estimate(s: &str) -> std::result::Result<i64, String> {
 }
 
 /// A cycle name or reference, trimmed; blank is refused.
+fn parse_title(s: &str) -> std::result::Result<String, String> {
+    parse::title(s).map_err(|e| e.0)
+}
+
 fn parse_cycle_name(s: &str) -> std::result::Result<String, String> {
     parse::cycle_name(s).map_err(|e| e.0)
 }
@@ -1361,6 +1371,27 @@ fn home() -> Result<PathBuf, LclError> {
     }
 }
 
+/// An error from the registry under `home`. SQLite's and the file system's
+/// own errors don't say which file they are about, so those get the
+/// registry's path as context; lcl's other errors name it themselves.
+fn in_registry(home: &std::path::Path, e: LclError) -> anyhow::Error {
+    let bare = matches!(e, LclError::Db(_) | LclError::Io(_));
+    let e = anyhow::Error::new(e);
+    if bare {
+        e.context(format!(
+            "open the workspace registry {}",
+            registry::index_path(home).display()
+        ))
+    } else {
+        e
+    }
+}
+
+/// Opens the registry, creating it if need be.
+fn open_registry(home: &std::path::Path) -> Result<Registry> {
+    Registry::open(home).map_err(|e| in_registry(home, e))
+}
+
 fn find_local_db() -> Option<PathBuf> {
     let mut cur = std::env::current_dir().ok()?;
     loop {
@@ -1383,7 +1414,8 @@ fn resolve_workspace(workspace: Option<&str>) -> Result<(PathBuf, Store)> {
     let path = match workspace {
         Some(name) => {
             let slug = registry::slug(name).ok_or_else(|| LclError::NoSlug(name.to_string()))?;
-            let path = registry::resolve(&home()?, &slug)?;
+            let home = home()?;
+            let path = registry::resolve(&home, &slug).map_err(|e| in_registry(&home, e))?;
             if !path.exists() {
                 return Err(LclError::WorkspaceNotFound {
                     name: name.to_string(),
@@ -1395,6 +1427,11 @@ fn resolve_workspace(workspace: Option<&str>) -> Result<(PathBuf, Store)> {
         }
         None => find_local_db().ok_or(LclError::NoWorkspace)?,
     };
+    // Opening an empty file would make a workspace of it, with no name and
+    // no key.
+    if std::fs::metadata(&path).is_ok_and(|m| m.is_file() && m.len() == 0) {
+        return Err(LclError::EmptyWorkspaceFile(path.display().to_string()).into());
+    }
     let store = open_store(&path).with_context(|| format!("open workspace {}", path.display()))?;
     Ok((path, store))
 }
@@ -1528,9 +1565,55 @@ fn error_kind(e: &anyhow::Error) -> ErrorKind {
     }
 }
 
+/// An error as lcl prints it: its message, then what caused it, laid out as
+/// anyhow lays them out. The causes stop at the first of lcl's own errors,
+/// whose message already says what lies beneath it: without that, a SQLite
+/// error prints three times over.
+fn error_text(e: &anyhow::Error) -> String {
+    let mut messages = vec![];
+    for cause in e.chain() {
+        messages.push(cause.to_string());
+        if cause.is::<LclError>() {
+            break;
+        }
+    }
+    let mut out = messages.remove(0);
+    match messages.as_slice() {
+        [] => {}
+        [only] => out.push_str(&format!("\n\nCaused by:\n    {only}")),
+        several => {
+            out.push_str("\n\nCaused by:");
+            for (n, message) in several.iter().enumerate() {
+                out.push_str(&format!("\n    {n}: {message}"));
+            }
+        }
+    }
+    out
+}
+
+/// `text` as a terminal may be shown it: every control character but a
+/// newline and a tab becomes its picture (ESC is ␛), so stored text can't
+/// move the cursor, recolour or clear the screen. Text for anything else,
+/// a file or a pipe, is left byte for byte.
+fn for_terminal(text: &str, terminal: bool) -> std::borrow::Cow<'_, str> {
+    let unsafe_here = |c: char| c.is_control() && c != '\n' && c != '\t';
+    if !terminal || !text.contains(unsafe_here) {
+        return text.into();
+    }
+    text.chars()
+        .map(|c| match c {
+            c if !unsafe_here(c) => c,
+            '\u{7f}' => '␡',
+            c if (c as u32) < 0x20 => char::from_u32(0x2400 + c as u32).unwrap_or('\u{fffd}'),
+            _ => '\u{fffd}',
+        })
+        .collect::<String>()
+        .into()
+}
+
 /// Exit 2 for a usage error, as clap does for a bad argument; 1 for anything
-/// else. Errors print as `fn main() -> Result` would print them, or, under
-/// --json, as one JSON line.
+/// else. Errors print as `error_text` lays them out, or, under --json, as
+/// one JSON line.
 fn main() -> ExitCode {
     let mut cli = parse();
     refuse_old_forms(&cli);
@@ -1541,10 +1624,14 @@ fn main() -> ExitCode {
         Err(e) if e.downcast_ref::<StdoutClosed>().is_some() => ExitCode::SUCCESS,
         Err(e) => {
             let kind = error_kind(&e);
+            let message = error_text(&e);
             if json_errors() {
-                print_json_error(kind, &format!("{e:?}"));
+                print_json_error(kind, &message);
             } else {
-                eprintln!("Error: {e:?}");
+                eprintln!(
+                    "Error: {}",
+                    for_terminal(&message, std::io::stderr().is_terminal())
+                );
             }
             ExitCode::from(if kind == ErrorKind::Usage { 2 } else { 1 })
         }
@@ -1569,7 +1656,7 @@ fn run(cli: Cli) -> Result<()> {
                 return Err(LclError::NoSlug(name).into());
             }
             let dbpath = cwd.join(".lcl").join("data.sqlite");
-            let made = Registry::open(&home)?.init_workspace(&name, &key, &dbpath, open_store)?;
+            let made = open_registry(&home)?.init_workspace(&name, &key, &dbpath, open_store)?;
             if cli.json {
                 print_json(&made)?;
             } else if made.created {
@@ -1815,7 +1902,7 @@ fn run(cli: Cli) -> Result<()> {
         }
         Commands::Workspace { cmd } => match cmd {
             WorkspaceCmd::Create { name, key } => {
-                let made = Registry::open(&home()?)?.create_workspace(&name, &key)?;
+                let made = open_registry(&home()?)?.create_workspace(&name, &key)?;
                 if cli.json {
                     print_json(&made)?;
                 } else {
@@ -1828,7 +1915,7 @@ fn run(cli: Cli) -> Result<()> {
                 }
             }
             WorkspaceCmd::List => {
-                let all = Registry::open(&home()?)?.list()?;
+                let all = open_registry(&home()?)?.list()?;
                 if cli.json {
                     print_json(&all)?;
                 } else {
@@ -2514,6 +2601,41 @@ fn run(cli: Cli) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_terminal_is_shown_control_characters_as_pictures() {
+        let text = "a\u{1b}[2Jb\u{7}\u{7f}\u{9b}\tc\nd é 日本";
+        assert_eq!(for_terminal(text, true), "a␛[2Jb␇␡\u{fffd}\tc\nd é 日本");
+        assert_eq!(for_terminal(text, false), text);
+        assert!(matches!(
+            for_terminal("plain\ttext\n", true),
+            std::borrow::Cow::Borrowed(_)
+        ));
+    }
+
+    #[test]
+    fn an_error_s_causes_stop_at_lcl_s_own() {
+        let io = || std::io::Error::other("disk on fire");
+        // lcl's error says what is beneath it, so nothing beneath is printed.
+        let e = anyhow::Error::new(LclError::Io(io()));
+        assert_eq!(error_text(&e), "io error: disk on fire");
+        let e = e.context("open workspace W");
+        assert_eq!(
+            error_text(&e),
+            "open workspace W\n\nCaused by:\n    io error: disk on fire"
+        );
+        let e = e.context("outer");
+        assert_eq!(
+            error_text(&e),
+            "outer\n\nCaused by:\n    0: open workspace W\n    1: io error: disk on fire"
+        );
+        // Another error's causes are all printed.
+        let e = anyhow::Error::new(io()).context("can't write X");
+        assert_eq!(
+            error_text(&e),
+            "can't write X\n\nCaused by:\n    disk on fire"
+        );
+    }
 
     /// Every subcommand without an about line, and every argument without
     /// help text, as `lcl ... ARG`. clap's own --help, --version and help

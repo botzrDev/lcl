@@ -17,7 +17,7 @@ use ratatui::buffer::CellWidth;
 use ratatui::prelude::*;
 use ratatui::widgets::*;
 use std::borrow::Cow;
-use std::io::stdout;
+use std::io::{IsTerminal, stdout};
 use std::time::Duration;
 
 const HELP: &str = "j/k: move  r: reload  q: quit  1-7: filter status  0: all";
@@ -266,12 +266,22 @@ impl App {
     /// title, and (see `Widths`) the project and the assignee, in columns
     /// `GAP` apart. A row fills the width left of `SYMBOL` exactly, unless
     /// that is too narrow for the columns before the title.
+    #[cfg(test)]
     fn rows(&self, width: usize) -> Vec<String> {
+        self.rows_in(width, 0, usize::MAX)
+    }
+
+    /// `rows`, but only the `count` rows from row `first` on: a frame shows
+    /// a screenful, and laying out every row of a long list for each one
+    /// makes every key slow.
+    fn rows_in(&self, width: usize, first: usize, count: usize) -> Vec<String> {
         // The highlight symbol is drawn in this width, in front of the row.
         let (w, title) = self.widths.in_row(width.saturating_sub(cells(SYMBOL)));
         let gap = " ".repeat(GAP);
         self.visible()
             .iter()
+            .skip(first)
+            .take(count)
             .map(|i| {
                 let mut row = [
                     fit(&i.identifier, w.id),
@@ -306,9 +316,15 @@ impl App {
             chunks[0],
         );
 
+        // The rows on screen: from the top while the selection fits there,
+        // and after that the ones that end with it.
+        let height = usize::from(chunks[1].height);
+        let row = self.row();
+        let first = (row + 1).saturating_sub(height.max(1));
+
         // A `Line` is one row whatever its text holds.
         let items: Vec<ListItem> = self
-            .rows(chunks[1].width.into())
+            .rows_in(chunks[1].width.into(), first, height)
             .into_iter()
             .map(|row| ListItem::new(Line::from(row)))
             .collect();
@@ -316,7 +332,7 @@ impl App {
             .highlight_style(Style::default().bg(Color::DarkGray))
             .highlight_symbol(SYMBOL);
         let mut state = ListState::default();
-        state.select(Some(self.row()));
+        state.select(Some(row - first));
         f.render_stateful_widget(list, chunks[1], &mut state);
 
         f.render_widget(
@@ -346,6 +362,11 @@ fn status_key(c: char) -> Option<Status> {
 /// first (see `guarded`).
 pub fn run(store: Store) -> Result<()> {
     let mut app = App::new(load(&store)?);
+    // Said here, in words: raw mode on something that isn't a terminal
+    // fails with the system's "No such device or address".
+    if !(std::io::stdin().is_terminal() && stdout().is_terminal()) {
+        return Err(lcl_core::error::LclError::NoTerminal.into());
+    }
     guarded(enter_terminal, leave_terminal, || {
         let mut terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
         run_app(&mut terminal, &mut app, || load(&store), next_key)

@@ -58,6 +58,17 @@ pub enum LclError {
     LabelNotFound(String),
     #[error("doc {0} not found")]
     DocNotFound(String),
+    /// The highest issue number there is has been handed out.
+    #[error("this workspace has run out of issue numbers")]
+    NumbersExhausted,
+    /// A workspace file of no bytes. lcl never leaves one.
+    #[error(
+        "{0} is an empty file, not an lcl workspace; delete it, or run lcl init there to replace it"
+    )]
+    EmptyWorkspaceFile(String),
+    /// `lcl tui` with stdin or stdout not a terminal.
+    #[error("lcl tui needs a terminal: stdin and stdout must both be one")]
+    NoTerminal,
     #[error("doc {0} can't be its own parent")]
     DocSelfParent(String),
     /// `path` runs from the doc up through its would-be parent back to it.
@@ -376,6 +387,9 @@ impl LclError {
             | LclError::DocSelfParent(_)
             | LclError::DocParentCycle { .. }
             | LclError::ImportNotEmpty { .. }
+            | LclError::NumbersExhausted
+            | LclError::EmptyWorkspaceFile(_)
+            | LclError::NoTerminal
             | LclError::ImportKeyMismatch { .. }
             | LclError::ExportBlocked { .. }
             | LclError::OutputExists(_)
@@ -428,6 +442,21 @@ fn db_kind(e: &rusqlite::Error) -> ErrorKind {
         Some(CannotOpen | SystemIoFailure | DiskFull | ReadOnly) => ErrorKind::Io,
         _ => ErrorKind::Other,
     }
+}
+
+/// The steps of a loop, joined by `sep`. A long one keeps its first and last
+/// steps and says how many it left out, so the message stays readable.
+pub(crate) fn chain(steps: &[String], sep: &str) -> String {
+    const ENDS: usize = 5;
+    if steps.len() <= 2 * ENDS + 1 {
+        return steps.join(sep);
+    }
+    let left_out = steps.len() - 2 * ENDS;
+    format!(
+        "{}{sep}… {left_out} more …{sep}{}",
+        steps[..ENDS].join(sep),
+        steps[steps.len() - ENDS..].join(sep)
+    )
 }
 
 /// "3 issues and 1 milestone": each non-zero count with its noun.
