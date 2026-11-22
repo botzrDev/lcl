@@ -6,7 +6,15 @@ All notable changes to lcl are recorded here. The format follows
 
 ## [Unreleased]
 
-Found by rough handling before the alpha.
+## [0.3.0-alpha.1] - 2026-11-23
+
+The first alpha. Found by rough handling before it.
+
+### Upgrading from 0.2.0
+
+- A 0.2.0 built before schema 11 was added leaves a workspace at schema 10. The first command from this version that opens it upgrades it to schema 11, in place.
+- That older build then refuses the workspace as one from a newer lcl, and leaves it untouched. Back up `~/.lcl` and every `.lcl/` directory first.
+- `lcl workspace show --json` prints `schema_version`.
 
 ### Changed
 
