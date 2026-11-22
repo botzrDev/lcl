@@ -1411,7 +1411,11 @@ fn in_registry(home: &std::path::Path, e: LclError) -> anyhow::Error {
 
 /// Opens the registry, creating it if need be.
 fn open_registry(home: &std::path::Path) -> Result<Registry> {
-    Registry::open(home).map_err(|e| in_registry(home, e))
+    let registry = Registry::open(home).map_err(|e| in_registry(home, e))?;
+    if let Some(note) = registry.upgrade_note() {
+        eprintln!("lcl: {note}");
+    }
+    Ok(registry)
 }
 
 fn find_local_db() -> Option<PathBuf> {
@@ -1437,7 +1441,11 @@ fn resolve_workspace(workspace: Option<&str>) -> Result<(PathBuf, Store)> {
         Some(name) => {
             let slug = registry::slug(name).ok_or_else(|| LclError::NoSlug(name.to_string()))?;
             let home = home()?;
-            let path = registry::resolve(&home, &slug).map_err(|e| in_registry(&home, e))?;
+            let (path, note) =
+                registry::resolve(&home, &slug).map_err(|e| in_registry(&home, e))?;
+            if let Some(note) = note {
+                eprintln!("lcl: {note}");
+            }
             if !path.exists() {
                 return Err(LclError::WorkspaceNotFound {
                     name: name.to_string(),

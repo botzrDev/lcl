@@ -41,6 +41,39 @@
 //! - **No litter on success or failure.** When the call returns, `DEST`'s
 //!   directory holds one more file than before (success) or none (failure).
 
+//!
+//! # The snapshot before an upgrade
+//!
+//! Before a migration changes a workspace file or the registry, lcl copies
+//! the file beside itself with the same function. For `FILE` at schema `N`
+//! the copy is `FILE.vN.snapshot`, or `FILE.vN.snapshot.2`, `.3`, … when
+//! that name is taken. `db::migrate` and `registry::migrate` call
+//! `snapshot_before_upgrade` and hold these:
+//!
+//! - **Snapshot first.** No migration step runs unless a snapshot is whole
+//!   and placed. A snapshot that can't be written stops the upgrade, and
+//!   the file is as it was.
+//! - **Exactly the state upgraded.** The snapshot is taken while the
+//!   migration's connection holds the write lock, after it read the version
+//!   again under that lock and before it has written anything. The copy is
+//!   read through a second connection (SQLite won't back up through one
+//!   that is writing), which in WAL mode sees the last commit: the state
+//!   the first step starts from. No other process can write or migrate
+//!   between the copy and the first step. The copy's own version is read
+//!   back and must be `N`; a copy at any other version is discarded and
+//!   the upgrade stops.
+//! - **One upgrade, one snapshot.** Processes that open an old file at once
+//!   queue on the write lock. The first takes the snapshot and migrates;
+//!   the rest find the file current and take none.
+//! - **Never overwritten.** An existing snapshot keeps its bytes; a later
+//!   one gets the next free name.
+//! - **Kept only if the upgrade commits.** A migration that fails rolls
+//!   back, the file is unchanged, and the snapshot it took is removed.
+//!   (A process killed between the snapshot and the commit leaves it.)
+//! - **Nothing for nothing.** A file that is current takes no snapshot and
+//!   no write lock. A file with no tables, which is a new one, takes no
+//!   snapshot.
+
 use crate::db::BUSY_TIMEOUT;
 use crate::error::{LclError, Result};
 use rusqlite::Connection;
@@ -60,15 +93,21 @@ pub struct BackupReport {
 /// Copies the database `src` has open to a new file at `dest`. See the
 /// module documentation for what holds at every moment.
 pub(crate) fn copy_database(src: &Connection, dest: &Path) -> Result<BackupReport> {
-    copy_database_with(src, dest, |_| Ok(()))
+    copy_database_with(src, dest, |_| Ok(()), |_| Ok(()))
 }
 
-/// `copy_database`, with `prepare` run on the temporary file's connection
-/// before any page is copied. A test uses it to make the copy fail part-way.
+/// What can stop a copy before it is placed.
+type Stop = Box<dyn std::error::Error>;
+
+/// `copy_database`, with two hooks on the temporary file's connection:
+/// `prepare` runs before any page is copied (a test uses it to make the copy
+/// fail part-way), and `check` runs on the finished copy before it is
+/// placed, so a copy it refuses never gets its name.
 fn copy_database_with(
     src: &Connection,
     dest: &Path,
     prepare: impl FnOnce(&Connection) -> rusqlite::Result<()>,
+    check: impl FnOnce(&Connection) -> std::result::Result<(), Stop>,
 ) -> Result<BackupReport> {
     let shown = dest.display().to_string();
     // State 1. `symlink_metadata`, so a dangling link counts as existing.
@@ -94,7 +133,7 @@ fn copy_database_with(
         uuid::Uuid::new_v4().simple()
     ));
 
-    let written = fill(src, &tmp, prepare)
+    let written = fill(src, &tmp, prepare, check)
         .map_err(|e| failed(e.to_string()))
         .and_then(|report| place(&tmp, dest, &shown).map(|()| report));
     if written.is_err() {
@@ -108,7 +147,8 @@ fn fill(
     src: &Connection,
     tmp: &Path,
     prepare: impl FnOnce(&Connection) -> rusqlite::Result<()>,
-) -> std::result::Result<BackupReport, Box<dyn std::error::Error>> {
+    check: impl FnOnce(&Connection) -> std::result::Result<(), Stop>,
+) -> std::result::Result<BackupReport, Stop> {
     let mut dst = Connection::open(tmp)?;
     prepare(&dst)?;
     {
@@ -130,11 +170,12 @@ fn fill(
             }
         }
     }
-    let check: String = dst.query_row("PRAGMA integrity_check", [], |r| r.get(0))?;
-    if check != "ok" {
-        return Err(format!("the copy failed its integrity check: {check}").into());
+    let integrity: String = dst.query_row("PRAGMA integrity_check", [], |r| r.get(0))?;
+    if integrity != "ok" {
+        return Err(format!("the copy failed its integrity check: {integrity}").into());
     }
     let schema_version: i64 = dst.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    check(&dst)?;
     dst.close().map_err(|(_, e)| e)?;
     let file = std::fs::OpenOptions::new().write(true).open(tmp)?;
     file.sync_all()?;
@@ -175,6 +216,93 @@ fn remove_with_sidecars(tmp: &Path) {
         side.push(suffix);
         let _ = std::fs::remove_file(PathBuf::from(side));
     }
+}
+
+/// Copies the database file `file`, at version `version`, to a snapshot
+/// beside it, and returns the snapshot's path. `version_of` reads a
+/// database's version the way the caller does (a workspace's is
+/// `user_version`; the registry keeps its own in a table).
+///
+/// Called while the caller's connection holds the migration's write lock on
+/// `file` and has written nothing, with the file in WAL mode. See the module
+/// documentation for the rules.
+pub(crate) fn snapshot_before_upgrade(
+    file: &Path,
+    version: i64,
+    version_of: fn(&Connection) -> Result<i64>,
+) -> Result<PathBuf> {
+    let failed = |snapshot: &Path, reason: String| LclError::SnapshotFailed {
+        file: file.display().to_string(),
+        snapshot: snapshot.display().to_string(),
+        reason,
+    };
+    let opened = Connection::open(file).and_then(|src| {
+        src.busy_timeout(BUSY_TIMEOUT)?;
+        Ok(src)
+    });
+    let src = match opened {
+        Ok(src) => src,
+        Err(e) => return Err(failed(file, format!("can't read the file: {e}"))),
+    };
+    let base = {
+        let mut name = file
+            .file_name()
+            .map(|n| n.to_os_string())
+            .unwrap_or_default();
+        name.push(format!(".v{version}.snapshot"));
+        file.with_file_name(name)
+    };
+    // The first name no file has. `copy_database` refuses a taken name
+    // itself, also one taken since this looked, so nothing is overwritten.
+    for n in 1..=MAX_SNAPSHOTS {
+        let snapshot = if n == 1 {
+            base.clone()
+        } else {
+            let mut name = base.clone().into_os_string();
+            name.push(format!(".{n}"));
+            PathBuf::from(name)
+        };
+        let copied = copy_database_with(
+            &src,
+            &snapshot,
+            |_| Ok(()),
+            |copy| {
+                match version_of(copy)? {
+                found if found == version => Ok(()),
+                found => Err(format!(
+                    "the copy is at version {found}, not {version}: the file changed while it was copied"
+                )
+                .into()),
+            }
+            },
+        );
+        match copied {
+            Ok(_) => return Ok(snapshot),
+            Err(LclError::BackupExists(_)) => continue,
+            Err(LclError::BackupFailed { reason, .. }) => return Err(failed(&snapshot, reason)),
+            Err(other) => return Err(failed(&snapshot, other.to_string())),
+        }
+    }
+    Err(failed(
+        &base,
+        format!("{MAX_SNAPSHOTS} snapshots of this version are already there"),
+    ))
+}
+
+/// How many snapshots of one file at one version may pile up before lcl
+/// refuses to add another. Each needs a killed upgrade to come about.
+const MAX_SNAPSHOTS: u32 = 100;
+
+/// Removes a snapshot this process took, after its upgrade rolled back.
+pub(crate) fn discard_snapshot(snapshot: &Path) {
+    let _ = std::fs::remove_file(snapshot);
+}
+
+/// Whether the database has no tables, indexes or anything else: a file
+/// lcl has just created.
+pub(crate) fn is_new(conn: &Connection) -> Result<bool> {
+    let objects: i64 = conn.query_row("SELECT count(*) FROM sqlite_master", [], |r| r.get(0))?;
+    Ok(objects == 0)
 }
 
 impl crate::db::Store {
@@ -296,9 +424,12 @@ mod tests {
         let store = source(&dir, 2000);
         let dest = out.0.join("copy.sqlite");
         // SQLite reports a full disk and a page limit the same way: SQLITE_FULL.
-        let err = copy_database_with(&store.conn, &dest, |dst| {
-            dst.pragma_update(None, "max_page_count", 2)
-        })
+        let err = copy_database_with(
+            &store.conn,
+            &dest,
+            |dst| dst.pragma_update(None, "max_page_count", 2),
+            |_| Ok(()),
+        )
         .unwrap_err();
         let LclError::BackupFailed { path, reason } = &err else {
             panic!("{err:?}");
@@ -329,7 +460,7 @@ mod tests {
         let store = source(&dir, 50);
         let dest = out.0.join("copy.sqlite");
         let tmp = out.0.join(".copy.sqlite.lcl-backup-test.tmp");
-        fill(&store.conn, &tmp, |_| Ok(())).unwrap();
+        fill(&store.conn, &tmp, |_| Ok(()), |_| Ok(())).unwrap();
         assert!(!dest.exists());
         assert_eq!(
             out.names(),
@@ -359,5 +490,110 @@ mod tests {
         // data_version changes when another connection commits a write.
         assert_eq!(data_version(&observer), before);
         assert_eq!(rows(&dir.0.join("src.sqlite")), 20);
+    }
+
+    fn user_version(conn: &Connection) -> Result<i64> {
+        Ok(conn.query_row("PRAGMA user_version", [], |r| r.get(0))?)
+    }
+
+    /// The snapshot is the file, at the version asked for, under the name
+    /// for that version; a second one takes the next name, and the first
+    /// keeps its bytes.
+    #[test]
+    fn a_snapshot_is_named_for_its_version_and_never_overwritten() {
+        let dir = Dir::new();
+        let store = source(&dir, 30);
+        let file = dir.0.join("src.sqlite");
+        let v = crate::SCHEMA_VERSION;
+        let first = snapshot_before_upgrade(&file, v, user_version).unwrap();
+        assert_eq!(first, dir.0.join(format!("src.sqlite.v{v}.snapshot")));
+        assert_eq!(rows(&first), 30);
+        let bytes = std::fs::read(&first).unwrap();
+
+        store
+            .conn
+            .execute("INSERT INTO t (body) VALUES ('later')", [])
+            .unwrap();
+        let second = snapshot_before_upgrade(&file, v, user_version).unwrap();
+        assert_eq!(second, dir.0.join(format!("src.sqlite.v{v}.snapshot.2")));
+        assert_eq!(rows(&second), 31);
+        assert_eq!(std::fs::read(&first).unwrap(), bytes);
+    }
+
+    /// Exactly the state upgraded: taken while another connection holds the
+    /// write lock with a change not yet committed, the snapshot is the last
+    /// commit, and the lock holder is not disturbed.
+    #[test]
+    fn a_snapshot_under_the_write_lock_is_the_last_commit() {
+        let dir = Dir::new();
+        let mut store = source(&dir, 10);
+        let file = dir.0.join("src.sqlite");
+        let tx = store
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .unwrap();
+        let snapshot = snapshot_before_upgrade(&file, crate::SCHEMA_VERSION, user_version).unwrap();
+        tx.execute("INSERT INTO t (body) VALUES ('a migration step')", [])
+            .unwrap();
+        tx.commit().unwrap();
+        assert_eq!((rows(&snapshot), rows(&file)), (10, 11));
+    }
+
+    /// A copy that turns out to be at another version is discarded: no
+    /// snapshot is left, and the caller is told, so it does not upgrade.
+    #[test]
+    fn a_copy_at_another_version_is_discarded() {
+        let dir = Dir::new();
+        let _store = source(&dir, 5);
+        let file = dir.0.join("src.sqlite");
+        let before = dir.names();
+        let err =
+            snapshot_before_upgrade(&file, crate::SCHEMA_VERSION - 1, user_version).unwrap_err();
+        let LclError::SnapshotFailed { reason, .. } = &err else {
+            panic!("{err:?}");
+        };
+        assert!(
+            reason.contains("the file changed while it was copied"),
+            "{reason}"
+        );
+        assert_eq!(dir.names(), before);
+    }
+
+    /// A snapshot that can't be written is an error that names the file and
+    /// the snapshot, and leaves nothing. Here the temporary name is too long
+    /// for a file name (255 bytes). Windows limits the whole path instead,
+    /// so the long name can't be made there.
+    #[cfg(unix)]
+    #[test]
+    fn a_snapshot_that_cannot_be_written_is_an_error_and_leaves_nothing() {
+        let dir = Dir::new();
+        let name = format!("{}.sqlite", "w".repeat(230));
+        let file = dir.0.join(&name);
+        let store = Store::open(&file).unwrap();
+        let before = dir.names();
+        let err = snapshot_before_upgrade(&file, crate::SCHEMA_VERSION, user_version).unwrap_err();
+        let LclError::SnapshotFailed {
+            file: named,
+            snapshot,
+            ..
+        } = &err
+        else {
+            panic!("{err:?}");
+        };
+        assert_eq!(named, &file.display().to_string());
+        assert!(snapshot.ends_with(&format!(".v{}.snapshot", crate::SCHEMA_VERSION)));
+        assert!(err.to_string().contains("nothing was changed"), "{err}");
+        assert_eq!(err.kind(), crate::error::ErrorKind::Io);
+        assert_eq!(dir.names(), before);
+        drop(store);
+    }
+
+    /// Nothing for nothing: a database with no tables is new.
+    #[test]
+    fn only_a_database_with_nothing_in_it_is_new() {
+        let conn = Connection::open_in_memory().unwrap();
+        assert!(is_new(&conn).unwrap());
+        conn.execute_batch("CREATE TABLE t (x)").unwrap();
+        assert!(!is_new(&conn).unwrap());
     }
 }

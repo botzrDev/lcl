@@ -108,6 +108,16 @@ pub enum LclError {
     /// `path`.
     #[error("can't write {path}: {reason}")]
     BackupFailed { path: String, reason: String },
+    /// The copy taken before an upgrade could not be written, so the
+    /// upgrade did not run.
+    #[error(
+        "can't upgrade {file}: the copy of it as it is, {snapshot}, could not be written ({reason}); nothing was changed"
+    )]
+    SnapshotFailed {
+        file: String,
+        snapshot: String,
+        reason: String,
+    },
     #[error("{0} can't be related to itself")]
     SelfRelation(String),
     /// `path` is the cycle the new row would close, as `A blocks B blocks A`.
@@ -368,7 +378,7 @@ impl LclError {
             | LclError::BadRegistryVersion(_)
             | LclError::BadRegistryVersionNumber(_)
             | LclError::ExportRoundTrip(_) => Other,
-            LclError::Io(_) | LclError::BackupFailed { .. } => Io,
+            LclError::Io(_) | LclError::BackupFailed { .. } | LclError::SnapshotFailed { .. } => Io,
             LclError::SchemaTooNew { .. }
             | LclError::UnknownStatus { .. }
             | LclError::UnknownPriority { .. }

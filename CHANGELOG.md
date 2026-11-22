@@ -10,6 +10,25 @@ All notable changes to lcl are recorded here. The format follows
 
 - `lcl backup PATH` copies the workspace's file to PATH, safely while other lcl commands read and write it. The copy is one committed state. It is written under a temporary name and gets its name only when complete, so PATH is never half a file. A PATH that exists is refused with exit 1. With `--json` it prints `path`, `bytes` and `schema_version`.
 
+### Upgrading
+
+You no longer need to back up by hand before an upgrade.
+
+- Before an upgrade changes a workspace file, lcl copies it beside itself. `data.sqlite` at schema 10 is copied to `data.sqlite.v10.snapshot`.
+- The registry, `~/.lcl/index.sqlite`, is copied the same way before its own upgrade, as `index.sqlite.v0.snapshot` for one 0.1.0 wrote.
+- The copy is made the way `lcl backup` makes one, while lcl holds the lock the upgrade runs under. It is the file exactly as the upgrade found it.
+- The upgrade line on stderr names the copy: `lcl: upgraded workspace "old" to schema 11; the file as it was is PATH`. What the upgrade changed follows, if anything.
+- If the copy can't be written, as on a full disk, the upgrade does not run. The command exits 1 and the file is as it was.
+- A snapshot is never overwritten. If the name is taken, the next one is `…snapshot.2`.
+- An upgrade that fails changes nothing and keeps no snapshot.
+- To go back, put the snapshot where the file is, under the file's name, while no lcl is running, and use the older lcl.
+- lcl never deletes a snapshot. Delete one when you no longer want it.
+
+### Changed
+
+- Every upgrade of a workspace prints one line on stderr, naming the snapshot. Before, an upgrade with nothing to repair printed nothing.
+- An upgrade of the registry prints one line on stderr too.
+
 ### Fixed
 
 - On Windows, lcl finds the home directory through `USERPROFILE` when `HOME` is not set or is empty, so `lcl init` and `lcl workspace create` work in cmd and PowerShell. 0.3.0-alpha.1 exited 1 there. `HOME` still wins when it is set, on every platform, so a registry made under it stays where it is. With neither, the error names both; lcl never falls back to another directory.

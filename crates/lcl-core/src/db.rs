@@ -314,33 +314,37 @@ impl Store {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        retry_busy(|| Self::init(Connection::open(path)?))
+        retry_busy(|| Self::init(Connection::open(path)?, Some(path)))
     }
 
     pub fn open_in_memory() -> Result<Self> {
-        Self::init(Connection::open_in_memory()?)
+        Self::init(Connection::open_in_memory()?, None)
     }
 
     /// Connection setup shared by every open. The order matters: the busy
     /// timeout must be in place before anything can contend for a lock, and
     /// the version check must come before anything that can write, so a
     /// database from a newer lcl is refused untouched.
-    fn init(mut conn: Connection) -> Result<Self> {
+    ///
+    /// `file` is where the database is, for the snapshot an upgrade takes
+    /// beside it; None for one in memory, which gets none.
+    fn init(mut conn: Connection, file: Option<&Path>) -> Result<Self> {
         conn.busy_timeout(BUSY_TIMEOUT)?;
         // Read-only. Must precede journal_mode: switching a rollback-journal
         // file to WAL rewrites its header.
         check_supported(user_version(&conn)?)?;
         use_wal(&conn)?;
         conn.pragma_update(None, "foreign_keys", true)?;
-        let upgrade_note = migrate(&mut conn)?;
+        let upgrade_note = migrate(&mut conn, file)?;
         check_fts(&conn)?;
         Ok(Store { conn, upgrade_note })
     }
 
-    /// When this open upgraded the file and the upgrade changed values, one
-    /// line saying so: `upgraded workspace "prob" to schema 11: named 1 blank
-    /// label, …`. Else None. It is there only for the open that upgraded,
-    /// so it is shown once. lcl-core prints nothing itself: whoever opens a
+    /// When this open upgraded the file, one line saying so, naming the
+    /// snapshot taken first and what the upgrade changed, if anything:
+    /// `upgraded workspace "prob" to schema 11; the file as it was is
+    /// PATH.v10.snapshot: named 1 blank label, …`. Else None. It is there
+    /// only for the open that upgraded, so it is shown once. lcl-core prints nothing itself: whoever opens a
     /// workspace for a person shows it, on stderr.
     pub fn upgrade_note(&self) -> Option<&str> {
         self.upgrade_note.as_deref()
@@ -2398,20 +2402,23 @@ fn check_supported(found: i64) -> Result<usize> {
 /// `issues_v10` and drops it; without the legacy behavior, `issue_labels`
 /// and `issue_relations` would be left pointing at a table that no longer
 /// exists.
-fn migrate(conn: &mut Connection) -> Result<Option<String>> {
+fn migrate(conn: &mut Connection, file: Option<&Path>) -> Result<Option<String>> {
     // Unlocked fast path: an up-to-date database takes no write lock.
     if check_supported(user_version(conn)?)? == MIGRATIONS.len() {
         return Ok(None);
     }
     conn.pragma_update(None, "foreign_keys", false)?;
     conn.pragma_update(None, "legacy_alter_table", true)?;
-    let result = migrate_locked(conn);
+    let result = migrate_locked(conn, file);
     conn.pragma_update(None, "legacy_alter_table", false)?;
     conn.pragma_update(None, "foreign_keys", true)?;
     result
 }
 
-fn migrate_locked(conn: &mut Connection) -> Result<Option<String>> {
+/// The upgrade itself. The snapshot rules it keeps are in `crate::backup`:
+/// the copy is taken under the write lock, before the first step, and a
+/// failed upgrade removes the copy it took.
+fn migrate_locked(conn: &mut Connection, file: Option<&Path>) -> Result<Option<String>> {
     // Take the write lock, then read again: another process may have migrated
     // between our read and acquiring the lock.
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -2420,11 +2427,37 @@ fn migrate_locked(conn: &mut Connection) -> Result<Option<String>> {
     if pending.is_empty() {
         return Ok(None); // someone else migrated while we waited
     }
+    let snapshot =
+        match file {
+            Some(file) if !crate::backup::is_new(&tx)? => Some(
+                crate::backup::snapshot_before_upgrade(file, from as i64, user_version)?,
+            ),
+            _ => None,
+        };
+    // An error drops `tx`, which rolls back every migration; the file is
+    // then as the snapshot has it, and the snapshot goes.
+    let upgraded = apply(&tx, pending, snapshot.as_deref()).and_then(|note| {
+        tx.commit()?;
+        Ok(note)
+    });
+    if let (Err(_), Some(snapshot)) = (&upgraded, &snapshot) {
+        crate::backup::discard_snapshot(snapshot);
+    }
+    upgraded
+}
+
+/// Runs the pending steps in `tx` and checks the result, without
+/// committing. Returns the line for `Store::upgrade_note`.
+fn apply(
+    tx: &Transaction<'_>,
+    pending: &[Migration],
+    snapshot: Option<&Path>,
+) -> Result<Option<String>> {
     let mut changed = Vec::new();
     for step in pending {
         match step {
             Migration::Sql(sql) => tx.execute_batch(sql)?,
-            Migration::Code(f) => changed.extend(f(&tx)?),
+            Migration::Code(f) => changed.extend(f(tx)?),
         }
     }
     tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -2439,23 +2472,23 @@ fn migrate_locked(conn: &mut Connection) -> Result<Option<String>> {
     if !violations.is_empty() {
         return Err(LclError::ForeignKeyCheck(violations.join(", ")));
     }
-    let note = if changed.is_empty() {
-        None
-    } else {
-        let name: String = tx
-            .query_row("SELECT value FROM meta WHERE key = 'name'", [], |r| {
-                r.get(0)
-            })
-            .optional()?
-            .unwrap_or_default();
-        Some(format!(
-            "upgraded workspace {name:?} to schema {SCHEMA_VERSION}: {}",
-            changed.join(", ")
-        ))
-    };
-    // An early return above drops `tx`, which rolls back every migration.
-    tx.commit()?;
-    Ok(note)
+    if snapshot.is_none() && changed.is_empty() {
+        return Ok(None);
+    }
+    let name: String = tx
+        .query_row("SELECT value FROM meta WHERE key = 'name'", [], |r| {
+            r.get(0)
+        })
+        .optional()?
+        .unwrap_or_default();
+    let mut note = format!("upgraded workspace {name:?} to schema {SCHEMA_VERSION}");
+    if let Some(snapshot) = snapshot {
+        note.push_str(&format!("; the file as it was is {}", snapshot.display()));
+    }
+    if !changed.is_empty() {
+        note.push_str(&format!(": {}", changed.join(", ")));
+    }
+    Ok(Some(note))
 }
 
 #[cfg(test)]

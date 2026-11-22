@@ -94,6 +94,31 @@ pub const V010_DIRTY_FIXTURE: &str = concat!(
     "/tests/fixtures/v010-dirty.sqlite"
 );
 
+/// Where lcl puts the snapshot of `file` it takes before upgrading it from
+/// schema (or registry version) `from`: beside it.
+pub fn snapshot_path(file: &Path, from: i64) -> PathBuf {
+    let mut name = file.as_os_str().to_owned();
+    name.push(format!(".v{from}.snapshot"));
+    PathBuf::from(name)
+}
+
+/// The stderr line of the open that upgrades workspace `name`, in `file`,
+/// from schema `from`: it names the snapshot, then `changes` if the upgrade
+/// repaired values (the phrases, comma separated; "" for none).
+pub fn upgrade_line(file: &Path, from: i64, name: &str, changes: &str) -> String {
+    let to = lcl_core::SCHEMA_VERSION;
+    let snapshot = snapshot_path(file, from);
+    let changes = if changes.is_empty() {
+        String::new()
+    } else {
+        format!(": {changes}")
+    };
+    format!(
+        "lcl: upgraded workspace {name:?} to schema {to}; the file as it was is {}{changes}\n",
+        snapshot.display()
+    )
+}
+
 /// What one `lcl` invocation produced.
 #[derive(Debug)]
 pub struct Out {

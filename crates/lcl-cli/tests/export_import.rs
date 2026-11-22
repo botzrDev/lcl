@@ -1132,6 +1132,8 @@ fn export_refuses_what_import_would_refuse_and_writes_nothing() {
 fn the_0_1_0_fixture_exports_and_round_trips() {
     let old = Env::new();
     old.install_db(V0_FIXTURE);
+    // The first open upgrades the file and says so; the export comes after.
+    old.lcl(&["workspace", "show"]).assert_ok();
     let first = export(&old);
     let recs = records(&first);
     assert_eq!(

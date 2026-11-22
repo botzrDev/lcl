@@ -270,7 +270,7 @@ fn a_0_1_0_workspace_keeps_the_key_it_was_given() {
                 db.display()
             )
             .as_str(),
-            ""
+            common::upgrade_line(&db, 0, "fixture", "").as_str()
         )
     );
     assert_eq!(user_version(&db), SCHEMA_VERSION);

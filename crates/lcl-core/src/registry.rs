@@ -185,13 +185,15 @@ pub struct InitWorkspace {
 /// registered workspace NAME, for `slug`: the registry's answer when there
 /// is an index (which this opens, and so upgrades), else, and for a slug
 /// with no row, `~/.lcl/projects/<slug>.sqlite`. No index is created.
-pub fn resolve(home: &Path, slug: &str) -> Result<PathBuf> {
-    let found = if index_path(home).exists() {
-        Registry::open(home)?.find(slug)?
+/// With the file comes `Registry::upgrade_note`, for the caller to show.
+pub fn resolve(home: &Path, slug: &str) -> Result<(PathBuf, Option<String>)> {
+    let (found, note) = if index_path(home).exists() {
+        let registry = Registry::open(home)?;
+        (registry.find(slug)?, registry.upgrade_note)
     } else {
-        None
+        (None, None)
     };
-    Ok(found.unwrap_or_else(|| workspace_path(home, slug)))
+    Ok((found.unwrap_or_else(|| workspace_path(home, slug)), note))
 }
 
 /// A workspace `create_workspace` made.
@@ -207,6 +209,7 @@ pub struct NewWorkspace {
 pub struct Registry {
     conn: Connection,
     home: PathBuf,
+    upgrade_note: Option<String>,
 }
 
 impl Registry {
@@ -221,12 +224,21 @@ impl Registry {
             conn.busy_timeout(BUSY_TIMEOUT)?;
             check_supported(&path, registry_version(&conn)?)?;
             use_wal(&conn)?;
-            migrate(&mut conn, &path)?;
+            let upgrade_note = migrate(&mut conn, &path)?;
             Ok(Registry {
                 conn,
                 home: home.to_path_buf(),
+                upgrade_note,
             })
         })
+    }
+
+    /// When this open upgraded a registry an older lcl wrote, one line
+    /// saying so and naming the snapshot taken first. Else None. As
+    /// `Store::upgrade_note`: whoever opens the registry for a person shows
+    /// it, on stderr.
+    pub fn upgrade_note(&self) -> Option<&str> {
+        self.upgrade_note.as_deref()
     }
 
     /// The registry's schema version.
@@ -638,25 +650,51 @@ fn check_supported(path: &Path, found: i64) -> Result<usize> {
 
 /// Brings the registry up to `REGISTRY_VERSION`, all or nothing, as
 /// `db::migrate` does for a workspace: an unlocked check, then the write
-/// lock and a second check.
-fn migrate(conn: &mut Connection, path: &Path) -> Result<()> {
+/// lock and a second check. A registry an older lcl wrote is first copied
+/// beside itself, under the rules in `crate::backup`; the line returned
+/// names that copy. A new, empty index gets no copy and no line.
+fn migrate(conn: &mut Connection, path: &Path) -> Result<Option<String>> {
     if check_supported(path, registry_version(conn)?)? == MIGRATIONS.len() {
-        return Ok(());
+        return Ok(None);
     }
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let from = check_supported(path, registry_version(&tx)?)?;
     if from == MIGRATIONS.len() {
-        return Ok(());
+        return Ok(None);
     }
-    for m in &MIGRATIONS[from..] {
-        m(&tx)?;
+    let snapshot = if crate::backup::is_new(&tx)? {
+        None
+    } else {
+        Some(crate::backup::snapshot_before_upgrade(
+            path,
+            from as i64,
+            registry_version,
+        )?)
+    };
+    let upgraded = (|| {
+        for m in &MIGRATIONS[from..] {
+            m(&tx)?;
+        }
+        tx.execute(
+            "INSERT INTO registry_meta(key, value) VALUES ('schema_version', ?1) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![REGISTRY_VERSION.to_string()],
+        )?;
+        Ok(())
+    })()
+    .and_then(|()| Ok(tx.commit()?));
+    match (upgraded, snapshot) {
+        (Ok(()), Some(snapshot)) => Ok(Some(format!(
+            "upgraded the workspace registry to v{REGISTRY_VERSION}; the file as it was is {}",
+            snapshot.display()
+        ))),
+        (Ok(()), None) => Ok(None),
+        (Err(e), snapshot) => {
+            if let Some(snapshot) = snapshot {
+                crate::backup::discard_snapshot(&snapshot);
+            }
+            Err(e)
+        }
     }
-    tx.execute(
-        "INSERT INTO registry_meta(key, value) VALUES ('schema_version', ?1) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-        params![REGISTRY_VERSION.to_string()],
-    )?;
-    tx.commit()?;
-    Ok(())
 }
 
 /// v0 -> v1: the registry's tables, and the workspaces an older lcl

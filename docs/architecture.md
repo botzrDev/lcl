@@ -94,6 +94,10 @@ An issue matches when every word is in its title and description together, or ev
 
 The pages are read in one read transaction, so the copy is one committed state. It is written to a temporary file in PATH's directory, checked with `PRAGMA integrity_check`, synced, and then hard-linked to PATH. PATH is a complete workspace or is not there. A PATH that exists is never replaced. A backup that is killed can leave its temporary file, `.NAME.lcl-backup-PID-RANDOM.tmp`, beside PATH. `crates/lcl-core/src/backup.rs` states these rules and tests them.
 
+## The snapshot before an upgrade
+
+Before a migration changes a workspace file or the registry, lcl copies the file beside itself, with the copy function `lcl backup` uses. `FILE` at version `N` is copied to `FILE.vN.snapshot`. The copy is taken while the migration holds the write lock and has written nothing, so it is the state the first step starts from. If it can't be written, no step runs and the command exits 1. An existing snapshot is never overwritten: the next one is `FILE.vN.snapshot.2`. A migration that fails rolls back and removes the snapshot it took. A current file and a new, empty file get none. The line on stderr that reports the upgrade names the snapshot.
+
 ## The terminal UI
 
 `lcl tui` lists issues. `j` and `k` move, `1` through `7` filter by status, `0` shows every status, `r` reloads, and `q` or Ctrl-C quits. It needs a terminal on both stdin and stdout. It does not create, edit, search, or comment. The command line does that.
@@ -117,8 +121,6 @@ Text on a terminal shows a control character as its picture, so ESC is `␛`. A 
 ## What this version does not do
 
 A delete is immediate. There is no trash.
-
-An upgrade changes the file in place. lcl does not write a snapshot beside it first.
 
 There is no install other than building this repository. The crates are unpublished. The name `lcl` on crates.io is someone else's crate. The binary in this repository is named `lcl`.
 

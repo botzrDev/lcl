@@ -65,10 +65,16 @@ const CHILD: &str = "e1bb1a1a-58f1-4512-8f1b-51060c900541";
 const UNTITLED: &str = "b22accd5-f92e-4f8d-938a-4e8ee5ae1d96";
 
 /// The line the fixture's upgrade prints, with `docs` in place of its two
-/// doc-parent phrases and `cycles` in place of its two cycle phrases.
-fn line(cycles: &str, docs: &str) -> String {
-    format!(
-        "lcl: upgraded workspace \"prob\" to schema 11: named 1 blank label, reset 4 label colours, moved 3 unreadable due dates into descriptions, cleared 1 blank due date, {cycles}, cleared 1 negative estimate, {docs}, cleaned 3 comment authors\n"
+/// doc-parent phrases and `cycles` in place of its two cycle phrases. It
+/// names the snapshot of the 0.1.0 file first.
+fn line(env: &Env, cycles: &str, docs: &str) -> String {
+    common::upgrade_line(
+        &env.db_path(),
+        0,
+        "prob",
+        &format!(
+            "named 1 blank label, reset 4 label colours, moved 3 unreadable due dates into descriptions, cleared 1 blank due date, {cycles}, cleared 1 negative estimate, {docs}, cleaned 3 comment authors"
+        ),
     )
 }
 
@@ -178,7 +184,7 @@ fn doc(id: &str, title: &str, parent: Option<&str>) -> Vec<Option<String>> {
 fn the_upgrade_repairs_what_0_1_0_accepted_and_says_so_once() {
     let env = dirty("");
     let db = env.db_path();
-    assert_eq!(upgrade(&env), line(CYCLES, DOCS));
+    assert_eq!(upgrade(&env), line(&env, CYCLES, DOCS));
 
     // M1, M2: the blank label is named, and every colour that isn't #rgb or
     // #rrggbb is reset, " #fff" included. (V5 trimmed " bug ".)
@@ -325,10 +331,12 @@ fn after_the_upgrade_export_import_export_is_byte_identical() {
     );
 }
 
-/// Every other fixture holds only readable values, so its upgrade prints
-/// nothing; nor does a new workspace's first open.
+/// Every other fixture holds only readable values, so its upgrade says
+/// only that it happened and where the file as it was is kept. The next
+/// command says nothing, and neither does a new workspace's first open,
+/// which upgrades nothing.
 #[test]
-fn a_clean_workspace_upgrades_without_a_word() {
+fn a_clean_workspace_s_upgrade_names_only_its_snapshot() {
     for fixture in [
         V0_FIXTURE,
         V0_LABELS_FIXTURE,
@@ -338,15 +346,20 @@ fn a_clean_workspace_upgrades_without_a_word() {
     ] {
         let env = Env::new();
         let db = env.install_db(fixture);
-        assert!(user_version(&db) < 10, "{fixture}");
+        let from = user_version(&db);
+        assert!(from < 10, "{fixture}");
         let out = env.lcl(&["--json", "issue", "list"]);
         out.assert_ok();
+        out.json();
+        assert_eq!(user_version(&db), SCHEMA_VERSION, "{fixture}");
+        let shown = env.lcl(&["--json", "workspace", "show"]);
+        assert_eq!(shown.assert_ok().stderr, "", "{fixture}");
+        let name = shown.json()["name"].as_str().expect("a name").to_string();
         assert_eq!(
-            (user_version(&db), out.stderr.as_str()),
-            (SCHEMA_VERSION, ""),
+            out.stderr,
+            common::upgrade_line(&db, from, &name, ""),
             "{fixture}"
         );
-        out.json();
     }
     let env = Env::new();
     let out = env.lcl(&["init", "fresh", "--key", "FRES"]);
@@ -370,6 +383,7 @@ fn a_blank_date_is_just_cleared() {
     assert_eq!(
         upgrade(&env),
         line(
+            &env,
             "renamed 3 cycles with unreadable dates, cleared 1 blank cycle date",
             DOCS
         )
@@ -408,7 +422,11 @@ fn every_link_on_a_doc_parent_loop_is_cleared() {
     let db = env.db_path();
     assert_eq!(
         upgrade(&env),
-        line(CYCLES, "cleared 4 doc parents, lowercased 1 doc parent")
+        line(
+            &env,
+            CYCLES,
+            "cleared 4 doc parents, lowercased 1 doc parent"
+        )
     );
     assert_eq!(
         docs(&db),
@@ -430,7 +448,7 @@ fn a_blank_label_takes_the_first_free_unnamed_name() {
         "INSERT INTO labels(id, name, color) VALUES ('00000000-0000-4000-8000-000000000001', 'Unnamed', '#123'),
                                                     ('00000000-0000-4000-8000-000000000002', 'UNNAMED-2', '#123');",
     );
-    assert_eq!(upgrade(&env), line(CYCLES, DOCS));
+    assert_eq!(upgrade(&env), line(&env, CYCLES, DOCS));
     assert_eq!(
         table(
             &env.db_path(),
@@ -448,7 +466,7 @@ fn init_on_a_0_1_0_file_says_what_the_upgrade_changed() {
     let env = dirty("");
     let out = env.lcl(&["init", "prob", "--key", "PROB"]);
     out.assert_ok();
-    assert_eq!(out.stderr, line(CYCLES, DOCS), "{out:#?}");
+    assert_eq!(out.stderr, line(&env, CYCLES, DOCS), "{out:#?}");
     assert_eq!(user_version(&env.db_path()), SCHEMA_VERSION);
     let again = env.lcl(&["--json", "workspace", "show"]);
     again.assert_ok();
@@ -465,7 +483,7 @@ fn a_comment_author_is_trimmed_of_any_whitespace() {
     );
     assert_eq!(
         upgrade(&env),
-        line(CYCLES, DOCS).replace("cleaned 3 comment authors", "cleaned 4 comment authors")
+        line(&env, CYCLES, DOCS).replace("cleaned 3 comment authors", "cleaned 4 comment authors")
     );
     assert_eq!(
         table(
