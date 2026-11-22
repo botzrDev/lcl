@@ -35,8 +35,10 @@
 //!   restore`; `comment edit` and `comment delete` refuse a trashed issue's
 //!   comment the same way. Deleting a project, a milestone or a cycle is
 //!   refused while any issue uses it, trashed ones included, so a restored
-//!   issue finds them still there. (Deleting a label removes it from every
-//!   issue, trashed ones included: that is what deleting a label means.)
+//!   issue finds them still there. The exceptions, each a command of its
+//!   own that says what it removes: `comment purge` removes a comment
+//!   that is itself in the trash, whatever state its issue is in, and
+//!   `label purge` removes a trashed label's links to every issue.
 //! - **Out of sight.** A trashed issue is in no list, search result, count,
 //!   child list or relation list, and it does not block: a query that
 //!   returns issues, counts them or follows a relation to one has

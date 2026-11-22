@@ -318,3 +318,54 @@ fn a_current_or_new_workspace_takes_no_snapshot() {
         "a read of a current workspace made a file"
     );
 }
+
+/// The registry's snapshot keeps the workspace's rules: an existing one is
+/// never overwritten, and processes that open an old registry at once
+/// leave one snapshot, of the old file.
+#[test]
+fn the_registry_s_snapshot_is_never_overwritten_and_taken_once() {
+    let old = fixture_dump(V0_INDEX_FIXTURE);
+    let install = || {
+        let env = Env::new();
+        let index = env.home.path().join(".lcl").join("index.sqlite");
+        std::fs::create_dir_all(index.parent().unwrap()).unwrap();
+        std::fs::copy(V0_INDEX_FIXTURE, &index).unwrap();
+        (env, index)
+    };
+
+    let (env, index) = install();
+    let first = snapshot_path(&index, 0);
+    std::fs::write(&first, b"an earlier snapshot").unwrap();
+    let mut second = first.clone().into_os_string();
+    second.push(".2");
+    let second = PathBuf::from(second);
+    let out = env.lcl(&["workspace", "list"]);
+    out.assert_ok();
+    assert_eq!(std::fs::read(&first).unwrap(), b"an earlier snapshot");
+    assert_eq!(snapshots(&env), [first, second.clone()]);
+    assert!(dump(&second) == old);
+    assert!(
+        out.stderr
+            .contains(&format!("the file as it was is {}\n", second.display())),
+        "{out:#?}"
+    );
+
+    let (env, index) = install();
+    let cmds: Vec<Vec<String>> = (0..8)
+        .map(|_| argv(&["workspace", "list", "--json"]))
+        .collect();
+    let outs = env.lcl_parallel(&cmds);
+    let mut lists = Vec::new();
+    for out in &outs {
+        lists.push(out.assert_ok().json());
+    }
+    assert!(lists.iter().all(|l| *l == lists[0]));
+    let snapshot = snapshot_path(&index, 0);
+    assert_eq!(snapshots(&env), std::slice::from_ref(&snapshot));
+    assert!(dump(&snapshot) == old, "the snapshot is not the old index");
+    let announced = outs
+        .iter()
+        .filter(|o| o.stderr.contains("upgraded the workspace registry"))
+        .count();
+    assert_eq!(announced, 1, "{outs:#?}");
+}

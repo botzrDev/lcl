@@ -1634,10 +1634,11 @@ fn contents(conn: &Connection) -> Result<String> {
         let n: i64 = conn.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))?;
         if n > 0 {
             let mut part = format!("{n} {}", if n == 1 { one } else { many });
-            // Issues in the trash count: their numbers and refs are taken.
-            if table == "issues" {
+            // What is in the trash counts: its numbers, refs and names are
+            // taken. Say so, since no list shows it without --trashed.
+            if ["issues", "labels", "docs", "comments"].contains(&table) {
                 let trashed: i64 = conn.query_row(
-                    "SELECT count(*) FROM issues WHERE deleted_at IS NOT NULL",
+                    &format!("SELECT count(*) FROM {table} WHERE deleted_at IS NOT NULL"),
                     [],
                     |r| r.get(0),
                 )?;

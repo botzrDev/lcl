@@ -29,7 +29,12 @@
 //!   kill, a full disk or an unwritable directory.
 //! - **Never replaced.** A file that exists at `DEST`, of any kind, is left
 //!   byte for byte as it was. Placing is a hard link, which fails if `DEST`
-//!   has appeared since state 1.
+//!   has appeared since state 1. (On a filesystem with no hard links, as
+//!   FAT, placing is a check and then a rename: a file that appears at
+//!   `DEST` between the two is replaced. That window is the one exception.)
+//! - **No wider than the source.** The copy has the source file's
+//!   permissions from before the first page is written, so a workspace only
+//!   its owner can read is never copied to a file others can.
 //! - **One committed state.** The copy is the source as one transaction
 //!   boundary left it: every row of a committed write, no row of one that
 //!   was open or came later. The pages are read in one read transaction;
@@ -150,6 +155,11 @@ fn fill(
     check: impl FnOnce(&Connection) -> std::result::Result<(), Stop>,
 ) -> std::result::Result<BackupReport, Stop> {
     let mut dst = Connection::open(tmp)?;
+    // Before any page: SQLite made the file with the default mode, and it
+    // is still empty.
+    if let Some(source) = src.path().filter(|p| !p.is_empty()) {
+        match_permissions(Path::new(source), tmp)?;
+    }
     prepare(&dst)?;
     {
         let backup = Backup::new(src, &mut dst)?;
@@ -185,12 +195,28 @@ fn fill(
     })
 }
 
+/// Gives `copy` the permissions of `source`, where files have an owner and
+/// a mode. Elsewhere a file inherits its directory's access list, which the
+/// copy, made beside the source or where the user asked, already has.
+fn match_permissions(source: &Path, copy: &Path) -> std::io::Result<()> {
+    if cfg!(unix) {
+        std::fs::set_permissions(copy, std::fs::metadata(source)?.permissions())?;
+    }
+    Ok(())
+}
+
 /// State 4: gives the checked file its name, without ever replacing one.
 fn place(tmp: &Path, dest: &Path, shown: &str) -> Result<()> {
     let exists = |p: &Path| std::fs::symlink_metadata(p).is_ok();
     // A hard link fails if `dest` exists, so no file is ever replaced.
     let placed = match std::fs::hard_link(tmp, dest) {
-        Ok(()) => std::fs::remove_file(tmp),
+        // Placed: `dest` is the whole file whatever becomes of the other
+        // name, so a temporary name that can't be removed (held open by a
+        // scanner, say) is litter, not a failed copy.
+        Ok(()) => {
+            let _ = std::fs::remove_file(tmp);
+            Ok(())
+        }
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(e),
         // A filesystem without hard links: check, then rename.
         Err(_) if exists(dest) => Err(std::io::Error::from(std::io::ErrorKind::AlreadyExists)),
@@ -595,5 +621,44 @@ mod tests {
         assert!(is_new(&conn).unwrap());
         conn.execute_batch("CREATE TABLE t (x)").unwrap();
         assert!(!is_new(&conn).unwrap());
+    }
+
+    /// No wider than the source: a copy and a snapshot of a file only its
+    /// owner can read are files only its owner can read.
+    #[cfg(unix)]
+    #[test]
+    fn a_copy_has_the_source_s_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = Dir::new();
+        let out = Dir::new();
+        let store = source(&dir, 5);
+        let file = dir.0.join("src.sqlite");
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        for wanted in [0o600, 0o640] {
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(wanted)).unwrap();
+            let copy = out.0.join(format!("copy-{wanted:o}.sqlite"));
+            store.backup(&copy).unwrap();
+            let snapshot =
+                snapshot_before_upgrade(&file, crate::SCHEMA_VERSION, user_version).unwrap();
+            assert_eq!((mode(&copy), mode(&snapshot)), (wanted, wanted));
+        }
+    }
+
+    /// A temporary name that can't be removed after placing is not a failed
+    /// copy: the destination is whole and the call succeeds.
+    #[test]
+    fn a_placed_copy_is_a_success_whatever_becomes_of_the_temporary_name() {
+        let dir = Dir::new();
+        let out = Dir::new();
+        let store = source(&dir, 5);
+        let tmp = out.0.join(".copy.tmp");
+        fill(&store.conn, &tmp, |_| Ok(()), |_| Ok(())).unwrap();
+        let dest = out.0.join("copy.sqlite");
+        place(&tmp, &dest, "copy.sqlite").unwrap();
+        assert_eq!(rows(&dest), 5);
+        // Placing again from a name that is gone fails without touching it.
+        let bytes = std::fs::read(&dest).unwrap();
+        assert!(place(&tmp, &dest, "copy.sqlite").is_err());
+        assert_eq!(std::fs::read(&dest).unwrap(), bytes);
     }
 }

@@ -187,56 +187,102 @@ fn varied(rng: &mut Rng, n: i64) -> Env {
 /// workspace as it was, table for table and rowid for rowid (timestamps
 /// too: neither command touches `updated_at`), and so `issue show --json`
 /// byte for byte. In between, the one thing changed is its `deleted_at`.
+///
+/// Each workspace is gone through twice: with an empty trash, where an
+/// issue with sub-issues can't be deleted, and then with about half of the
+/// issues left in the trash, so that the rest are round-tripped beside
+/// trashed neighbours, relations to trashed issues and trashed sub-issues.
 #[test]
 fn delete_then_restore_changes_nothing() {
+    let mut parents = 0;
     for seed in [1, 2, 3] {
         let mut rng = Rng(seed);
         let n = 14;
         let env = varied(&mut rng, n);
         let db = env.db_path();
-        let mut round_trips = 0;
-        for i in 1..=n {
-            let id = i.to_string();
-            let shown = env
-                .lcl(&["issue", "show", &id, "--json"])
-                .assert_ok()
-                .stdout
-                .clone();
-            let before = dump(&db);
-
-            let out = env.lcl(&["issue", "delete", &id]);
-            if out.code != 0 {
-                // It has live sub-issues: refused, and nothing changed.
-                assert!(
-                    out.stderr.contains("has sub-issues"),
-                    "seed {seed}: {out:#?}"
-                );
-                assert!(
-                    dump(&db) == before,
-                    "seed {seed}: a refused delete changed W-{i}"
-                );
-                continue;
-            }
-            let mut trashed = dump(&db);
-            only_deleted_at_differs(&mut trashed, &before, i, seed);
-
-            env.lcl(&["issue", "restore", &id]).assert_ok();
-            assert!(dump(&db) == before, "seed {seed}: W-{i} came back changed");
-            assert_eq!(
-                env.lcl(&["issue", "show", &id, "--json"])
-                    .assert_ok()
-                    .stdout,
-                shown,
-                "seed {seed}: W-{i}"
-            );
-            round_trips += 1;
-        }
+        let (first, _) = round_trip_every_issue(&env, n, seed, &[]);
         assert!(
-            round_trips >= n / 2,
-            "seed {seed}: only {round_trips} issues could be deleted"
+            first >= n / 2,
+            "seed {seed}: only {first} issues could be deleted"
         );
+
+        // Fill the trash from the highest number down: sub-issues have
+        // higher numbers than their parents, so parents come free.
+        let mut trashed = vec![];
+        for i in (1..=n).rev() {
+            if rng.chance(2) && env.lcl(&["issue", "delete", &i.to_string()]).code == 0 {
+                trashed.push(i);
+            }
+        }
+        assert!(!trashed.is_empty(), "seed {seed}");
+        let (second, with_trashed_children) = round_trip_every_issue(&env, n, seed, &trashed);
+        assert!(
+            second > 0,
+            "seed {seed}: nothing round-tripped beside the trash"
+        );
+        parents += with_trashed_children;
         fts_integrity(&db, &FTS_TABLES);
     }
+    assert!(
+        parents > 0,
+        "no issue with sub-issues was ever round-tripped"
+    );
+}
+
+/// Deletes and restores each of issues 1..=n that isn't in `trashed`,
+/// checking the property each time. Returns how many it could delete, and
+/// how many of those had sub-issues (in the trash, as they must be).
+fn round_trip_every_issue(env: &Env, n: i64, seed: u64, trashed: &[i64]) -> (i64, i64) {
+    let db = env.db_path();
+    let (mut round_trips, mut parents) = (0, 0);
+    for i in (1..=n).filter(|i| !trashed.contains(i)) {
+        let id = i.to_string();
+        let shown = env
+            .lcl(&["issue", "show", &id, "--json"])
+            .assert_ok()
+            .stdout
+            .clone();
+        let before = dump(&db);
+
+        let out = env.lcl(&["issue", "delete", &id]);
+        if out.code != 0 {
+            // It has live sub-issues: refused, and nothing changed.
+            assert!(
+                out.stderr.contains("has sub-issues"),
+                "seed {seed}: {out:#?}"
+            );
+            assert!(
+                dump(&db) == before,
+                "seed {seed}: a refused delete changed W-{i}"
+            );
+            continue;
+        }
+        let mut in_trash = dump(&db);
+        only_deleted_at_differs(&mut in_trash, &before, i, seed);
+
+        env.lcl(&["issue", "restore", &id]).assert_ok();
+        assert!(dump(&db) == before, "seed {seed}: W-{i} came back changed");
+        assert_eq!(
+            env.lcl(&["issue", "show", &id, "--json"])
+                .assert_ok()
+                .stdout,
+            shown,
+            "seed {seed}: W-{i}"
+        );
+        round_trips += 1;
+        let sub_issues: i64 = rusqlite::Connection::open(&db)
+            .unwrap()
+            .query_row(
+                "SELECT count(*) FROM issues c JOIN issues p ON p.id = c.parent_id WHERE p.number = ?1",
+                [i],
+                |r| r.get(0),
+            )
+            .unwrap();
+        if sub_issues > 0 {
+            parents += 1;
+        }
+    }
+    (round_trips, parents)
 }
 
 /// Checks that `trashed` is `before` with issue `number`'s `deleted_at` set
@@ -1002,4 +1048,45 @@ fn nothing_is_purged_by_itself() {
     };
     assert_eq!(row(&now), row(&trashed));
     env.lcl(&["issue", "restore", "5"]).assert_ok();
+}
+
+/// An issue that is a duplicate of a trashed issue: the refusal to make it
+/// a duplicate of another names the two ways out that work, not unrelate,
+/// which can't name a trashed issue.
+#[test]
+fn a_duplicate_of_a_trashed_issue_is_told_how_to_get_free() {
+    let env = workspace();
+    // W-5 is a duplicate of W-1; W-2 is under W-1.
+    env.lcl(&["issue", "delete", "2"]).assert_ok();
+    env.lcl(&["issue", "delete", "1"]).assert_ok();
+    let argv = ["issue", "relate", "5", "duplicate-of", "4", "--json"];
+    let out = env.lcl(&argv);
+    assert_eq!(
+        (out.code, out.stderr.as_str()),
+        (
+            1,
+            common::error_text(
+                &argv,
+                "conflict",
+                "W-5 is already a duplicate of W-1, which is in the trash; restore it (lcl issue restore W-1) and unrelate it, or purge it (lcl issue purge W-1)"
+            )
+            .as_str()
+        )
+    );
+    // Both ways out work.
+    env.lcl(&["issue", "restore", "1"]).assert_ok();
+    env.lcl(&["issue", "unrelate", "5", "duplicate-of", "1"])
+        .assert_ok();
+    env.lcl(&["issue", "relate", "5", "duplicate-of", "1"])
+        .assert_ok();
+    env.lcl(&["issue", "delete", "1"]).assert_ok();
+    env.lcl(&["issue", "purge", "--all"]).assert_ok();
+    env.lcl(&["issue", "relate", "5", "duplicate-of", "4"])
+        .assert_ok();
+    // A live target still names unrelate.
+    let out = env.lcl(&["issue", "relate", "5", "duplicate-of", "3"]);
+    assert_eq!(
+        out.stderr,
+        "Error: W-5 is already a duplicate of W-4; unrelate it first: lcl issue unrelate W-5 duplicate-of W-4\n"
+    );
 }

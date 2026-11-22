@@ -175,10 +175,14 @@ pub enum LclError {
         path: String,
     },
     /// A second duplicate-of target. `current` is the one it has.
-    #[error(
-        "{issue} is already a duplicate of {current}; unrelate it first: lcl issue unrelate {issue} duplicate-of {current}"
-    )]
-    AlreadyDuplicate { issue: String, current: String },
+    /// `trashed`: the issue it is a duplicate of is in the trash, where no
+    /// command but restore and purge can name it.
+    #[error("{issue} is already a duplicate of {current}{}", if *trashed { format!(", which is in the trash; restore it (lcl issue restore {current}) and unrelate it, or purge it (lcl issue purge {current})") } else { format!("; unrelate it first: lcl issue unrelate {issue} duplicate-of {current}") })]
+    AlreadyDuplicate {
+        issue: String,
+        current: String,
+        trashed: bool,
+    },
     /// `path` runs from the issue through each duplicate-of target back to it.
     #[error("making {issue} a duplicate of {target} would make a cycle: {path}")]
     DuplicateCycle {

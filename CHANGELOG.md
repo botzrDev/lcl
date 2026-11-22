@@ -8,7 +8,7 @@ All notable changes to lcl are recorded here. The format follows
 
 ### Added
 
-- `lcl backup PATH` copies the workspace's file to PATH, safely while other lcl commands read and write it. The copy is one committed state. It is written under a temporary name and gets its name only when complete, so PATH is never half a file. A PATH that exists is refused with exit 1. With `--json` it prints `path`, `bytes` and `schema_version`.
+- `lcl backup PATH` copies the workspace's file to PATH, safely while other lcl commands read and write it. The copy is one committed state. It is written under a temporary name and gets its name only when complete, so PATH is never half a file. A PATH that exists is refused with exit 1. The copy has the workspace file's permissions, as does the snapshot taken before an upgrade. With `--json` it prints `path`, `bytes` and `schema_version`.
 
 - `lcl issue restore ID` brings an issue back from the trash, exactly as it was: its comments, labels, cycles and relations never left.
 - `lcl issue list --trashed` lists the trash, and only the trash.

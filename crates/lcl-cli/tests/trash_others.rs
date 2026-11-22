@@ -261,6 +261,18 @@ fn a_trashed_label_is_not_exported_and_is_purged_only_when_asked() {
     );
     // There the name is free: nothing of the trash came along.
     copy.lcl(&["label", "create", "bug"]).assert_ok();
+    // A workspace holding nothing but a trashed label is not empty for an
+    // import, and the refusal says where the label is.
+    let only_trash = Env::new();
+    only_trash.lcl(&["init", "t", "--key", "W"]).assert_ok();
+    only_trash.lcl(&["label", "create", "gone"]).assert_ok();
+    only_trash.lcl(&["label", "delete", "gone"]).assert_ok();
+    let out = only_trash.lcl_stdin(&["import", "-"], export.as_bytes());
+    assert_eq!(out.code, 1, "{out:#?}");
+    assert!(
+        out.stderr.contains("it has 1 label (1 in the trash)"),
+        "{out:#?}"
+    );
 
     // Purged, it goes with its two links, and its name is free here too.
     assert_eq!(

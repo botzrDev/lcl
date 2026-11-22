@@ -16,7 +16,6 @@ use std::collections::BTreeSet;
 use std::path::Path;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
 
 /// A workspace with issues, labels, comments, relations and docs, and
 /// `out/`, an empty directory for copies.
@@ -239,6 +238,7 @@ fn a_backup_taken_while_another_process_writes_is_one_committed_state() {
     assert!(copies.len() >= 2, "no backup ran beside the writer");
 
     let mut earlier = 0;
+    let mut mid_stream = 0;
     for copy in &copies {
         assert_eq!(integrity(copy), "ok", "{copy:?}");
         fts_integrity(copy, &FTS_TABLES);
@@ -268,7 +268,15 @@ fn a_backup_taken_while_another_process_writes_is_one_committed_state() {
         // Time doesn't run backwards from one copy to the next.
         assert!(issues >= earlier, "{copy:?}");
         earlier = issues;
+        if issues > 0 && issues < WRITES {
+            mid_stream += 1;
+        }
     }
+    // Without a copy from the middle, this tested nothing about writers.
+    assert!(
+        mid_stream > 0,
+        "no backup was taken while writes were under way"
+    );
     assert_eq!(earlier, WRITES, "the last copy has every write");
     // And the search in a copy finds exactly its own issues.
     let last = restored(copies.last().unwrap());
@@ -303,8 +311,20 @@ fn a_killed_backup_leaves_nothing_at_the_path() {
     std::fs::create_dir(&out_dir).unwrap();
     let source = dump(&env.db_path());
 
-    let mut killed_early = 0;
-    for (i, millis) in [0, 1, 2, 4, 8, 15, 30, 60, 120].into_iter().enumerate() {
+    // How long a whole backup takes here, to aim the kills inside one.
+    let started = std::time::Instant::now();
+    env.lcl(&["backup", "out/whole.sqlite"]).assert_ok();
+    let whole = started.elapsed();
+    std::fs::remove_file(out_dir.join("whole.sqlite")).unwrap();
+
+    let temporary_of = |name: &str| -> bool {
+        names(&out_dir)
+            .iter()
+            .any(|n| n.starts_with(&format!(".{name}.lcl-backup-")))
+    };
+    let mut killed_mid_copy = 0;
+    // From before it starts to after it ends, in twentieths of a backup.
+    for i in 0..=24u32 {
         let name = format!("k{i}.sqlite");
         let mut child = env
             .command(env!("CARGO_BIN_EXE_lcl"))
@@ -314,18 +334,23 @@ fn a_killed_backup_leaves_nothing_at_the_path() {
             .stderr(Stdio::null())
             .spawn()
             .expect("spawn lcl backup");
-        std::thread::sleep(Duration::from_millis(millis));
+        std::thread::sleep(whole * i / 20);
         let _ = child.kill();
         child.wait().expect("wait for lcl backup");
         let path = out_dir.join(&name);
         if path.exists() {
-            assert_eq!(integrity(&path), "ok", "after {millis} ms");
+            assert_eq!(integrity(&path), "ok", "kill {i}");
             assert_eq!(count(&path, "SELECT count(*) FROM issues"), ISSUES);
-        } else {
-            killed_early += 1;
+        } else if temporary_of(&name) {
+            // Killed with the copy under way: its temporary file is there,
+            // and nothing is at the path.
+            killed_mid_copy += 1;
         }
     }
-    assert!(killed_early > 0, "no backup was killed before it finished");
+    assert!(
+        killed_mid_copy > 0,
+        "no backup was killed while it was copying (a whole one takes {whole:?})"
+    );
     for name in names(&out_dir) {
         let whole = name.starts_with('k') && name.ends_with(".sqlite");
         let temporary = name.starts_with(".k") && name.contains(".sqlite.lcl-backup-");

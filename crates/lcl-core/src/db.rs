@@ -1728,10 +1728,19 @@ fn check_edge(conn: &Connection, key: &str, e: &Edge) -> Result<()> {
                     )
                     .optional()?)
             };
-            if let Some((_, current)) = target(e.from.id.as_str())? {
+            if let Some((current_id, current)) = target(e.from.id.as_str())? {
+                // The relation to a trashed issue stays stored, hidden; the
+                // refusal must not send the user to unrelate, which can't
+                // name a trashed issue.
+                let trashed: bool = conn.query_row(
+                    "SELECT deleted_at IS NOT NULL FROM issues WHERE id = ?1",
+                    params![current_id],
+                    |r| r.get(0),
+                )?;
                 return Err(LclError::AlreadyDuplicate {
                     issue: e.from.identifier.clone(),
                     current: identifier(key, current),
+                    trashed,
                 });
             }
             // Each issue has at most one target, so the chain from `to` is a
