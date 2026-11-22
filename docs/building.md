@@ -25,4 +25,4 @@ The tests run the `lcl` binary. Each one gets its own `HOME` and its own directo
 
 A schema change is a new entry at the end of `MIGRATIONS` in `crates/lcl-core/src/migrations.rs`. `SCHEMA_VERSION` is the length of that list. A migration that has shipped is never edited.
 
-The crates stay `publish = false`. A version bump changes `workspace.package.version` and the versions of `lcl-core` and `lcl-tui` under `workspace.dependencies` together. Behavior a person can see goes in `CHANGELOG.md` under `[Unreleased]`.
+The crates stay `publish = false`. A version bump changes `workspace.package.version` and the versions of `lcl-core` and `lcl-tui` under `workspace.dependencies` together. Behavior a person can see goes in `CHANGELOG.md` under `[Unreleased]`. So does every change to [the `--json` contract](json-contract.md).

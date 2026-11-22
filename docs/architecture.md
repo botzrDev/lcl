@@ -102,7 +102,9 @@ With `--json`, stdout is one JSON value. On failure the error is the last line o
 {"error":{"kind":"usage|not_found|conflict|schema|io|other","message":"..."}}
 ```
 
-Other stderr lines are notices and start with `lcl:`. This shape is what 0.2.0 prints. It is not yet frozen.
+Other stderr lines are notices and start with `lcl:`.
+
+[The `--json` contract](json-contract.md) has the shape of every command's output. It is a draft through 0.x, and the tests in `crates/lcl-cli/tests/contract.rs` check the commands against it.
 
 Text on a terminal shows a control character as its picture, so ESC is `␛`. A newline and a tab stay. Output to a pipe or a file is unchanged, and so is `--json`.
 
