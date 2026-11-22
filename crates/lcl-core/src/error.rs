@@ -129,6 +129,16 @@ pub enum LclError {
         "{issue} can't be restored while its parent {parent} is in the trash; restore {parent} first"
     )]
     ParentInTrash { issue: String, parent: String },
+    /// `issue purge` of a live issue: only the trash is purged.
+    #[error(
+        "{0} is not in the trash; only an issue in the trash can be purged (lcl issue delete {0} moves it there)"
+    )]
+    PurgeLive(String),
+    /// `issue purge` of an issue whose sub-issues are in the trash with it.
+    #[error(
+        "{issue} has sub-issues {children} in the trash; purge them first, or empty the trash with lcl issue purge --all"
+    )]
+    PurgeHasChildren { issue: String, children: String },
     #[error("{0} can't be related to itself")]
     SelfRelation(String),
     /// `path` is the cycle the new row would close, as `A blocks B blocks A`.
@@ -438,6 +448,8 @@ impl LclError {
             | LclError::InTrash(_)
             | LclError::NotInTrash(_)
             | LclError::ParentInTrash { .. }
+            | LclError::PurgeLive(_)
+            | LclError::PurgeHasChildren { .. }
             | LclError::SelfRelation(_)
             | LclError::BlocksCycle { .. }
             | LclError::AlreadyDuplicate { .. }
@@ -520,8 +532,8 @@ fn counted(parts: &[(i64, &str)]) -> String {
 fn in_trash(trashed: i64) -> String {
     match trashed {
         0 => String::new(),
-        1 => " (1 is in the trash: lcl issue list --trashed shows it, and lcl issue restore brings it back to be moved)".into(),
-        n => format!(" ({n} are in the trash: lcl issue list --trashed shows them, and lcl issue restore brings one back to be moved)"),
+        1 => " (1 is in the trash: lcl issue list --trashed shows it; restore it to move it, or purge it)".into(),
+        n => format!(" ({n} are in the trash: lcl issue list --trashed shows them; restore them to move them, or purge them)"),
     }
 }
 

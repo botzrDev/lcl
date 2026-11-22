@@ -270,6 +270,14 @@ The issue, live again: `deleted_at` is null.
 "Issue"
 ```
 
+### `lcl issue purge`
+
+What was removed for good: `purged` holds the identifiers, lowest number first, and the rest are counts. `lcl issue purge --all` with an empty trash prints zeros and exits 0.
+
+```json
+{"purged": ["string"], "issues": "integer", "comments": "integer", "relations": "integer"}
+```
+
 ### `lcl issue relate`
 
 `issue` and `related` are identifiers, and `kind` is as typed. `created` is false when the relation was already there.

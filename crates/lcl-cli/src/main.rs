@@ -519,6 +519,24 @@ enum IssueCmd {
         #[arg(allow_negative_numbers = true)]
         id: IssueRef,
     },
+    /// Remove an issue in the trash for good, or with --all every one.
+    ///
+    /// This is the only command that removes an issue permanently, and it
+    /// can't be undone: the issue goes with its comments, its relations, its
+    /// label links and its cycle links. Only an issue in the trash can be
+    /// purged (issue delete moves one there), and an issue whose sub-issues
+    /// are in the trash goes after them, or with them under --all. A purged
+    /// issue's number is never used again. Nothing is purged by itself:
+    /// the trash keeps what is in it until this command is run.
+    #[command(group(ArgGroup::new("purge_what").required(true).args(["id", "all"])))]
+    Purge {
+        /// The issue in the trash: KEY-N, #N, N or its UUID.
+        #[arg(allow_negative_numbers = true)]
+        id: Option<IssueRef>,
+        /// Empty the trash: purge every issue in it.
+        #[arg(long)]
+        all: bool,
+    },
     /// Relate two issues: A blocks B, A blocked-by B, A related B, or A duplicate-of B.
     ///
     /// A blocked-by B is the same relation as B blocks A, and related goes
@@ -1497,6 +1515,15 @@ fn resolve_store(workspace: &Option<String>) -> Result<Store> {
     resolve_workspace(workspace.as_deref()).map(|(_, store)| store)
 }
 
+/// `2 comments and 1 relation`, zeros included: a purge says what it removed.
+fn counted_list(parts: &[(i64, &str, &str)]) -> String {
+    let said: Vec<String> = parts
+        .iter()
+        .map(|(n, one, many)| format!("{n} {}", if *n == 1 { one } else { many }))
+        .collect();
+    said.join(" and ")
+}
+
 fn print_json<T: serde::Serialize>(v: &T) -> Result<()> {
     let text = serde_json::to_string_pretty(v)?;
     writeln!(std::io::stdout(), "{text}").map_err(|e| stdout_failed(e, "can't write to stdout"))
@@ -2316,6 +2343,26 @@ fn run(cli: Cli) -> Result<()> {
                         print_json(&issue)?;
                     } else {
                         outln!("Restored {}", issue.identifier);
+                    }
+                }
+                IssueCmd::Purge { id, all: _ } => {
+                    let purged = match &id {
+                        Some(id) => store.purge_issue(id)?,
+                        None => store.purge_trash()?,
+                    };
+                    if cli.json {
+                        print_json(&purged)?;
+                    } else if purged.issues == 0 {
+                        outln!("The trash is empty");
+                    } else {
+                        outln!(
+                            "Purged {} with {}",
+                            purged.purged.join(", "),
+                            counted_list(&[
+                                (purged.comments, "comment", "comments"),
+                                (purged.relations, "relation", "relations"),
+                            ])
+                        );
                     }
                 }
                 IssueCmd::Relate { a, kind, b } => {

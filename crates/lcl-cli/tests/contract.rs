@@ -475,6 +475,7 @@ pinned! {
     issue_update => "issue update",
     issue_delete => "issue delete",
     issue_restore => "issue restore",
+    issue_purge => "issue purge",
     issue_relate => "issue relate",
     issue_unrelate => "issue unrelate",
     issue_comment => "issue comment",
@@ -580,6 +581,17 @@ mod cases {
         let env = rich().env;
         j(&env, &["issue", "delete", "4"]);
         vec![j(&env, &["issue", "restore", "4"])]
+    }
+
+    pub fn issue_purge() -> Vec<Value> {
+        let env = rich().env;
+        j(&env, &["issue", "delete", "4"]);
+        j(&env, &["issue", "delete", "3"]);
+        vec![
+            j(&env, &["issue", "purge", "4"]),
+            j(&env, &["issue", "purge", "--all"]),
+            j(&env, &["issue", "purge", "--all"]),
+        ]
     }
 
     pub fn issue_relate() -> Vec<Value> {
@@ -987,6 +999,10 @@ fn each_kind_of_error_has_its_exit_status() {
         (&["issue", "show", "5"], 1, "conflict"),
         (&["issue", "update", "5", "--title", "t"], 1, "conflict"),
         (&["issue", "restore", "1"], 1, "conflict"),
+        // Only the trash is purged; one of an issue and --all is needed.
+        (&["issue", "purge", "1"], 1, "conflict"),
+        (&["issue", "purge"], 2, "usage"),
+        (&["issue", "purge", "5", "--all"], 2, "usage"),
         // A file can't be written: 1, io.
         (
             &["export", "--output", missing_dir.to_str().unwrap()],

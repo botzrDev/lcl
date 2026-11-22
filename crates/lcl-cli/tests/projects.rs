@@ -935,7 +935,7 @@ fn deletes_are_refused_while_anything_is_in_them() {
         (
             1,
             "",
-            "Error: project \"d\" has 3 issues and 1 milestone; move or delete them first (3 are in the trash: lcl issue list --trashed shows them, and lcl issue restore brings one back to be moved)\n"
+            "Error: project \"d\" has 3 issues and 1 milestone; move or delete them first (3 are in the trash: lcl issue list --trashed shows them; restore them to move them, or purge them)\n"
         )
     );
     for n in ["2", "3", "4"] {

@@ -10,6 +10,9 @@
 //! - A live issue's parent is live.
 //! - Still taken: its number and its ref.
 //! - Not exported.
+//!
+//! And of purging: only from the trash; whole, in one transaction;
+//! sub-issues first; the number is spent; only when asked.
 
 mod common;
 
@@ -583,7 +586,7 @@ fn what_a_trashed_issue_is_in_stays() {
     let env = workspace();
     env.lcl(&["issue", "delete", "2"]).assert_ok();
     env.lcl(&["issue", "delete", "1"]).assert_ok();
-    let note = " (1 is in the trash: lcl issue list --trashed shows it, and lcl issue restore brings it back to be moved)";
+    let note = " (1 is in the trash: lcl issue list --trashed shows it; restore it to move it, or purge it)";
     for (args, message) in [
         (
             &["cycle", "delete", "C"][..],
@@ -689,4 +692,314 @@ fn export_leaves_the_trash_out() {
             .contains("is not empty: it has 1 issue (1 in the trash)"),
         "{out:#?}"
     );
+}
+
+/// The rows of every table that can name an issue, for issue `number`.
+fn rows_of(env: &Env, number: i64) -> Vec<i64> {
+    let conn = rusqlite::Connection::open(env.db_path()).unwrap();
+    let id: Option<String> = conn
+        .query_row("SELECT id FROM issues WHERE number = ?1", [number], |r| {
+            r.get(0)
+        })
+        .ok();
+    let Some(id) = id else {
+        return vec![0; 5];
+    };
+    [
+        "SELECT count(*) FROM issues WHERE id = ?1",
+        "SELECT count(*) FROM comments WHERE issue_id = ?1",
+        "SELECT count(*) FROM issue_relations WHERE issue_id = ?1 OR related_id = ?1",
+        "SELECT count(*) FROM issue_labels WHERE issue_id = ?1",
+        "SELECT count(*) FROM issue_cycles WHERE issue_id = ?1",
+    ]
+    .iter()
+    .map(|sql| conn.query_row(sql, [&id], |r| r.get(0)).unwrap())
+    .collect()
+}
+
+/// Rows that name an issue that isn't there: none, ever.
+fn dangling(env: &Env) -> i64 {
+    let conn = rusqlite::Connection::open(env.db_path()).unwrap();
+    conn.query_row(
+        "SELECT (SELECT count(*) FROM comments WHERE issue_id NOT IN (SELECT id FROM issues))
+              + (SELECT count(*) FROM issue_labels WHERE issue_id NOT IN (SELECT id FROM issues))
+              + (SELECT count(*) FROM issue_cycles WHERE issue_id NOT IN (SELECT id FROM issues))
+              + (SELECT count(*) FROM issue_relations WHERE issue_id NOT IN (SELECT id FROM issues) OR related_id NOT IN (SELECT id FROM issues))
+              + (SELECT count(*) FROM issues WHERE parent_id IS NOT NULL AND parent_id NOT IN (SELECT id FROM issues))",
+        [],
+        |r| r.get(0),
+    )
+    .unwrap()
+}
+
+/// Only from the trash: a live issue can't be purged, by any spelling, and
+/// the refusal changes nothing.
+#[test]
+fn only_an_issue_in_the_trash_can_be_purged() {
+    let env = workspace();
+    let db = env.db_path();
+    let before = dump(&db);
+    for id in ["1", "W-3", "#5"] {
+        let argv = ["issue", "purge", id, "--json"];
+        let out = env.lcl(&argv);
+        let n = id.trim_start_matches(['W', '-', '#']);
+        assert_eq!(
+            (out.code, out.stdout.as_str(), out.stderr.as_str()),
+            (
+                1,
+                "",
+                common::error_text(
+                    &argv,
+                    "conflict",
+                    &format!("W-{n} is not in the trash; only an issue in the trash can be purged (lcl issue delete W-{n} moves it there)")
+                )
+                .as_str()
+            ),
+            "{id}"
+        );
+    }
+    // With nothing in the trash, emptying it removes nothing.
+    assert_eq!(
+        j(&env, &["issue", "purge", "--all"]),
+        json!({"purged": [], "issues": 0, "comments": 0, "relations": 0})
+    );
+    assert_eq!(
+        env.lcl(&["issue", "purge", "--all"]).assert_ok().stdout,
+        "The trash is empty\n"
+    );
+    assert!(
+        dump(&db) == before,
+        "a purge of nothing in the trash changed the workspace"
+    );
+
+    // One or the other, not both and not neither: the command line is wrong.
+    for args in [&["issue", "purge"][..], &["issue", "purge", "1", "--all"]] {
+        assert_eq!(env.lcl(args).code, 2, "{args:?}");
+    }
+    assert!(dump(&db) == before);
+    // An issue that isn't there at all.
+    let out = env.lcl(&["issue", "purge", "99"]);
+    assert_eq!(
+        (out.code, out.stderr.as_str()),
+        (1, "Error: issue W-99 not found\n")
+    );
+}
+
+/// Whole: a purge removes the issue with its comments, relations, label
+/// links and cycle links, and nothing of any other issue but the relations
+/// that named it.
+#[test]
+fn a_purge_removes_the_issue_and_everything_on_it_and_nothing_else() {
+    let env = workspace();
+    let db = env.db_path();
+    env.lcl(&["issue", "comment", "3", "one"]).assert_ok();
+    env.lcl(&["issue", "comment", "3", "two"]).assert_ok();
+    env.lcl(&["issue", "update", "3", "--add-label", "bug", "--cycle", "C"])
+        .assert_ok();
+    // W-3: 2 comments, blocks W-4, related to W-1, a label, a cycle.
+    assert_eq!(rows_of(&env, 3), [1, 2, 2, 1, 1]);
+    let others_before: Vec<Value> = ["1", "2", "5"]
+        .iter()
+        .map(|n| j(&env, &["issue", "show", n]))
+        .collect();
+    env.lcl(&["issue", "delete", "3"]).assert_ok();
+    let trashed = dump(&db);
+
+    assert_eq!(
+        j(&env, &["issue", "purge", "3"]),
+        json!({"purged": ["W-3"], "issues": 1, "comments": 2, "relations": 2})
+    );
+    assert_eq!(dangling(&env), 0);
+    assert!(common::foreign_key_violations(&db).is_empty());
+    fts_integrity(&db, &FTS_TABLES);
+
+    // Exactly W-3's rows are gone: every other row of every table that
+    // holds the workspace's own data is as it was.
+    let after = dump(&db);
+    let gone = |table: &str| trashed.tables[table].len() - after.tables[table].len();
+    assert_eq!(
+        (
+            gone("issues"),
+            gone("comments"),
+            gone("issue_relations"),
+            gone("issue_labels"),
+            gone("issue_cycles")
+        ),
+        (1, 2, 2, 1, 1)
+    );
+    for table in [
+        "issues",
+        "comments",
+        "issue_relations",
+        "issue_labels",
+        "issue_cycles",
+    ] {
+        assert!(
+            after.tables[table]
+                .iter()
+                .all(|row| trashed.tables[table].contains(row)),
+            "{table}: a row changed that the purge should have left"
+        );
+    }
+    for table in ["labels", "projects", "milestones", "cycles", "docs", "meta"] {
+        assert!(
+            after.tables[table] == trashed.tables[table],
+            "{table} changed"
+        );
+    }
+    // The other issues read as they did while W-3 was in the trash, which
+    // hid its relations from them already.
+    for (n, was) in ["1", "2", "5"].iter().zip(&others_before) {
+        let now = j(&env, &["issue", "show", n]);
+        assert_eq!(now["issue"], was["issue"], "W-{n}");
+        assert_eq!(now["comments"], was["comments"], "W-{n}");
+    }
+    assert_eq!(found(&env, "gamma"), Vec::<String>::new());
+
+    // Purged is for good: not in the trash, not restorable, not found.
+    assert_eq!(listed(&env, &["--trashed"]), Vec::<String>::new());
+    for args in [
+        &["issue", "restore", "3"][..],
+        &["issue", "show", "3"],
+        &["issue", "purge", "3"],
+    ] {
+        let out = env.lcl(args);
+        assert_eq!(
+            (out.code, out.stderr.as_str()),
+            (1, "Error: issue W-3 not found\n"),
+            "{args:?}"
+        );
+    }
+    assert_eq!(
+        {
+            env.lcl(&["issue", "delete", "5"]).assert_ok();
+            env.lcl(&["issue", "purge", "5"]).assert_ok().stdout.clone()
+        },
+        "Purged W-5 with 0 comments and 1 relation\n"
+    );
+}
+
+/// The number is spent, and the ref is free.
+#[test]
+fn a_purged_issue_s_number_is_never_reused() {
+    let env = workspace();
+    for n in ["5", "2", "1"] {
+        env.lcl(&["issue", "delete", n]).assert_ok();
+    }
+    env.lcl(&["issue", "purge", "5"]).assert_ok();
+    // W-5 was the highest number: the next issue still gets 6.
+    assert_eq!(env.create("zeta"), 6);
+    env.lcl(&["issue", "purge", "--all"]).assert_ok();
+    assert_eq!(env.create("eta"), 7);
+    // W-1's ref went with it.
+    env.lcl(&["issue", "update", "7", "--ref", "EXT-1"])
+        .assert_ok();
+    assert_eq!(listed(&env, &[]), ["W-3", "W-4", "W-6", "W-7"]);
+    // An export and import keeps the counter above the purged numbers.
+    let export = env.lcl(&["export"]).assert_ok().stdout.clone();
+    let copy = Env::new();
+    copy.lcl(&["init", "copy", "--key", "W"]).assert_ok();
+    copy.lcl_stdin(&["import", "-"], export.as_bytes())
+        .assert_ok();
+    assert_eq!(copy.create("theta"), 8);
+}
+
+/// Sub-issues first: one issue is not purged from over its sub-issues, and
+/// emptying the trash takes a parent and its sub-issues together.
+#[test]
+fn a_parent_is_purged_after_or_with_its_sub_issues() {
+    let env = workspace();
+    let db = env.db_path();
+    env.lcl(&["issue", "create", "--title", "under beta", "--parent", "2"])
+        .assert_ok();
+    for n in ["6", "2", "1"] {
+        env.lcl(&["issue", "delete", n]).assert_ok();
+    }
+    let before = dump(&db);
+    let argv = ["issue", "purge", "1", "--json"];
+    let out = env.lcl(&argv);
+    assert_eq!(
+        (out.code, out.stdout.as_str(), out.stderr.as_str()),
+        (
+            1,
+            "",
+            common::error_text(
+                &argv,
+                "conflict",
+                "W-1 has sub-issues W-2 in the trash; purge them first, or empty the trash with lcl issue purge --all"
+            )
+            .as_str()
+        )
+    );
+    assert!(dump(&db) == before, "a refused purge changed the workspace");
+
+    // Bottom up, one at a time.
+    env.lcl(&["issue", "purge", "6"]).assert_ok();
+    env.lcl(&["issue", "purge", "2"]).assert_ok();
+    assert_eq!(dangling(&env), 0);
+
+    // Or all together: W-1 and a new chain under it, plus W-3.
+    env.lcl(&["issue", "restore", "1"]).assert_ok();
+    env.lcl(&["issue", "create", "--title", "a", "--parent", "1"])
+        .assert_ok();
+    env.lcl(&["issue", "create", "--title", "b", "--parent", "7"])
+        .assert_ok();
+    for n in ["8", "7", "1", "3"] {
+        env.lcl(&["issue", "delete", n]).assert_ok();
+    }
+    let purged = j(&env, &["issue", "purge", "--all"]);
+    assert_eq!(purged["purged"], json!(["W-1", "W-3", "W-7", "W-8"]));
+    assert_eq!(purged["issues"], 4);
+    // W-1's comment; W-3 blocks W-4, W-3 related W-1, W-5 duplicate-of W-1.
+    assert_eq!(
+        (&purged["comments"], &purged["relations"]),
+        (&json!(1), &json!(3))
+    );
+    assert_eq!(listed(&env, &[]), ["W-4", "W-5"]);
+    assert_eq!(listed(&env, &["--trashed"]), Vec::<String>::new());
+    assert_eq!(dangling(&env), 0);
+    assert!(common::foreign_key_violations(&db).is_empty());
+    fts_integrity(&db, &FTS_TABLES);
+    // What the trash held their places in can go now.
+    env.lcl(&["milestone", "delete", "M"]).assert_ok();
+    env.lcl(&["project", "delete", "P"]).assert_ok();
+    env.lcl(&["cycle", "delete", "C"]).assert_ok();
+}
+
+/// Only when asked: however long an issue has been in the trash, and
+/// whatever else is run, it is there until `issue purge`.
+#[test]
+fn nothing_is_purged_by_itself() {
+    let env = workspace();
+    let db = env.db_path();
+    env.lcl(&["issue", "delete", "5"]).assert_ok();
+    // In the trash since 1970.
+    common::exec(&db, "UPDATE issues SET deleted_at = 0 WHERE number = 5");
+    let trashed = dump(&db);
+    for args in [
+        &["issue", "list"][..],
+        &["issue", "list", "--trashed"],
+        &["issue", "create", "--title", "new"],
+        &["issue", "delete", "6"],
+        &["issue", "restore", "6"],
+        &["search", "epsilon"],
+        &["export"],
+        &["backup", "copy.sqlite"],
+        &["workspace", "show"],
+        &["workspace", "list"],
+    ] {
+        env.lcl(args).assert_ok();
+    }
+    assert_eq!(listed(&env, &["--trashed"]), ["W-5"]);
+    assert_eq!(rows_of(&env, 5), [1, 0, 1, 0, 0]);
+    // Its row is as it was put in the trash.
+    let now = dump(&db);
+    let row = |d: &Dump| {
+        d.tables["issues"]
+            .iter()
+            .find(|r| r["number"] == rusqlite::types::Value::Integer(5))
+            .cloned()
+    };
+    assert_eq!(row(&now), row(&trashed));
+    env.lcl(&["issue", "restore", "5"]).assert_ok();
 }

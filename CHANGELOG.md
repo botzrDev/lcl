@@ -12,6 +12,7 @@ All notable changes to lcl are recorded here. The format follows
 
 - `lcl issue restore ID` brings an issue back from the trash, exactly as it was: its comments, labels, cycles and relations never left.
 - `lcl issue list --trashed` lists the trash, and only the trash.
+- `lcl issue purge ID` removes one issue in the trash for good, with its comments, relations, label links and cycle links. `lcl issue purge --all` empties the trash. It can't be undone, and it is the only command that removes an issue permanently. A live issue can't be purged: delete it first. An issue whose sub-issues are in the trash is purged after them, or with them under `--all`. A purged issue's number is never used again. Nothing is purged by itself. With `--json` it prints `purged`, `issues`, `comments` and `relations`.
 - An issue's JSON has `deleted_at`: when it went to the trash, or null.
 
 ### Upgrading
