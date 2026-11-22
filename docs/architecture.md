@@ -1,0 +1,117 @@
+# Architecture
+
+lcl 0.2.0 is a local tracker. One process opens one SQLite file, does its work, and exits. There is no account, no network call, and no license check.
+
+The command line is the interface. `lcl --help` lists every flag. This page is how the program is put together, and what this version does and does not do.
+
+## Crates
+
+| Crate | Path | Role |
+| --- | --- | --- |
+| `lcl` | `crates/lcl-cli` | The binary. Parses arguments, opens a workspace, prints text or JSON, and exits. |
+| `lcl-core` | `crates/lcl-core` | The workspace file, the registry, search, and the export format. |
+| `lcl-tui` | `crates/lcl-tui` | A read-only list of issues. Key handling and drawing are tested without a terminal. |
+
+`unsafe` is forbidden in the workspace.
+
+## Files
+
+A workspace made with `lcl init` is `.lcl/data.sqlite` in that directory. Commands run there, or in a directory below it, use that file. `lcl workspace create` makes a global workspace at `~/.lcl/projects/<slug>.sqlite`. The slug is the name with ASCII letters lowercased and every other character turned into `-`.
+
+`~/.lcl/index.sqlite` is the registry. It records each workspace's name, key, and path. It is not a workspace: its schema is its own, at registry version 2, stored in `registry_meta`. `--workspace` and `LCL_WORKSPACE` look a name up there.
+
+`HOME` must be set and non-empty for anything that uses `~/.lcl`. An empty or unset `HOME` is an error. A workspace found from the current directory does not need `HOME`. `USERPROFILE` is not read, so a Windows prompt that only sets `USERPROFILE` cannot open the registry.
+
+While a workspace is open it is in WAL mode. `data.sqlite-wal` and `data.sqlite-shm` may sit beside the file. Copy those with the database if you copy it by hand, and only while no lcl is running.
+
+## A workspace
+
+One file holds the issues, comments, labels, relations, projects, milestones, cycles, and docs.
+
+An issue is named `KEY-N`. The key is chosen at creation: one ASCII letter, then up to nine ASCII letters or digits, stored uppercase. It does not change. The number comes from `meta.next_issue_number`, which only grows. Deleting an issue does not return its number. The counter stops at the largest `i64`; the next create says the workspace has run out of numbers.
+
+A person can also name an issue by `#N`, `N`, or its UUID. A `--ref` is an id from somewhere else, unique ignoring case. It cannot be shaped like one of this workspace's own references (`N`, `#N`, its `KEY-N`, or a UUID). `issue show` of a ref exits 2 and names the issue that holds it. `search` finds it.
+
+Issue statuses are Backlog, Todo, In Progress, In Review, Done, Canceled, and Duplicate. Input ignores case and drops spaces, `_`, and `-`. `cancelled` is Canceled. JSON and the database store the canonical spelling, so In Progress is `InProgress`. Priority is 0–4: None, Urgent, High, Medium, Low.
+
+Project statuses are Backlog, Planned, Started, Paused, Completed, and Canceled. `In Progress` is Started.
+
+These rules hold for every writer, including import:
+
+- A label exists before an issue can wear it. Deleting a label takes it off every issue.
+- A parent link or a blocks link that would close a cycle is refused. An issue is a duplicate of at most one issue, and `duplicate-of` sets its status to Duplicate. Removing that relation leaves the status as it is.
+- A milestone belongs to one project for good. An issue's milestone is in that issue's project.
+- Deleting an issue is refused while it has sub-issues. Deleting it removes its comments, its label links, its cycle memberships, and its relations.
+- Deleting a project is refused while it has issues or milestones. Deleting a milestone is refused while an issue has it. Deleting a cycle is refused while an issue is in it. Deleting a doc is refused while another doc sits under it.
+- `--cycle` puts an issue in that cycle and takes it out of every other. `--no-cycle` clears them. An imported file may name more than one cycle on an issue; the table allows it.
+- Comment authors default to `LCL_AUTHOR`, then `USER`. Adding, editing, or deleting a comment does not change the issue's `updated_at`.
+
+`issue update` with no flags changes nothing but `updated_at`.
+
+## Writes
+
+Every write runs in one `BEGIN IMMEDIATE` transaction, together with the reads it depends on. The write lock is taken before those reads, so another lcl cannot change the rows between the read and the write. A writer waits up to 30 seconds. An error rolls the transaction back.
+
+Opening a database retries while SQLite reports it busy, including the moment after a killed lcl when another connection is recovering the WAL. A command that finds the database locked waits. It does not fail at once.
+
+lcl does not run `VACUUM`. The search indexes are FTS5 tables keyed by rowid (`issues_fts`, `docs_fts`, `comments_fts`), and a vacuum can renumber those rowids. On open, lcl checks that each index still matches its rows. A mismatch is a schema error. The check is skipped on a file this process cannot write.
+
+## Schema
+
+`PRAGMA user_version` is the schema version. This build's is 11, the length of the migration list. Opening a file applies every pending migration in one transaction, then checks foreign keys. A file from a newer lcl is refused and left untouched. A migration that has shipped is never edited. A shipped step runs once; editing it would fork the files that already ran it.
+
+An open that changes stored values prints one line on stderr and does not print it again.
+
+| Version | What it added |
+| --- | --- |
+| 1 | The 0.1.0 tables: issues, labels, comments, docs, cycles, and the issue and doc search indexes. |
+| 2 | The issue-number counter, seeded one past the highest number already stored. |
+| 3 | `started_at` and `canceled_at`. |
+| 4 | Parents stored as UUIDs. A dangling parent, or a parent loop, is cleared. |
+| 5 | Labels as their own rows. Blank assignees cleared. Duplicate label names merged. |
+| 6 | A search index on comment bodies. |
+| 7 | Relations: `blocks`, `related`, `duplicate`. |
+| 8 | Projects and milestones, and an issue's place in them. |
+| 9 | An issue's `ref` and `creator`. |
+| 10 | Values 0.1.0 stored that this lcl could not read, repaired where they can be read. |
+| 11 | Status, parent, comment, doc-parent, and cycle-membership rules held in the tables. |
+
+## Search
+
+Search matches issues by identifier, ref, title, description, and comments, and docs by title and content. Every word must match. A word is plain text: `AND`, `OR`, and `NOT` are words, and quotes are dropped. A word ending in `*` is a prefix. Case and diacritics are ignored. A query that is exactly an issue's `KEY-N` or `#N` lists that issue first. Results come 50 issues and 50 docs at a time.
+
+An issue matches when every word is in its title and description together, or every word is in one comment. Words split between the issue and a comment, or across two comments, do not match.
+
+## Export
+
+`lcl export` writes the whole workspace as `lcl-export/1`: one JSON object per line. The workspace header is first, then labels, projects, milestones, cycles, issues, comments, relations, and docs. The same workspace exports to the same bytes. Issues are named by number in the file, not by the UUID stored on disk. Cycles and docs keep their ids, because a name is not unique for them.
+
+`lcl import` restores that file into an empty workspace with the same key. Numbers, refs, creators, authors, and timestamps are kept as the file gives them. The file is checked whole before anything is written, and the write is one transaction. `--dry-run` checks and counts, and writes nothing. A stored value the import would refuse stops an export as well, and the export writes nothing.
+
+## The terminal UI
+
+`lcl tui` lists issues. `j` and `k` move, `1` through `7` filter by status, `0` shows every status, `r` reloads, and `q` or Ctrl-C quits. It needs a terminal on both stdin and stdout. It does not create, edit, search, or comment. The command line does that.
+
+## The command contract
+
+Exit 0 is success. Exit 1 is a missing row, a conflict with what is stored, a schema this build will not read, or an I/O error. Exit 2 is a wrong command line: a bad flag, a bad value, or a combination of flags that cannot work. A closed stdout exits 0.
+
+With `--json`, stdout is one JSON value. On failure the error is the last line of stderr, and the only line that starts with `{`:
+
+```json
+{"error":{"kind":"usage|not_found|conflict|schema|io|other","message":"..."}}
+```
+
+Other stderr lines are notices and start with `lcl:`. This shape is what 0.2.0 prints. It is not yet frozen.
+
+Text on a terminal shows a control character as its picture, so ESC is `␛`. A newline and a tab stay. Output to a pipe or a file is unchanged, and so is `--json`.
+
+## What this version does not do
+
+A delete is immediate. There is no trash. There is no `lcl backup`. A copy is `lcl export`, or a copy of the SQLite file and its WAL taken while no lcl is running.
+
+An upgrade changes the file in place. lcl does not write a snapshot beside it first.
+
+There is no install other than building this repository. The crates are unpublished. The name `lcl` on crates.io is someone else's crate. The binary in this repository is named `lcl`.
+
+There is no sync, no shared workspace, and no copy of the file off the machine. lcl does not send the workspace anywhere.

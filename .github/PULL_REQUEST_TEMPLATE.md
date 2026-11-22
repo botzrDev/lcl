@@ -1,10 +1,3 @@
-## What
+This repository does not accept pull requests.
 
-## Checklist
-
-- [ ] `cargo fmt --check`
-- [ ] `cargo clippy --workspace --all-targets --locked -- -D warnings`
-- [ ] `cargo test --workspace --locked`
-- [ ] `cargo deny check`
-- [ ] User-visible changes are under `[Unreleased]` in `CHANGELOG.md`
-- [ ] A schema change is a new migration, and no shipped migration was edited
+The source is public so it can be read and built. A bug in the alpha is a GitHub issue, as the README describes under Alpha testing.

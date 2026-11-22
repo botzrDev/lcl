@@ -75,6 +75,6 @@ Search uses FTS5 tables keyed by rowid. lcl does not run `VACUUM`. On open it ch
 
 lcl is one process and one file. It is not a multi-user server. It does not reuse issue numbers. It does not vacuum a workspace.
 
-## Contributing
+## Source
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). The license is [Apache-2.0](LICENSE).
+The source is public so it can be read and built. Pull requests are not accepted. [CONTRIBUTING.md](CONTRIBUTING.md) says what is accepted. How the program is put together is in [docs/architecture.md](docs/architecture.md). Building it is in [docs/building.md](docs/building.md). The license is [Apache-2.0](LICENSE).
