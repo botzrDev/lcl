@@ -43,8 +43,8 @@ These rules hold for every writer, including import:
 - A milestone belongs to one project for good. An issue's milestone is in that issue's project.
 - Deleting an issue is refused while it has sub-issues. Deleting it removes its comments, its label links, its cycle memberships, and its relations.
 - Deleting a project is refused while it has issues or milestones. Deleting a milestone is refused while an issue has it. Deleting a cycle is refused while an issue is in it. Deleting a doc is refused while another doc sits under it.
-- `--cycle` puts an issue in that cycle and takes it out of every other. `--no-cycle` clears them. An imported file may name more than one cycle on an issue; the table allows it.
-- Comment authors default to `LCL_AUTHOR`, then `USER`. Adding, editing, or deleting a comment does not change the issue's `updated_at`.
+
+`--cycle` puts an issue in that cycle and takes it out of every other. `--no-cycle` clears them. An imported file may name more than one cycle on an issue; the table allows it. A comment's author defaults to `LCL_AUTHOR`, then `USER`. Adding, editing, or deleting a comment does not change the issue's `updated_at`.
 
 `issue update` with no flags changes nothing but `updated_at`.
 

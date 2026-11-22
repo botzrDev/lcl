@@ -1591,10 +1591,11 @@ fn error_text(e: &anyhow::Error) -> String {
     out
 }
 
-/// `text` as a terminal may be shown it: every control character but a
-/// newline and a tab becomes its picture (ESC is ␛), so stored text can't
-/// move the cursor, recolour or clear the screen. Text for anything else,
-/// a file or a pipe, is left byte for byte.
+/// `text` as a terminal may be shown it. Newline and tab stay. Every other
+/// C0 control, and DEL, becomes its control picture (ESC is ␛, DEL is ␡);
+/// every control outside that set becomes U+FFFD, as U+009B does. Stored
+/// text then can't move the cursor, recolour or clear the screen. When
+/// `terminal` is false the text is returned unchanged.
 fn for_terminal(text: &str, terminal: bool) -> std::borrow::Cow<'_, str> {
     let unsafe_here = |c: char| c.is_control() && c != '\n' && c != '\t';
     if !terminal || !text.contains(unsafe_here) {
