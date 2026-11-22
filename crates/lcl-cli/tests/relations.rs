@@ -353,9 +353,11 @@ fn the_schema_allows_one_duplicate_target() {
     assert_eq!(relations(&env, 1)["duplicate_of"]["identifier"], "DREA-2");
 }
 
-/// Deleting an issue removes its relations in both directions.
+/// Deleting an issue moves it to the trash with its relations: they stay
+/// stored, are hidden from the issues at their other ends, and are there
+/// again once it is restored.
 #[test]
-fn deleting_an_issue_removes_its_relations() {
+fn a_trashed_issue_s_relations_are_hidden_until_it_is_restored() {
     let env = workspace(6);
     relate(&env, 1, "blocks", 2).assert_ok();
     relate(&env, 3, "blocks", 1).assert_ok();
@@ -363,15 +365,12 @@ fn deleting_an_issue_removes_its_relations() {
     relate(&env, 5, "duplicate-of", 1).assert_ok();
     relate(&env, 1, "duplicate-of", 6).assert_ok();
     relate(&env, 2, "related", 3).assert_ok();
-    assert_eq!(rows(&env).len(), 6);
+    let stored = rows(&env);
+    assert_eq!(stored.len(), 6);
+    let shown: Vec<Value> = (1..=6).map(|n| relations(&env, n)).collect();
 
     env.lcl(&["issue", "delete", "1"]).assert_ok();
-    // Related is stored smaller UUID first, which needn't be the smaller number.
-    let left = rows(&env);
-    assert!(
-        matches!(left.as_slice(), [(a, b, k)] if k == "related" && [*a.min(b), *a.max(b)] == [2, 3]),
-        "{left:?}"
-    );
+    assert_eq!(rows(&env), stored, "the relations stay stored");
     for n in [4, 5, 6] {
         assert_eq!(
             relations(&env, n),
@@ -380,6 +379,14 @@ fn deleting_an_issue_removes_its_relations() {
         );
     }
     assert_eq!(ids(&relations(&env, 2)["related"]), ["DREA-3"]);
+    assert_eq!(ids(&relations(&env, 2)["blocked_by"]), Vec::<String>::new());
+    assert_eq!(ids(&relations(&env, 3)["blocks"]), Vec::<String>::new());
+
+    env.lcl(&["issue", "restore", "1"]).assert_ok();
+    assert_eq!(rows(&env), stored);
+    for n in 1..=6 {
+        assert_eq!(relations(&env, n), shown[n as usize - 1], "DREA-{n}");
+    }
     assert!(foreign_key_violations(&env.db_path()).is_empty());
 }
 

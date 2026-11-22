@@ -406,6 +406,9 @@ enum IssueCmd {
         /// Show every matching issue.
         #[arg(long, conflicts_with_all = ["limit", "offset"])]
         all: bool,
+        /// List the trash: only the issues issue delete moved there.
+        #[arg(long)]
+        trashed: bool,
     },
     /// Show an issue: its fields, relations, sub-issues and comments.
     Show {
@@ -496,8 +499,22 @@ enum IssueCmd {
         #[arg(long)]
         no_ref: bool,
     },
-    /// Delete an issue, with its comments and relations. Refused while it has sub-issues.
+    /// Move an issue to the trash. Refused while it has sub-issues that aren't in the trash.
+    ///
+    /// The issue keeps its comments, labels, cycles and relations, and its
+    /// number and ref stay taken. It is left out of every list, search and
+    /// count, and a command that names it is refused, until issue restore
+    /// brings it back. issue list --trashed shows the trash.
     Delete {
+        /// The issue: KEY-N, #N, N or its UUID.
+        #[arg(allow_negative_numbers = true)]
+        id: IssueRef,
+    },
+    /// Bring an issue back from the trash, as it was when it was deleted.
+    ///
+    /// Refused for an issue that isn't in the trash, and while its parent
+    /// is: restore the parent first.
+    Restore {
         /// The issue: KEY-N, #N, N or its UUID.
         #[arg(allow_negative_numbers = true)]
         id: IssueRef,
@@ -2044,6 +2061,7 @@ fn run(cli: Cli) -> Result<()> {
                     limit,
                     offset,
                     all,
+                    trashed,
                 } => {
                     let page = if all {
                         Page::ALL
@@ -2065,6 +2083,7 @@ fn run(cli: Cli) -> Result<()> {
                         _ => None,
                     };
                     let filter = IssueFilter {
+                        trashed,
                         statuses: status,
                         assignee,
                         labels: label,
@@ -2285,7 +2304,18 @@ fn run(cli: Cli) -> Result<()> {
                             &serde_json::json!({"deleted": issue.identifier, "id": issue.id}),
                         )?;
                     } else {
-                        outln!("Deleted {}", issue.identifier);
+                        outln!(
+                            "Moved {0} to the trash; restore it with: lcl issue restore {0}",
+                            issue.identifier
+                        );
+                    }
+                }
+                IssueCmd::Restore { id } => {
+                    let issue = store.restore_issue(&id)?;
+                    if cli.json {
+                        print_json(&issue)?;
+                    } else {
+                        outln!("Restored {}", issue.identifier);
                     }
                 }
                 IssueCmd::Relate { a, kind, b } => {

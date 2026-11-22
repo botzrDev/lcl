@@ -67,7 +67,9 @@ Known limits:
 
 `PRAGMA user_version` is the schema version. Opening a workspace applies the pending migrations in one transaction. Migrations are append-only: a shipped step is never edited. A file from a newer lcl is refused and left untouched.
 
-Schema 11 holds the ownership rules in the tables. An issue status is one of the seven canonical spellings. Parents, comments, doc parents and cycle memberships name rows that exist. Deleting an issue deletes its comments and cycle memberships. Deleting a parent, a doc that still has children, or a cycle that still has issues is refused. A new parent link or blocks link that would close a cycle is refused in the write transaction.
+Schema 11 holds the ownership rules in the tables. An issue status is one of the seven canonical spellings. Parents, comments, doc parents and cycle memberships name rows that exist. Deleting a parent, a doc that still has children, or a cycle that still has issues is refused. A new parent link or blocks link that would close a cycle is refused in the write transaction.
+
+Schema 12 adds the trash. `lcl issue delete` sets the issue's `deleted_at` and changes nothing else; `lcl issue restore` clears it. An issue in the trash is left out of every list, search and count, and keeps its number and its ref.
 
 Search uses FTS5 tables keyed by rowid. lcl does not run `VACUUM`. On open it checks that each index still matches its rows.
 

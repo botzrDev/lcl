@@ -335,7 +335,7 @@ fn delete_refuses_an_issue_with_sub_issues() {
         .assert_ok();
     assert_eq!(
         env.lcl(&["issue", "delete", "DREA-1"]).assert_ok().stdout,
-        "Deleted DREA-1\n"
+        "Moved DREA-1 to the trash; restore it with: lcl issue restore DREA-1\n"
     );
 
     let out = env.lcl(&["issue", "delete", "2"]);
@@ -446,6 +446,7 @@ fn upgrade_repairs_parent_ids() {
     undo_v5_schema(&mut after, &mut before);
     undo_v6_schema(&mut after);
     undo_v7_schema(&mut after);
+    common::undo_v12_schema(&mut after, &before);
     undo_v11_schema(&mut after, &before);
     undo_v10_schema(&mut after);
     undo_v9_schema(&mut after);

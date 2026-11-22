@@ -118,6 +118,17 @@ pub enum LclError {
         snapshot: String,
         reason: String,
     },
+    /// A command named an issue that is in the trash. Holds its `KEY-N`.
+    #[error("{0} is in the trash; restore it with: lcl issue restore {0}")]
+    InTrash(String),
+    /// `issue restore` of an issue that is not in the trash.
+    #[error("{0} is not in the trash")]
+    NotInTrash(String),
+    /// `issue restore` of an issue whose parent is in the trash.
+    #[error(
+        "{issue} can't be restored while its parent {parent} is in the trash; restore {parent} first"
+    )]
+    ParentInTrash { issue: String, parent: String },
     #[error("{0} can't be related to itself")]
     SelfRelation(String),
     /// `path` is the cycle the new row would close, as `A blocks B blocks A`.
@@ -209,11 +220,14 @@ pub enum LclError {
     #[error("project {name:?} already exists{}", if name == existing { String::new() } else { format!(" (as {existing:?})") })]
     ProjectExists { name: String, existing: String },
     /// `project delete` of a project that issues or milestones reference.
-    #[error("project {name:?} has {}; move or delete {} first", counted(&[(*issues, "issue"), (*milestones, "milestone")]), them(issues + milestones))]
+    /// `issues` counts every issue in it, `trashed` those of them in the
+    /// trash, which hold their place for `issue restore`.
+    #[error("project {name:?} has {}; move or delete {} first{}", counted(&[(*issues, "issue"), (*milestones, "milestone")]), them(issues + milestones), in_trash(*trashed))]
     ProjectInUse {
         name: String,
         issues: i64,
         milestones: i64,
+        trashed: i64,
     },
     /// No milestone with this name or id (`project`: where it was looked for).
     #[error("milestone {name:?} not found{}", project.as_ref().map(|p| format!(" in project {p:?}")).unwrap_or_default())]
@@ -245,8 +259,12 @@ pub enum LclError {
         project: String,
     },
     /// `milestone delete` of a milestone that issues reference.
-    #[error("milestone {name:?} has {}; move or delete {} first", counted(&[(*issues, "issue")]), them(*issues))]
-    MilestoneInUse { name: String, issues: i64 },
+    #[error("milestone {name:?} has {}; move or delete {} first{}", counted(&[(*issues, "issue")]), them(*issues), in_trash(*trashed))]
+    MilestoneInUse {
+        name: String,
+        issues: i64,
+        trashed: i64,
+    },
     /// A milestone for an issue that would have no project.
     #[error("milestone {0:?} needs a project: the issue has none; pass --project too")]
     MilestoneWithoutProject(String),
@@ -269,8 +287,12 @@ pub enum LclError {
     #[error("cycle {0:?} not found")]
     CycleNotFound(String),
     /// `cycle delete` of a cycle that issues are in.
-    #[error("cycle {name:?} has {}; move {} to another cycle or none first", counted(&[(*issues, "issue")]), them(*issues))]
-    CycleInUse { name: String, issues: i64 },
+    #[error("cycle {name:?} has {}; move {} to another cycle or none first{}", counted(&[(*issues, "issue")]), them(*issues), in_trash(*trashed))]
+    CycleInUse {
+        name: String,
+        issues: i64,
+        trashed: i64,
+    },
     /// `cycle update` leaving the end before the start, one of them the
     /// stored date. (Both typed is a usage error, as on create.)
     #[error("cycle {name:?} would end {end}, before its start {start}")]
@@ -413,6 +435,9 @@ impl LclError {
             | LclError::ExportBlocked { .. }
             | LclError::OutputExists(_)
             | LclError::BackupExists(_)
+            | LclError::InTrash(_)
+            | LclError::NotInTrash(_)
+            | LclError::ParentInTrash { .. }
             | LclError::SelfRelation(_)
             | LclError::BlocksCycle { .. }
             | LclError::AlreadyDuplicate { .. }
@@ -490,6 +515,16 @@ fn counted(parts: &[(i64, &str)]) -> String {
 }
 
 /// "it" for one thing, "them" for more.
+/// The end of an in-use refusal when `trashed` of the issues counted are in
+/// the trash: they can't be moved until they are restored.
+fn in_trash(trashed: i64) -> String {
+    match trashed {
+        0 => String::new(),
+        1 => " (1 is in the trash: lcl issue list --trashed shows it, and lcl issue restore brings it back to be moved)".into(),
+        n => format!(" ({n} are in the trash: lcl issue list --trashed shows them, and lcl issue restore brings one back to be moved)"),
+    }
+}
+
 fn them(n: i64) -> &'static str {
     if n == 1 { "it" } else { "them" }
 }

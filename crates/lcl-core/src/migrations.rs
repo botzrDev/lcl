@@ -43,7 +43,27 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
     Sql(V9),
     Code(v10),
     Code(v11),
+    Sql(V12),
 ];
+
+/// v11 -> v12: the trash. An issue with `deleted_at` set is in the trash
+/// (see `crate::trash`); every issue there is starts live. The CHECK keeps
+/// a hand edit from storing anything but a time or NULL.
+///
+/// The search index holds an issue's title and description, and until now
+/// its trigger re-indexed the row on every UPDATE. It now fires only for an
+/// UPDATE that names one of those two columns, so moving an issue to the
+/// trash and back writes one field and leaves the index's rows untouched.
+/// (`update_issue` names every column, so its updates re-index as before.)
+/// The trigger's text is V1's but for `OF title, description`.
+const V12: &str = "
+ALTER TABLE issues ADD COLUMN deleted_at INTEGER CHECK (deleted_at IS NULL OR typeof(deleted_at) = 'integer');
+DROP TRIGGER IF EXISTS issues_au;
+CREATE TRIGGER IF NOT EXISTS issues_au AFTER UPDATE OF title, description ON issues BEGIN
+    INSERT INTO issues_fts(issues_fts,rowid,title,description) VALUES ('delete',old.rowid,old.title,old.description);
+    INSERT INTO issues_fts(rowid,title,description) VALUES (new.rowid,new.title,new.description);
+END;
+";
 
 /// v0 -> v1: the lcl 0.1.0 schema, verbatim.
 ///

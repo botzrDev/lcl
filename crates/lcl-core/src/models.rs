@@ -310,6 +310,10 @@ pub struct Issue {
     pub completed_at: Option<i64>,
     pub started_at: Option<i64>,
     pub canceled_at: Option<i64>,
+    /// When it was moved to the trash; None for a live issue. Set and
+    /// cleared only by `Store::delete_issue` and `Store::restore_issue`.
+    #[serde(default)]
+    pub deleted_at: Option<i64>,
 }
 
 impl Issue {
@@ -746,6 +750,7 @@ mod tests {
             completed_at: completed,
             started_at: started,
             canceled_at: canceled,
+            deleted_at: None,
         }
     }
 

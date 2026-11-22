@@ -32,7 +32,7 @@ With `--json`, an error is one line: the last line of stderr, and the only one t
 
 - `usage` comes with exit 2. Every other kind comes with exit 1.
 - `not_found`: a named issue, label, project, milestone, cycle, doc, comment or workspace does not exist.
-- `conflict`: the change is refused because of what is stored, as deleting a project that still has issues.
+- `conflict`: the change is refused because of what is stored, as deleting a project that still has issues. A command that names an issue in the trash is a conflict, and its message names `lcl issue restore`.
 - `schema`: the file's schema is newer than this build reads, or is not a schema lcl wrote.
 - `io`: a file could not be read or written.
 
@@ -91,9 +91,12 @@ A shape is JSON. A string in it names what stands at that place:
   "updated_at": "integer",
   "started_at": "integer|null",
   "completed_at": "integer|null",
-  "canceled_at": "integer|null"
+  "canceled_at": "integer|null",
+  "deleted_at": "integer|null"
 }
 ```
+
+`deleted_at` is when `lcl issue delete` moved the issue to the trash, and null for every issue that is not there. Only `lcl issue list --trashed` prints issues that are.
 
 ### `RelatedIssue`
 
@@ -220,7 +223,7 @@ An issue as a relation names it.
 
 ### `lcl issue list`
 
-`total` counts every issue the filters match. `truncated` is true when `issues` holds fewer than that.
+`total` counts every issue the filters match. `truncated` is true when `issues` holds fewer than that. With `--trashed` the issues are the ones in the trash, and no others; without it, none of them.
 
 ```json
 {"issues": ["Issue"], "total": "integer", "limit": "integer", "offset": "integer", "truncated": "boolean"}
@@ -253,10 +256,18 @@ An issue as a relation names it.
 
 ### `lcl issue delete`
 
-`deleted` is the identifier.
+`deleted` is the identifier. The issue is in the trash, and `lcl issue restore` brings it back.
 
 ```json
 {"deleted": "string", "id": "string"}
+```
+
+### `lcl issue restore`
+
+The issue, live again: `deleted_at` is null.
+
+```json
+"Issue"
 ```
 
 ### `lcl issue relate`

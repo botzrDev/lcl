@@ -164,6 +164,7 @@ fn upgrades_a_v7_workspace() {
     // Undoing V10's expected changes (none), V9's and V8's gives back the
     // v7 file exactly, the issues table's CREATE statement included.
     let mut after = dump(&db);
+    common::undo_v12_schema(&mut after, &before);
     undo_v11_schema(&mut after, &before);
     undo_v10_schema(&mut after);
     undo_v9_schema(&mut after);
@@ -924,9 +925,22 @@ fn deletes_are_refused_while_anything_is_in_them() {
         trio(&env.lcl(&["milestone", "delete", "d1"])),
         (0, "Deleted milestone \"d1\" from project \"d\"\n", "")
     );
-    // Deleting its issues empties a project too.
+    // Deleting its issues doesn't empty a project: they are in the trash,
+    // still in it, and the refusal says so. Restored, they can be moved.
     for n in ["2", "3", "4"] {
         env.lcl(&["issue", "delete", n]).assert_ok();
+    }
+    assert_eq!(
+        trio(&env.lcl(&["project", "delete", "d"])),
+        (
+            1,
+            "",
+            "Error: project \"d\" has 3 issues and 1 milestone; move or delete them first (3 are in the trash: lcl issue list --trashed shows them, and lcl issue restore brings one back to be moved)\n"
+        )
+    );
+    for n in ["2", "3", "4"] {
+        env.lcl(&["issue", "restore", n]).assert_ok();
+        env.lcl(&["issue", "update", n, "--no-project"]).assert_ok();
     }
     env.lcl(&["milestone", "delete", "d2"]).assert_ok();
     env.lcl(&["project", "delete", "d"]).assert_ok();

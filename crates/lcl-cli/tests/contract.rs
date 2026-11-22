@@ -474,6 +474,7 @@ pinned! {
     issue_show => "issue show",
     issue_update => "issue update",
     issue_delete => "issue delete",
+    issue_restore => "issue restore",
     issue_relate => "issue relate",
     issue_unrelate => "issue unrelate",
     issue_comment => "issue comment",
@@ -548,7 +549,12 @@ mod cases {
     }
 
     pub fn issue_list() -> Vec<Value> {
-        vec![j(&rich().env, &["issue", "list"])]
+        let env = rich().env;
+        j(&env, &["issue", "delete", "4"]);
+        vec![
+            j(&env, &["issue", "list"]),
+            j(&env, &["issue", "list", "--trashed"]),
+        ]
     }
 
     pub fn issue_show() -> Vec<Value> {
@@ -568,6 +574,12 @@ mod cases {
 
     pub fn issue_delete() -> Vec<Value> {
         vec![j(&rich().env, &["issue", "delete", "4"])]
+    }
+
+    pub fn issue_restore() -> Vec<Value> {
+        let env = rich().env;
+        j(&env, &["issue", "delete", "4"]);
+        vec![j(&env, &["issue", "restore", "4"])]
     }
 
     pub fn issue_relate() -> Vec<Value> {
@@ -762,6 +774,16 @@ mod objects {
             .expect("issues")
             .clone();
         assert_eq!(issues.len(), 4);
+        // And one in the trash, for `deleted_at`.
+        j(&env, &["issue", "delete", "4"]);
+        let mut issues = issues;
+        issues.extend(
+            j(&env, &["issue", "list", "--trashed"])["issues"]
+                .as_array()
+                .expect("issues")
+                .clone(),
+        );
+        assert_eq!(issues.len(), 5);
         pin_object("Issue", &issues);
     }
 
@@ -936,6 +958,9 @@ fn error_kind(out: &Out) -> String {
 fn each_kind_of_error_has_its_exit_status() {
     let rich = rich();
     let env = &rich.env;
+    // DEMO-5, in the trash.
+    j(env, &["issue", "create", "--title", "five"]);
+    j(env, &["issue", "delete", "5"]);
     let missing_dir = env.cwd.path().join("no-such-dir").join("out.jsonl");
     let cases: &[(&[&str], i32, &str)] = &[
         // The command line is wrong: 2, usage.
@@ -958,6 +983,10 @@ fn each_kind_of_error_has_its_exit_status() {
         (&["project", "delete", "Parser"], 1, "conflict"),
         (&["issue", "relate", "1", "blocks", "3"], 1, "conflict"),
         (&["backup", ".lcl/data.sqlite"], 1, "conflict"),
+        // An issue in the trash is there until restored: 1, conflict.
+        (&["issue", "show", "5"], 1, "conflict"),
+        (&["issue", "update", "5", "--title", "t"], 1, "conflict"),
+        (&["issue", "restore", "1"], 1, "conflict"),
         // A file can't be written: 1, io.
         (
             &["export", "--output", missing_dir.to_str().unwrap()],

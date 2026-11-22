@@ -1633,7 +1633,19 @@ fn contents(conn: &Connection) -> Result<String> {
     ] {
         let n: i64 = conn.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))?;
         if n > 0 {
-            parts.push(format!("{n} {}", if n == 1 { one } else { many }));
+            let mut part = format!("{n} {}", if n == 1 { one } else { many });
+            // Issues in the trash count: their numbers and refs are taken.
+            if table == "issues" {
+                let trashed: i64 = conn.query_row(
+                    "SELECT count(*) FROM issues WHERE deleted_at IS NOT NULL",
+                    [],
+                    |r| r.get(0),
+                )?;
+                if trashed > 0 {
+                    part.push_str(&format!(" ({trashed} in the trash)"));
+                }
+            }
+            parts.push(part);
         }
     }
     Ok(match parts.len() {
@@ -2131,7 +2143,7 @@ fn export_in(conn: &Connection) -> Result<(String, Counts)> {
     let issues: Vec<Row> = {
         let mut stmt = conn.prepare(
             "SELECT id, number, title, description, status, priority, assignee, parent_id, estimate, due_date, created_at, updated_at, completed_at, started_at, canceled_at, project_id, milestone_id, ref, creator \
-             FROM issues ORDER BY number",
+             FROM issues WHERE deleted_at IS NULL ORDER BY number",
         )?;
         let rows = stmt.query_map([], |r| {
             Ok(Row {
@@ -2160,10 +2172,14 @@ fn export_in(conn: &Connection) -> Result<(String, Counts)> {
     };
     let numbers: HashMap<String, i64> = issues.iter().map(|i| (i.id.clone(), i.number)).collect();
 
+    // Links of a trashed issue are left out with it (see `crate::trash`).
+    const NOT_TRASHED: &str =
+        "WHERE issue_id NOT IN (SELECT id FROM issues WHERE deleted_at IS NOT NULL)";
     let mut labels_of: HashMap<String, Vec<String>> = HashMap::new();
     {
-        let mut stmt = conn
-            .prepare("SELECT issue_id, label_id FROM issue_labels ORDER BY issue_id, label_id")?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT issue_id, label_id FROM issue_labels {NOT_TRASHED} ORDER BY issue_id, label_id"
+        ))?;
         let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
         for row in rows {
             let (iid, lid) = row?;
@@ -2179,8 +2195,9 @@ fn export_in(conn: &Connection) -> Result<(String, Counts)> {
     }
     let mut cycles_of: HashMap<String, Vec<String>> = HashMap::new();
     {
-        let mut stmt = conn
-            .prepare("SELECT issue_id, cycle_id FROM issue_cycles ORDER BY issue_id, cycle_id")?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT issue_id, cycle_id FROM issue_cycles {NOT_TRASHED} ORDER BY issue_id, cycle_id"
+        ))?;
         let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
         for row in rows {
             let (iid, cid) = row?;
@@ -2359,7 +2376,7 @@ fn export_in(conn: &Connection) -> Result<(String, Counts)> {
     }
 
     {
-        let mut stmt = conn.prepare("SELECT i.number, c.body, c.author, c.created_at, c.id, c.issue_id FROM comments c LEFT JOIN issues i ON i.id = c.issue_id ORDER BY i.number, c.created_at, c.rowid")?;
+        let mut stmt = conn.prepare("SELECT i.number, c.body, c.author, c.created_at, c.id, c.issue_id FROM comments c LEFT JOIN issues i ON i.id = c.issue_id WHERE i.deleted_at IS NULL ORDER BY i.number, c.created_at, c.rowid")?;
         let rows = stmt.query_map([], |r| {
             Ok((
                 r.get::<_, Option<i64>>(0)?,
@@ -2405,7 +2422,11 @@ fn export_in(conn: &Connection) -> Result<(String, Counts)> {
 
     // ----- relations: by (from, kind, to), related smaller number first
     {
-        let mut stmt = conn.prepare("SELECT issue_id, related_id, kind FROM issue_relations")?;
+        let mut stmt = conn.prepare(
+            "SELECT issue_id, related_id, kind FROM issue_relations
+             WHERE issue_id NOT IN (SELECT id FROM issues WHERE deleted_at IS NOT NULL)
+               AND related_id NOT IN (SELECT id FROM issues WHERE deleted_at IS NOT NULL)",
+        )?;
         let rows = stmt.query_map([], |r| {
             Ok((
                 r.get::<_, String>(0)?,

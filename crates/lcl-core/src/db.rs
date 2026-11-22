@@ -78,6 +78,9 @@ pub struct Store {
 /// (they AND); an empty or `None` part doesn't narrow it.
 #[derive(Debug, Clone, Default)]
 pub struct IssueFilter {
+    /// False: only live issues, as every list but the trash wants. True:
+    /// only the issues in the trash.
+    pub trashed: bool,
     /// Any of these statuses (they OR). The query compares the stored text
     /// with the canonical spelling. The schema's CHECK admits only that
     /// spelling, so a hand edit has to get past the CHECK before it can
@@ -496,6 +499,7 @@ impl Store {
                 completed_at: None,
                 started_at: None,
                 canceled_at: None,
+                deleted_at: None,
             };
             if let Some(parent) = &new.parent {
                 let parent = resolve_issue(tx, parent)?;
@@ -533,9 +537,9 @@ impl Store {
     }
     /// The issues directly under the issue with UUID `parent_id`, by number.
     pub fn children(&self, parent_id: &str) -> Result<Vec<Issue>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT id FROM issues WHERE parent_id=?1 ORDER BY number")?;
+        let mut stmt = self.conn.prepare(
+            "SELECT id FROM issues WHERE parent_id=?1 AND deleted_at IS NULL ORDER BY number",
+        )?;
         let ids = stmt
             .query_map(params![parent_id], |r| r.get(0))?
             .collect::<std::result::Result<Vec<String>, _>>()?;
@@ -552,7 +556,11 @@ impl Store {
     ) -> Result<IssueList> {
         self.read(|conn| {
             let key = read_key(conn)?;
-            let mut conds: Vec<String> = vec![];
+            let mut conds: Vec<String> = vec![if filter.trashed {
+                "i.deleted_at IS NOT NULL".into()
+            } else {
+                "i.deleted_at IS NULL".into()
+            }];
             let mut args: Vec<Value> = vec![];
             if !filter.statuses.is_empty() {
                 conds.push(format!("i.status IN ({})", vec!["?"; filter.statuses.len()].join(",")));
@@ -584,7 +592,7 @@ impl Store {
                 // A blocker whose status can't be read isn't known to be
                 // resolved, so it still blocks.
                 let open_blocker = "EXISTS (SELECT 1 FROM issue_relations r JOIN issues b ON b.id = r.issue_id
-                    WHERE r.related_id = i.id AND r.kind = 'blocks' AND b.status NOT IN ('Done', 'Canceled', 'Duplicate'))";
+                    WHERE r.related_id = i.id AND r.kind = 'blocks' AND b.deleted_at IS NULL AND b.status NOT IN ('Done', 'Canceled', 'Duplicate'))";
                 conds.push(if blocked { open_blocker.to_string() } else { format!("NOT {open_blocker}") });
             }
             let project = match &filter.project {
@@ -705,40 +713,6 @@ impl Store {
             Ok((reread(tx, &key, issue.id.as_str())?, cleared))
         })
     }
-    /// Deletes the issue and its comments, labels and cycle links, and returns
-    /// it. Refused while it has sub-issues, which would be left pointing at
-    /// nothing. The number-allocation mark is deliberately left alone, so the
-    /// number is never reused.
-    pub fn delete_issue(&mut self, r: &IssueRef) -> Result<Issue> {
-        self.write(|tx| {
-            let key = read_key(tx)?;
-            let issue = resolve_issue(tx, r)?;
-            let mut stmt =
-                tx.prepare("SELECT number FROM issues WHERE parent_id=?1 ORDER BY number")?;
-            let children = stmt
-                .query_map(params![issue.id], |r| r.get(0))?
-                .collect::<std::result::Result<Vec<i64>, _>>()?;
-            if !children.is_empty() {
-                let children: Vec<String> =
-                    children.into_iter().map(|n| identifier(&key, n)).collect();
-                return Err(LclError::HasChildren {
-                    issue: issue.identifier,
-                    children: children.join(", "),
-                });
-            }
-            tx.execute("DELETE FROM comments WHERE issue_id=?1", params![issue.id])?;
-            tx.execute(
-                "DELETE FROM issue_labels WHERE issue_id=?1",
-                params![issue.id],
-            )?;
-            tx.execute(
-                "DELETE FROM issue_cycles WHERE issue_id=?1",
-                params![issue.id],
-            )?;
-            tx.execute("DELETE FROM issues WHERE id=?1", params![issue.id])?;
-            Ok(issue)
-        })
-    }
 
     /// Records `a <kind> b` in its stored form (see migration V7). Returns the
     /// relation as typed, and false when it was already there (a no-op).
@@ -805,7 +779,7 @@ impl Store {
                     UNION ALL SELECT 'related', issue_id FROM issue_relations WHERE related_id = ?1 AND kind = 'related'
                     UNION ALL SELECT 'duplicate_of', related_id FROM issue_relations WHERE issue_id = ?1 AND kind = 'duplicate'
                     UNION ALL SELECT 'duplicates', issue_id FROM issue_relations WHERE related_id = ?1 AND kind = 'duplicate'
-                ) x JOIN issues i ON i.id = x.other ORDER BY i.number",
+                ) x JOIN issues i ON i.id = x.other WHERE i.deleted_at IS NULL ORDER BY i.number",
             )?;
             let rows = stmt.query_map(params![issue_id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?)))?;
             let mut out = Relations::default();
@@ -867,7 +841,7 @@ impl Store {
             let project = resolve_project(conn, r)?;
             let issues = issue_counts(conn, "project_id", &project.id)?;
             let mut stmt = conn.prepare(
-                "SELECT m.id, m.name, m.target_date, m.sort_order, (SELECT count(*) FROM issues i WHERE i.milestone_id = m.id)
+                "SELECT m.id, m.name, m.target_date, m.sort_order, (SELECT count(*) FROM issues i WHERE i.milestone_id = m.id AND i.deleted_at IS NULL)
                  FROM milestones m WHERE m.project_id = ?1 ORDER BY m.sort_order, m.name COLLATE NOCASE, m.name",
             )?;
             let milestones = stmt
@@ -920,10 +894,16 @@ impl Store {
                 |r| r.get(0),
             )?;
             if issues + milestones > 0 {
+                let trashed: i64 = tx.query_row(
+                    "SELECT count(*) FROM issues WHERE project_id = ?1 AND deleted_at IS NOT NULL",
+                    params![project.id],
+                    |r| r.get(0),
+                )?;
                 return Err(LclError::ProjectInUse {
                     name: project.name,
                     issues,
                     milestones,
+                    trashed,
                 });
             }
             tx.execute("DELETE FROM projects WHERE id = ?1", params![project.id])?;
@@ -1020,9 +1000,15 @@ impl Store {
                 |r| r.get(0),
             )?;
             if issues > 0 {
+                let trashed: i64 = tx.query_row(
+                    "SELECT count(*) FROM issues WHERE milestone_id = ?1 AND deleted_at IS NOT NULL",
+                    params![m.id],
+                    |r| r.get(0),
+                )?;
                 return Err(LclError::MilestoneInUse {
                     name: m.name,
                     issues,
+                    trashed,
                 });
             }
             tx.execute("DELETE FROM milestones WHERE id = ?1", params![m.id])?;
@@ -1060,6 +1046,7 @@ impl Store {
     pub fn edit_comment(&mut self, id: &str, body: String) -> Result<Comment> {
         self.write(|tx| {
             let mut c = find_comment(tx, id)?;
+            crate::trash::refuse_trashed(tx, &c.issue_id)?;
             one_comment_row(
                 tx.execute(
                     "UPDATE comments SET body=?1 WHERE id=?2",
@@ -1077,6 +1064,7 @@ impl Store {
     pub fn delete_comment(&mut self, id: &str) -> Result<(Comment, Option<String>)> {
         self.write(|tx| {
             let c = find_comment(tx, id)?;
+            crate::trash::refuse_trashed(tx, &c.issue_id)?;
             let key = read_key(tx)?;
             let number: Option<i64> = tx
                 .query_row(
@@ -1213,7 +1201,7 @@ impl Store {
     /// Every cycle with how many issues are in it, newest first.
     pub fn list_cycles(&self) -> Result<Vec<CycleListing>> {
         let mut stmt = self.conn.prepare(
-            "SELECT c.id,c.name,c.starts_at,c.ends_at,c.created_at,(SELECT count(*) FROM issue_cycles ic WHERE ic.cycle_id = c.id) FROM cycles c ORDER BY c.created_at DESC",
+            "SELECT c.id,c.name,c.starts_at,c.ends_at,c.created_at,(SELECT count(*) FROM issue_cycles ic JOIN issues i ON i.id = ic.issue_id WHERE ic.cycle_id = c.id AND i.deleted_at IS NULL) FROM cycles c ORDER BY c.created_at DESC",
         )?;
         let rows = stmt.query_map([], |r| {
             Ok(CycleListing {
@@ -1269,9 +1257,15 @@ impl Store {
                 |r| r.get(0),
             )?;
             if issues > 0 {
+                let trashed: i64 = tx.query_row(
+                    "SELECT count(*) FROM issue_cycles ic JOIN issues i ON i.id = ic.issue_id WHERE ic.cycle_id = ?1 AND i.deleted_at IS NOT NULL",
+                    params![c.id],
+                    |r| r.get(0),
+                )?;
                 return Err(LclError::CycleInUse {
                     name: c.name,
                     issues,
+                    trashed,
                 });
             }
             tx.execute("DELETE FROM cycles WHERE id=?1", params![c.id])?;
@@ -1301,14 +1295,14 @@ impl Store {
             let all = q.all_words();
 
             let mut stmt = conn.prepare(
-                "SELECT i.id, i.number, bm25(issues_fts) FROM issues_fts JOIN issues i ON i.rowid = issues_fts.rowid WHERE issues_fts MATCH ?1",
+                "SELECT i.id, i.number, bm25(issues_fts) FROM issues_fts JOIN issues i ON i.rowid = issues_fts.rowid WHERE issues_fts MATCH ?1 AND i.deleted_at IS NULL",
             )?;
             for row in stmt.query_map(params![all], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, f64>(2)?)))? {
                 let (id, number, rank) = row?;
                 hits.insert(id, Hit { rank, number, fields: vec![] });
             }
             for (field, col) in [(Field::Title, "title"), (Field::Description, "description")] {
-                let mut stmt = conn.prepare("SELECT i.id FROM issues_fts JOIN issues i ON i.rowid = issues_fts.rowid WHERE issues_fts MATCH ?1")?;
+                let mut stmt = conn.prepare("SELECT i.id FROM issues_fts JOIN issues i ON i.rowid = issues_fts.rowid WHERE issues_fts MATCH ?1 AND i.deleted_at IS NULL")?;
                 for id in stmt.query_map(params![q.any_word_in(col)], |r| r.get::<_, String>(0))? {
                     if let Some(hit) = hits.get_mut(&id?) {
                         hit.fields.push(field);
@@ -1319,7 +1313,7 @@ impl Store {
             let mut stmt = conn.prepare(
                 "SELECT c.issue_id, i.number, bm25(comments_fts) FROM comments_fts
                  JOIN comments c ON c.rowid = comments_fts.rowid JOIN issues i ON i.id = c.issue_id
-                 WHERE comments_fts MATCH ?1",
+                 WHERE comments_fts MATCH ?1 AND i.deleted_at IS NULL",
             )?;
             for row in stmt.query_map(params![all], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, f64>(2)?)))? {
                 let (id, number, rank) = row?;
@@ -1339,7 +1333,7 @@ impl Store {
                     Some(typed) => !key.is_empty() && own_key(typed, &key),
                     None => true,
                 };
-                if ours && let Some(id) = conn.query_row("SELECT id FROM issues WHERE number=?1", params![number], |r| r.get::<_, String>(0)).optional()? {
+                if ours && let Some(id) = conn.query_row("SELECT id FROM issues WHERE number=?1 AND deleted_at IS NULL", params![number], |r| r.get::<_, String>(0)).optional()? {
                     let hit = hits.entry(id.clone()).or_insert(Hit { rank: 0.0, number: *number, fields: vec![] });
                     hit.fields.insert(0, Field::Identifier);
                     named = Some(id);
@@ -1350,7 +1344,7 @@ impl Store {
             // only a one-word query can be one.
             let mut by_ref = None;
             let holder = conn
-                .query_row("SELECT id, number FROM issues WHERE ref = ?1 COLLATE NOCASE", params![q.raw().trim()], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
+                .query_row("SELECT id, number FROM issues WHERE ref = ?1 COLLATE NOCASE AND deleted_at IS NULL", params![q.raw().trim()], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
                 .optional()?;
             if let Some((id, number)) = holder {
                 let hit = hits.entry(id.clone()).or_insert(Hit { rank: 0.0, number, fields: vec![] });
@@ -1500,7 +1494,21 @@ pub(crate) fn read_key(conn: &Connection) -> Result<String> {
 /// The issue `r` names, or why there is none. `KEY-N` must carry this
 /// workspace's key, compared ignoring case. A miss names the issue as
 /// `KEY-N` whichever number form was given.
-fn resolve_issue(conn: &Connection, r: &IssueRef) -> Result<Issue> {
+///
+/// An issue in the trash is refused, naming the command that restores it:
+/// every command but `issue restore` reaches issues through here, so none
+/// of them can read or change one (see `crate::trash`).
+pub(crate) fn resolve_issue(conn: &Connection, r: &IssueRef) -> Result<Issue> {
+    let issue = resolve_issue_or_trashed(conn, r)?;
+    if issue.deleted_at.is_some() {
+        return Err(LclError::InTrash(issue.identifier));
+    }
+    Ok(issue)
+}
+
+/// `resolve_issue` without its refusal: the issue `r` names, live or in the
+/// trash. For `issue restore`.
+pub(crate) fn resolve_issue_or_trashed(conn: &Connection, r: &IssueRef) -> Result<Issue> {
     let key = read_key(conn)?;
     match r {
         IssueRef::Number { key: typed, number } => {
@@ -2040,7 +2048,7 @@ fn place(conn: &Connection, issue: &mut Issue, p: &Placement) -> Result<Option<C
 /// doesn't is counted as unreadable rather than failing the whole read.
 fn issue_counts(conn: &Connection, col: &str, id: &str) -> Result<IssueCounts> {
     let mut stmt = conn.prepare(&format!(
-        "SELECT status, count(*) FROM issues WHERE {col} = ?1 GROUP BY 1"
+        "SELECT status, count(*) FROM issues WHERE {col} = ?1 AND deleted_at IS NULL GROUP BY 1"
     ))?;
     let mut counts = IssueCounts::default();
     for row in stmt.query_map(params![id], |r| {
@@ -2055,7 +2063,7 @@ fn issue_counts(conn: &Connection, col: &str, id: &str) -> Result<IssueCounts> {
 
 /// The issue as just written, read back inside the same transaction so the
 /// caller gets the derived fields (identifiers) too.
-fn reread(conn: &Connection, key: &str, id: &str) -> Result<Issue> {
+pub(crate) fn reread(conn: &Connection, key: &str, id: &str) -> Result<Issue> {
     fetch_issue_by(conn, key, "id", &id)?.ok_or_else(|| LclError::Vanished {
         what: "issue",
         id: id.to_string(),
@@ -2064,7 +2072,7 @@ fn reread(conn: &Connection, key: &str, id: &str) -> Result<Issue> {
 
 /// An issue row as `row_to_issue` reads it: `issues i`, with its parent's
 /// number from `issues p` and its project's and milestone's names. Callers append WHERE, ORDER BY and LIMIT.
-const ISSUE_SELECT: &str = "SELECT i.id,i.number,i.title,i.description,i.status,i.priority,i.assignee,i.parent_id,i.estimate,i.due_date,i.created_at,i.updated_at,i.completed_at,i.started_at,i.canceled_at,p.number,i.project_id,pr.name,i.milestone_id,ms.name,i.ref,i.creator FROM issues i LEFT JOIN issues p ON p.id = i.parent_id LEFT JOIN projects pr ON pr.id = i.project_id LEFT JOIN milestones ms ON ms.id = i.milestone_id";
+const ISSUE_SELECT: &str = "SELECT i.id,i.number,i.title,i.description,i.status,i.priority,i.assignee,i.parent_id,i.estimate,i.due_date,i.created_at,i.updated_at,i.completed_at,i.started_at,i.canceled_at,p.number,i.project_id,pr.name,i.milestone_id,ms.name,i.ref,i.creator,i.deleted_at FROM issues i LEFT JOIN issues p ON p.id = i.parent_id LEFT JOIN projects pr ON pr.id = i.project_id LEFT JOIN milestones ms ON ms.id = i.milestone_id";
 
 /// The issues with these UUIDs, in this order, skipping any that are gone:
 /// one query for the rows and one for all their labels.
@@ -2350,6 +2358,7 @@ fn row_to_issue(r: &rusqlite::Row, key: &str) -> Result<Issue> {
         completed_at: r.get(12)?,
         started_at: r.get(13)?,
         canceled_at: r.get(14)?,
+        deleted_at: r.get(22)?,
     })
 }
 

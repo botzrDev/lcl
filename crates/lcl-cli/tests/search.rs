@@ -245,6 +245,8 @@ fn a_word_only_in_a_comment_finds_the_issue() {
     );
 }
 
+/// A trashed issue's comments stop matching, and match again when it is
+/// restored; the index is never changed by either.
 #[test]
 fn deleting_an_issue_removes_its_comment_hits() {
     let env = workspace();
@@ -253,31 +255,24 @@ fn deleting_an_issue_removes_its_comment_hits() {
     let b = issue(&env, "second", "");
     comment(&env, b, "another quokka");
     comment(&env, b, "unrelated");
-    // DREA-1's comment takes the highest rowid, so the next comment reuses
-    // it once it is deleted: a stale index entry would then point at that
-    // new comment.
     comment(&env, a, "quokka sighting");
     assert_eq!(found_ids(&search(&env, &["quokka"])), ["DREA-2", "DREA-1"]);
 
     env.lcl(&["issue", "delete", "1"]).assert_ok();
     assert_eq!(found_ids(&search(&env, &["quokka"])), ["DREA-2"]);
-    fts_integrity(&db, &["comments_fts"]);
-    comment(&env, b, "a fresh note");
-    let reused: i64 = rusqlite::Connection::open(&db)
-        .and_then(|c| {
-            c.query_row(
-                "SELECT rowid FROM comments WHERE body = 'a fresh note'",
-                [],
-                |r| r.get(0),
-            )
-        })
-        .expect("rowid");
-    assert_eq!(reused, 3, "the deleted comment's rowid should be reused");
     assert_eq!(
         found_ids(&search(&env, &["sighting"])),
         Vec::<String>::new(),
-        "a deleted comment's words still match"
+        "a trashed issue's comment still matches"
     );
+    assert_eq!(found_ids(&search(&env, &["first"])), Vec::<String>::new());
+    assert_eq!(search(&env, &["quokka"])["issue_total"], 1);
+    fts_integrity(&db, &["comments_fts", "issues_fts"]);
+
+    env.lcl(&["issue", "restore", "1"]).assert_ok();
+    assert_eq!(found_ids(&search(&env, &["quokka"])), ["DREA-2", "DREA-1"]);
+    assert_eq!(found_ids(&search(&env, &["sighting"])), ["DREA-1"]);
+    comment(&env, b, "a fresh note");
     assert_eq!(found_ids(&search(&env, &["fresh"])), ["DREA-2"]);
     fts_integrity(&db, &["comments_fts"]);
 
@@ -286,7 +281,7 @@ fn deleting_an_issue_removes_its_comment_hits() {
         &db,
         "UPDATE comments SET body = 'wombat now' WHERE body = 'another quokka';",
     );
-    assert_eq!(found_ids(&search(&env, &["quokka"])), Vec::<String>::new());
+    assert_eq!(found_ids(&search(&env, &["quokka"])), ["DREA-1"]);
     assert_eq!(found_ids(&search(&env, &["wombat"])), ["DREA-2"]);
     fts_integrity(&db, &FTS_TABLES);
 }

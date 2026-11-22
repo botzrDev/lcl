@@ -797,6 +797,67 @@ pub fn undo_v11_schema(after: &mut Dump, before: &Dump) {
     }
 }
 
+/// Undoes migration 12's schema changes on an upgraded dump, after checking
+/// them. `issues` gained `deleted_at`, and every issue an upgrade finds is
+/// live, so the column is NULL in every row: it is taken out of the rows,
+/// and `undo_v11_schema`, called next, puts the old CREATE statement back.
+/// The search trigger `issues_au` now fires only for an UPDATE OF title,
+/// description: its text is put back to the one in `before`, which fired on
+/// any UPDATE.
+pub fn undo_v12_schema(after: &mut Dump, before: &Dump) {
+    let named = |dump: &mut Dump, name: &str| -> usize {
+        dump.schema
+            .iter()
+            .position(|r| r["name"] == Value::Text(name.into()))
+            .unwrap_or_else(|| panic!("{name} missing"))
+    };
+    let issues = named(after, "issues");
+    let Value::Text(sql) = &after.schema[issues]["sql"] else {
+        panic!("issues has no sql");
+    };
+    assert!(
+        sql.contains(
+            "deleted_at INTEGER CHECK (deleted_at IS NULL OR typeof(deleted_at) = 'integer')"
+        ),
+        "{sql}"
+    );
+    for row in after.tables.get_mut("issues").expect("issues rows") {
+        assert_eq!(
+            row.remove("deleted_at"),
+            Some(Value::Null),
+            "an upgraded issue is live"
+        );
+    }
+    let trigger = named(after, "issues_au");
+    let Value::Text(sql) = &after.schema[trigger]["sql"] else {
+        panic!("issues_au has no sql");
+    };
+    let narrowed = "AFTER UPDATE OF title, description ON issues";
+    assert!(sql.contains(narrowed), "{sql}");
+    // Apart from that clause it does what the old one did: the same two
+    // statements. The old text itself comes from `before`, whose spacing
+    // is whatever the lcl that wrote the file used.
+    let body = |sql: &str| -> String {
+        let begin = sql.find("BEGIN").expect("a trigger body");
+        sql[begin..]
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let old = before
+        .schema
+        .iter()
+        .find(|r| r["name"] == Value::Text("issues_au".into()))
+        .expect("issues_au missing before");
+    let Value::Text(old_sql) = &old["sql"] else {
+        panic!("issues_au had no sql");
+    };
+    assert!(old_sql.contains("AFTER UPDATE ON issues"), "{old_sql}");
+    assert_eq!(body(sql), body(old_sql));
+    let old_sql = old_sql.clone();
+    after.schema[trigger].insert("sql".into(), Value::Text(old_sql));
+}
+
 /// The schema plus every row of every table, for before/after comparisons.
 #[derive(Debug, PartialEq)]
 pub struct Dump {

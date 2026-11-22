@@ -774,10 +774,11 @@ fn numbers_are_kept_and_the_counter_never_goes_down() {
     // never lowers it.
     let high = drm();
     high.create("gone");
-    high.lcl(&["issue", "delete", "1"]).assert_ok();
+    // Gone for good, as a purge leaves it: an issue in the trash would
+    // still make the workspace not empty.
     exec(
         &high.db_path(),
-        "UPDATE meta SET value = '3000' WHERE key = 'next_issue_number'",
+        "DELETE FROM issues; UPDATE meta SET value = '3000' WHERE key = 'next_issue_number'",
     );
     let out = import(&high, &file(&[1, 2, 3, 4], Some(5)));
     assert_eq!(

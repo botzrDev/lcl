@@ -41,7 +41,8 @@ These rules hold for every writer, including import:
 - A label exists before an issue can wear it. Deleting a label takes it off every issue.
 - A parent link or a blocks link that would close a cycle is refused. An issue is a duplicate of at most one issue, and `duplicate-of` sets its status to Duplicate. Removing that relation leaves the status as it is.
 - A milestone belongs to one project for good. An issue's milestone is in that issue's project.
-- Deleting an issue is refused while it has sub-issues. Deleting it removes its comments, its label links, its cycle memberships, and its relations.
+- Deleting an issue moves it to the trash: it sets `deleted_at` and changes nothing else. It is refused while the issue has sub-issues that are not in the trash. `issue restore` clears `deleted_at`, and is refused while the issue's parent is in the trash, so a live issue's parent is live.
+- An issue in the trash is in no list, search, count, child list or relation list, and does not block. Every command but `issue restore` refuses one by name. It keeps its number, its ref, and its place in its project, milestone and cycles. `lcl export` leaves it out. `crates/lcl-core/src/trash.rs` states these rules and `crates/lcl-cli/tests/trash.rs` tests them.
 - Deleting a project is refused while it has issues or milestones. Deleting a milestone is refused while an issue has it. Deleting a cycle is refused while an issue is in it. Deleting a doc is refused while another doc sits under it.
 
 `--cycle` puts an issue in that cycle and takes it out of every other. `--no-cycle` clears them. An imported file may name more than one cycle on an issue; the table allows it. A comment's author defaults to `LCL_AUTHOR`, then `USER`. Adding, editing, or deleting a comment does not change the issue's `updated_at`.
@@ -120,7 +121,7 @@ Text on a terminal shows a control character as its picture, so ESC is `␛`. A 
 
 ## What this version does not do
 
-A delete is immediate. There is no trash.
+An issue in the trash stays there: nothing purges it yet. Deleting a doc, a comment or a label is immediate.
 
 There is no install other than building this repository. The crates are unpublished. The name `lcl` on crates.io is someone else's crate. The binary in this repository is named `lcl`.
 

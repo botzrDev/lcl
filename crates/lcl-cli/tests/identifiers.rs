@@ -154,11 +154,15 @@ fn every_accepted_form_names_the_same_issue() {
         let n = env.create("doomed");
         let f = &forms(n, &uuid(&env, n))[i];
         let out = env.lcl(&["issue", "delete", f]).assert_ok().stdout.clone();
-        assert_eq!(out, format!("Deleted DREA-{n}\n"), "delete {f}");
+        assert_eq!(
+            out,
+            format!("Moved DREA-{n} to the trash; restore it with: lcl issue restore DREA-{n}\n"),
+            "delete {f}"
+        );
         let gone = env.lcl(&["issue", "show", &n.to_string()]);
         assert_eq!(gone.code, 1, "{gone:#?}");
         assert!(
-            gone.stderr.contains(&format!("issue DREA-{n} not found")),
+            gone.stderr.contains(&format!("DREA-{n} is in the trash")),
             "{gone:#?}"
         );
     }
@@ -336,7 +340,7 @@ fn issues_print_as_key_n() {
 
     assert_eq!(
         env.lcl(&["issue", "delete", "2"]).assert_ok().stdout,
-        "Deleted DREA-2\n"
+        "Moved DREA-2 to the trash; restore it with: lcl issue restore DREA-2\n"
     );
     let u = uuid(&env, 1);
     let deleted = env

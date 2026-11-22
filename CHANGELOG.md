@@ -10,7 +10,13 @@ All notable changes to lcl are recorded here. The format follows
 
 - `lcl backup PATH` copies the workspace's file to PATH, safely while other lcl commands read and write it. The copy is one committed state. It is written under a temporary name and gets its name only when complete, so PATH is never half a file. A PATH that exists is refused with exit 1. With `--json` it prints `path`, `bytes` and `schema_version`.
 
+- `lcl issue restore ID` brings an issue back from the trash, exactly as it was: its comments, labels, cycles and relations never left.
+- `lcl issue list --trashed` lists the trash, and only the trash.
+- An issue's JSON has `deleted_at`: when it went to the trash, or null.
+
 ### Upgrading
+
+- The first command that opens a workspace upgrades it to schema 12, which adds the trash. Every issue starts out of it.
 
 You no longer need to back up by hand before an upgrade.
 
@@ -26,6 +32,12 @@ You no longer need to back up by hand before an upgrade.
 
 ### Changed
 
+- `lcl issue delete` moves the issue to the trash and no longer removes it. It prints `Moved DEMO-3 to the trash; restore it with: lcl issue restore DEMO-3`. Its `--json` output is unchanged.
+- An issue in the trash is left out of `issue list`, `search`, the TUI, a parent's sub-issues, other issues' relations, and the counts of projects, milestones and cycles. It does not block: `--blocked` ignores it.
+- A command that names an issue in the trash exits 1, kind `conflict`, with `DEMO-3 is in the trash; restore it with: lcl issue restore DEMO-3`. 0.3.0-alpha.1 said `issue DEMO-3 not found`.
+- `issue delete` is refused only while the issue has sub-issues that are not in the trash. `issue restore` is refused while the issue's parent is in the trash.
+- An issue in the trash keeps its number and its ref, and stays in its project, milestone and cycles. `project delete`, `milestone delete` and `cycle delete` still count it, and say how many of the issues they count are in the trash.
+- `lcl export` leaves out issues in the trash, with their comments and relations. `lcl-export/1` is unchanged. `lcl import` refuses a workspace whose only issues are in the trash, as it refuses any workspace that isn't empty.
 - Every upgrade of a workspace prints one line on stderr, naming the snapshot. Before, an upgrade with nothing to repair printed nothing.
 - An upgrade of the registry prints one line on stderr too.
 

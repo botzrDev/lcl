@@ -489,6 +489,7 @@ mod tests {
             completed_at: None,
             started_at: None,
             canceled_at: None,
+            deleted_at: None,
         }
     }
 
@@ -1048,6 +1049,24 @@ mod tests {
             (snapshot.workspace.as_str(), snapshot.key.as_str(), rows),
             ("demo", "D", vec![("D-2", "two"), ("D-1", "one")])
         );
+
+        // An issue in the trash is not shown; restored, it is again.
+        let two = lcl_core::models::IssueRef::Number {
+            key: None,
+            number: 2,
+        };
+        store.delete_issue(&two).unwrap();
+        let ids = |store: &Store| -> Vec<String> {
+            load(store)
+                .unwrap()
+                .issues
+                .iter()
+                .map(|i| i.identifier.clone())
+                .collect()
+        };
+        assert_eq!(ids(&store), ["D-1"]);
+        store.restore_issue(&two).unwrap();
+        assert_eq!(ids(&store), ["D-2", "D-1"]);
     }
 
     /// Keys from a list, then an error if the loop asks for more.
