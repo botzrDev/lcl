@@ -108,6 +108,10 @@ pub enum LclError {
     /// `path`.
     #[error("can't write {path}: {reason}")]
     BackupFailed { path: String, reason: String },
+    /// A backup or snapshot that could not get a lock on `file` for as
+    /// long as a write waits. Nothing is left at `path`.
+    #[error("can't write {path}: {file} stayed locked by another lcl")]
+    BackupLocked { path: String, file: String },
     /// `lcl init` could not write `.lcl/.gitignore`. It made no workspace
     /// and registered none.
     #[error("can't write {path}, which keeps the workspace out of git: {reason}")]
@@ -443,7 +447,8 @@ impl LclError {
             | LclError::PathNotUtf8
             | LclError::BadRegistryVersion(_)
             | LclError::BadRegistryVersionNumber(_)
-            | LclError::ExportRoundTrip(_) => Other,
+            | LclError::ExportRoundTrip(_)
+            | LclError::BackupLocked { .. } => Other,
             LclError::Io(_)
             | LclError::BackupFailed { .. }
             | LclError::SnapshotFailed { .. }

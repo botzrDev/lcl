@@ -16,11 +16,16 @@
 //! 3. **Checked.** The temporary file holds every page, `PRAGMA
 //!    integrity_check` on it says `ok`, its connection is closed and its
 //!    bytes are synced.
-//! 4. **Placed.** `DEST` is that file, and the temporary name is gone.
+//! 4. **Placed.** `DEST` is that file, and the temporary name is gone. On
+//!    Unix the directory is synced too, so `DEST` is there after a power
+//!    loss.
 //!
 //! An error in 2 or 3 removes the temporary file and reports the path. A
 //! process killed in 2 or 3 leaves the temporary file behind (nothing can
-//! remove it), and still nothing at `DEST`.
+//! remove it), and still nothing at `DEST`. An error names `DEST` and the
+//! reason, never the temporary name. A lock not got in time is
+//! `LclError::BackupLocked`, kind other, as for a write; anything else is
+//! kind io.
 //!
 //! # Invariants
 //!
@@ -98,19 +103,35 @@ pub struct BackupReport {
 /// Copies the database `src` has open to a new file at `dest`. See the
 /// module documentation for what holds at every moment.
 pub(crate) fn copy_database(src: &Connection, dest: &Path) -> Result<BackupReport> {
-    copy_database_with(src, dest, |_| Ok(()), |_| Ok(()))
+    copy_database_with(src, dest, BUSY_TIMEOUT, |_| Ok(()), |_| Ok(()))
 }
 
 /// What can stop a copy before it is placed.
 type Stop = Box<dyn std::error::Error>;
 
-/// `copy_database`, with two hooks on the temporary file's connection:
-/// `prepare` runs before any page is copied (a test uses it to make the copy
-/// fail part-way), and `check` runs on the finished copy before it is
-/// placed, so a copy it refuses never gets its name.
+/// The copy waited `wait` for a lock and did not get it. Reported as
+/// `LclError::BackupLocked`, kind other, as a write that times out on the
+/// lock is, and not as a file that can't be written.
+#[derive(Debug)]
+struct StayedLocked;
+
+impl std::fmt::Display for StayedLocked {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the database stayed locked")
+    }
+}
+
+impl std::error::Error for StayedLocked {}
+
+/// `copy_database`, waiting up to `wait` for a lock, with two hooks on the
+/// temporary file's connection: `prepare` runs before any page is copied (a
+/// test uses it to make the copy fail part-way), and `check` runs on the
+/// finished copy before it is placed, so a copy it refuses never gets its
+/// name.
 fn copy_database_with(
     src: &Connection,
     dest: &Path,
+    wait: Duration,
     prepare: impl FnOnce(&Connection) -> rusqlite::Result<()>,
     check: impl FnOnce(&Connection) -> std::result::Result<(), Stop>,
 ) -> Result<BackupReport> {
@@ -138,8 +159,17 @@ fn copy_database_with(
         uuid::Uuid::new_v4().simple()
     ));
 
-    let written = fill(src, &tmp, prepare, check)
-        .map_err(|e| failed(e.to_string()))
+    let written = fill(src, &tmp, wait, prepare, check)
+        .map_err(|e| {
+            if e.is::<StayedLocked>() {
+                LclError::BackupLocked {
+                    path: shown.clone(),
+                    file: src.path().unwrap_or_default().to_string(),
+                }
+            } else {
+                failed(e.to_string())
+            }
+        })
         .and_then(|report| place(&tmp, dest, &shown).map(|()| report));
     if written.is_err() {
         remove_with_sidecars(&tmp);
@@ -151,9 +181,20 @@ fn copy_database_with(
 fn fill(
     src: &Connection,
     tmp: &Path,
+    wait: Duration,
     prepare: impl FnOnce(&Connection) -> rusqlite::Result<()>,
     check: impl FnOnce(&Connection) -> std::result::Result<(), Stop>,
 ) -> std::result::Result<BackupReport, Stop> {
+    // Made here, not by SQLite, so a directory that is missing or can't be
+    // written is reported by the OS, without the temporary name.
+    if let Err(e) = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(tmp)
+    {
+        let dir = tmp.parent().unwrap_or(Path::new("."));
+        return Err(format!("can't create a file in {}: {e}", dir.display()).into());
+    }
     let mut dst = Connection::open(tmp)?;
     // Before any page: SQLite made the file with the default mode, and it
     // is still empty.
@@ -165,8 +206,8 @@ fn fill(
         let backup = Backup::new(src, &mut dst)?;
         // All pages in one step: one read transaction on the source, so one
         // committed state. A step that can't get its lock copies nothing and
-        // is tried again, for as long as a write would wait.
-        let deadline = Instant::now() + BUSY_TIMEOUT;
+        // is tried again, for `wait`: as long as a write would wait.
+        let deadline = Instant::now() + wait;
         let mut pause = Duration::from_millis(5);
         loop {
             match backup.step(-1)? {
@@ -176,7 +217,7 @@ fn fill(
                     std::thread::sleep(pause);
                     pause = (pause * 2).min(Duration::from_millis(100));
                 }
-                _ => return Err("the workspace stayed locked by another lcl".into()),
+                _ => return Err(Box::new(StayedLocked)),
             }
         }
     }
@@ -215,12 +256,13 @@ fn place(tmp: &Path, dest: &Path, shown: &str) -> Result<()> {
         // scanner, say) is litter, not a failed copy.
         Ok(()) => {
             let _ = std::fs::remove_file(tmp);
+            sync_dir(dest);
             Ok(())
         }
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(e),
         // A filesystem without hard links: check, then rename.
         Err(_) if exists(dest) => Err(std::io::Error::from(std::io::ErrorKind::AlreadyExists)),
-        Err(_) => std::fs::rename(tmp, dest),
+        Err(_) => std::fs::rename(tmp, dest).inspect(|()| sync_dir(dest)),
     };
     placed.map_err(|e| {
         if e.kind() == std::io::ErrorKind::AlreadyExists {
@@ -232,6 +274,26 @@ fn place(tmp: &Path, dest: &Path, shown: &str) -> Result<()> {
             }
         }
     })
+}
+
+/// Syncs the directory `placed` is in, so the name it was just given is on
+/// disk too, and a copy reported as written is there after a power loss.
+/// Unix only: elsewhere a directory can't be opened to sync it. An error is
+/// ignored, as SQLite ignores one syncing a directory: some filesystems
+/// refuse it, and the copy is placed and whole either way.
+fn sync_dir(placed: &Path) {
+    if cfg!(unix)
+        && let Some(dir) = placed.parent()
+    {
+        let dir = if dir.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            dir
+        };
+        if let Ok(dir) = std::fs::File::open(dir) {
+            let _ = dir.sync_all();
+        }
+    }
 }
 
 /// Removes a temporary database and whatever SQLite may have put beside it.
@@ -291,6 +353,7 @@ pub(crate) fn snapshot_before_upgrade(
         let copied = copy_database_with(
             &src,
             &snapshot,
+            BUSY_TIMEOUT,
             |_| Ok(()),
             |copy| {
                 match version_of(copy)? {
@@ -305,6 +368,9 @@ pub(crate) fn snapshot_before_upgrade(
         match copied {
             Ok(_) => return Ok(snapshot),
             Err(LclError::BackupExists(_)) => continue,
+            // Kind other, as a write that times out on the lock is. The
+            // upgrade has not started.
+            Err(locked @ LclError::BackupLocked { .. }) => return Err(locked),
             Err(LclError::BackupFailed { reason, .. }) => return Err(failed(&snapshot, reason)),
             Err(other) => return Err(failed(&snapshot, other.to_string())),
         }
@@ -453,6 +519,7 @@ mod tests {
         let err = copy_database_with(
             &store.conn,
             &dest,
+            BUSY_TIMEOUT,
             |dst| dst.pragma_update(None, "max_page_count", 2),
             |_| Ok(()),
         )
@@ -471,9 +538,57 @@ mod tests {
         let dir = Dir::new();
         let out = Dir::new();
         let store = source(&dir, 5);
-        let dest = out.0.join("no-such-dir").join("copy.sqlite");
+        let missing = out.0.join("no-such-dir");
+        let dest = missing.join("copy.sqlite");
         let err = store.backup(&dest).unwrap_err();
-        assert!(matches!(err, LclError::BackupFailed { .. }), "{err:?}");
+        let LclError::BackupFailed { path, reason } = &err else {
+            panic!("{err:?}");
+        };
+        assert_eq!(path, &dest.display().to_string());
+        // The OS's reason, naming the directory, not the temporary file.
+        assert!(
+            reason.starts_with(&format!("can't create a file in {}: ", missing.display()))
+                && !reason.contains(".copy.sqlite."),
+            "{reason}"
+        );
+        assert_eq!(err.kind(), crate::error::ErrorKind::Io);
+        assert_eq!(out.names(), BTreeSet::new());
+    }
+
+    /// A copy that can't get a lock in time is kind other, as a write that
+    /// times out on the lock is, and leaves nothing. Here the temporary
+    /// file's own lock is held, which is the lock the copy waits on.
+    #[test]
+    fn a_copy_that_stays_locked_is_kind_other() {
+        let dir = Dir::new();
+        let out = Dir::new();
+        let store = source(&dir, 5);
+        let dest = out.0.join("copy.sqlite");
+        let mut holder = None;
+        let err = copy_database_with(
+            &store.conn,
+            &dest,
+            Duration::from_millis(50),
+            |dst| {
+                let other = Connection::open(dst.path().expect("a file"))?;
+                other.execute_batch("BEGIN EXCLUSIVE")?;
+                holder = Some(other);
+                Ok(())
+            },
+            |_| Ok(()),
+        )
+        .unwrap_err();
+        drop(holder);
+        assert!(matches!(err, LclError::BackupLocked { .. }), "{err:?}");
+        assert_eq!(err.kind(), crate::error::ErrorKind::Other);
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "can't write {}: {} stayed locked by another lcl",
+                dest.display(),
+                dir.0.join("src.sqlite").display()
+            )
+        );
         assert_eq!(out.names(), BTreeSet::new());
     }
 
@@ -486,7 +601,7 @@ mod tests {
         let store = source(&dir, 50);
         let dest = out.0.join("copy.sqlite");
         let tmp = out.0.join(".copy.sqlite.lcl-backup-test.tmp");
-        fill(&store.conn, &tmp, |_| Ok(()), |_| Ok(())).unwrap();
+        fill(&store.conn, &tmp, BUSY_TIMEOUT, |_| Ok(()), |_| Ok(())).unwrap();
         assert!(!dest.exists());
         assert_eq!(
             out.names(),
@@ -652,7 +767,7 @@ mod tests {
         let out = Dir::new();
         let store = source(&dir, 5);
         let tmp = out.0.join(".copy.tmp");
-        fill(&store.conn, &tmp, |_| Ok(()), |_| Ok(())).unwrap();
+        fill(&store.conn, &tmp, BUSY_TIMEOUT, |_| Ok(()), |_| Ok(())).unwrap();
         let dest = out.0.join("copy.sqlite");
         place(&tmp, &dest, "copy.sqlite").unwrap();
         assert_eq!(rows(&dest), 5);

@@ -98,7 +98,7 @@ An issue matches when every word is in its title and description together, or ev
 
 `lcl backup PATH` copies the workspace's file with SQLite's online backup API, through the open connection, so it is safe while other lcl processes write. It never uses `VACUUM INTO`: the search indexes name rows by rowid, and a vacuum may renumber them.
 
-The pages are read in one read transaction, so the copy is one committed state. It is written to a temporary file in PATH's directory, checked with `PRAGMA integrity_check`, synced, and then hard-linked to PATH. PATH is a complete workspace or is not there. A PATH that exists is never replaced. A backup that is killed can leave its temporary file, `.NAME.lcl-backup-PID-RANDOM.tmp`, beside PATH. `crates/lcl-core/src/backup.rs` states these rules and tests them.
+The pages are read in one read transaction, so the copy is one committed state. It is written to a temporary file in PATH's directory, checked with `PRAGMA integrity_check`, synced, and then hard-linked to PATH. On Unix the directory is synced after that, so a copy reported as written is still there after a power loss. PATH is a complete workspace or is not there. A PATH that exists is never replaced. A backup that is killed can leave its temporary file, `.NAME.lcl-backup-PID-RANDOM.tmp`, beside PATH. A backup that can't get a lock in 30 seconds, as a write can't, is kind `other`; one that can't write the file is kind `io`. `crates/lcl-core/src/backup.rs` states these rules and tests them.
 
 ## The snapshot before an upgrade
 

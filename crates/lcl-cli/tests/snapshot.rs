@@ -369,3 +369,59 @@ fn the_registry_s_snapshot_is_never_overwritten_and_taken_once() {
         .count();
     assert_eq!(announced, 1, "{outs:#?}");
 }
+
+/// No snapshot, no upgrade, for the registry too, and on every OS: with
+/// every name a snapshot of it may take already taken, a command that opens
+/// it exits 1, kind io, and leaves it as it was. Once a name is free, the
+/// same command takes the snapshot there and upgrades.
+#[test]
+fn an_old_registry_is_not_upgraded_without_a_snapshot() {
+    let env = Env::new();
+    let index = env.home.path().join(".lcl").join("index.sqlite");
+    std::fs::create_dir_all(index.parent().unwrap()).unwrap();
+    std::fs::copy(V0_INDEX_FIXTURE, &index).unwrap();
+    let first = snapshot_path(&index, 0);
+    let taken: Vec<PathBuf> = std::iter::once(first.clone())
+        .chain((2..=100).map(|n| {
+            let mut name = first.clone().into_os_string();
+            name.push(format!(".{n}"));
+            PathBuf::from(name)
+        }))
+        .collect();
+    for name in &taken {
+        std::fs::write(name, b"taken").unwrap();
+    }
+    let before = dump(&index);
+
+    let out = env.lcl(&["--json", "workspace", "list"]);
+    assert_eq!((out.code, out.stdout.as_str()), (1, ""), "{out:#?}");
+    let error: serde_json::Value =
+        serde_json::from_str(out.stderr.lines().last().unwrap()).unwrap();
+    assert_eq!(error["error"]["kind"], "io", "{out:#?}");
+    let message = error["error"]["message"].as_str().unwrap();
+    assert!(
+        message.ends_with(&format!(
+            "can't upgrade {}: the copy of it as it is, {}, could not be written \
+             (100 snapshots of this version are already there); nothing was changed",
+            index.display(),
+            first.display()
+        )),
+        "{message}"
+    );
+    assert_eq!(registry_version(&index), 0);
+    assert!(
+        dump(&index) == before,
+        "a refused upgrade changed the registry"
+    );
+    for name in &taken {
+        assert_eq!(std::fs::read(name).unwrap(), b"taken", "{}", name.display());
+    }
+    assert_eq!(snapshots(&env).len(), 100);
+
+    let last = taken.last().unwrap();
+    std::fs::remove_file(last).unwrap();
+    env.lcl(&["workspace", "list", "--json"]).assert_ok();
+    assert!(registry_version(&index) > 0);
+    assert_eq!(registry_version(last), 0);
+    assert!(dump(last) == fixture_dump(V0_INDEX_FIXTURE));
+}
