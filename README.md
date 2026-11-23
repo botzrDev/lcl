@@ -30,6 +30,17 @@ That puts `lcl` in `~/.cargo/bin`. `lcl --version` prints the version.
 
 `lcl help`, and `--help` on any command, list every flag.
 
+## For agents
+
+The skill an agent reads to use lcl is [`skill/SKILL.md`](skill/SKILL.md). It describes the binary built from the same commit, and names its version: `lcl --version` prints the version the skill states. A test fails when they differ, and when an example in the skill names a command or flag the binary lacks.
+
+To install it for Claude Code, copy the directory where Claude Code looks for skills:
+
+    mkdir -p ~/.claude/skills
+    cp -r skill ~/.claude/skills/lcl
+
+Take the skill from the release whose binary you run. Another agent can be given `SKILL.md` as instructions as it is.
+
 ## Alpha testing
 
 This is an alpha. Try to break it: odd values, huge files, many commands at once, killed processes, full disks, hand-edited files.
