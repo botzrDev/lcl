@@ -377,7 +377,6 @@ impl Store {
         Ok(out)
     }
 
-    // ----- meta -----
     /// Sets every `(key, value)` pair in one transaction.
     pub fn set_meta(&mut self, entries: &[(&str, &str)]) -> Result<()> {
         self.write(|tx| {
@@ -391,7 +390,6 @@ impl Store {
         read_meta(&self.conn, key)
     }
 
-    // ----- labels -----
     /// Adds the label. A name that exists, ignoring case, is refused: names
     /// are how labels are given on the command line.
     pub fn create_label(&mut self, l: &Label) -> Result<()> {
@@ -462,7 +460,6 @@ impl Store {
         })
     }
 
-    // ----- issues -----
     /// Inserts `issue` and returns it as stored. The id, the number and the
     /// timestamps are minted here. A parent is resolved inside this
     /// transaction, and must be an existing issue.
@@ -739,7 +736,6 @@ impl Store {
         })
     }
 
-    // ----- relations -----
     /// Records `a <kind> b` in its stored form (see migration V7). Returns the
     /// relation as typed, and false when it was already there (a no-op).
     /// Refused, inside the transaction: relating an issue to itself, a
@@ -827,7 +823,6 @@ impl Store {
         })
     }
 
-    // ----- projects -----
     /// Creates a project. Its name must be free, ignoring ASCII case.
     pub fn create_project(
         &mut self,
@@ -932,7 +927,6 @@ impl Store {
         })
     }
 
-    // ----- milestones -----
     /// Creates a milestone in the project `project` names. Its name must be
     /// free in that project, ignoring ASCII case.
     pub fn create_milestone(
@@ -1032,7 +1026,6 @@ impl Store {
         })
     }
 
-    // ----- comments -----
     /// Resolves the issue and adds the comment in one transaction, so the
     /// issue can't be deleted in between.
     pub fn add_comment(
@@ -1110,7 +1103,6 @@ impl Store {
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
-    // ----- docs -----
     /// Adds the doc. A parent must be an existing doc (see `check_doc_parent`).
     pub fn create_doc(&mut self, mut d: Doc) -> Result<Doc> {
         if d.id.is_empty() {
@@ -1196,7 +1188,6 @@ impl Store {
         })
     }
 
-    // ----- cycles -----
     pub fn create_cycle(&mut self, mut c: Cycle) -> Result<Cycle> {
         if c.id.is_empty() {
             c.id = uuid::Uuid::new_v4().to_string();
@@ -1284,7 +1275,6 @@ impl Store {
         })
     }
 
-    // ----- search -----
     /// Issues and docs matching `q`, at most `limit` of each.
     ///
     /// An issue matches when every word is in its title and description

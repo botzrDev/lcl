@@ -1402,8 +1402,6 @@ impl<'a> Found<'a> for Option<&'a str> {
     }
 }
 
-// ---------------------------------------------------------------- X1: emptiness, kind by kind
-
 /// The not-empty refusal for a workspace holding `has`.
 fn not_empty(has: &str) -> String {
     format!(
@@ -1468,8 +1466,6 @@ fn the_not_empty_message_names_all_eight_kinds() {
     assert_eq!(trio(&out), (1, "", want.as_str()));
     assert!(dump(&env.db_path()) == before);
 }
-
-// ---------------------------------------------------------------- X2: defaults
 
 fn clock() -> i64 {
     std::time::SystemTime::now()
@@ -1551,8 +1547,6 @@ fn left_out_times_default_to_created_at_then_the_import_time() {
     }
 }
 
-// ---------------------------------------------------------------- X3: the header
-
 #[test]
 fn the_header_sets_description_and_created_at_only_when_it_has_them() {
     let show = |env: &Env| {
@@ -1581,8 +1575,6 @@ fn the_header_sets_description_and_created_at_only_when_it_has_them() {
         "a header without them keeps the workspace's own"
     );
 }
-
-// ---------------------------------------------------------------- X4: a byte order mark
 
 #[test]
 fn a_byte_order_mark_is_named_as_the_problem() {

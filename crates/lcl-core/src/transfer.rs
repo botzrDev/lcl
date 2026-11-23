@@ -86,8 +86,6 @@ pub struct ImportSummary {
     pub key: String,
 }
 
-// ---------------------------------------------------------------- records
-
 /// The three relation rows lcl stores. `blocks`: from blocks to.
 /// `duplicate`: from is a duplicate of to. `related` goes both ways.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -418,8 +416,6 @@ impl File {
         }
     }
 }
-
-// ---------------------------------------------------------------- reading a line
 
 fn bad(line: usize, what: impl Into<String>, msg: impl Into<String>) -> LclError {
     LclError::ImportLine {
@@ -1037,8 +1033,6 @@ fn read_doc(r: &mut Rec, now: i64) -> Result<DocRec> {
     })
 }
 
-// ---------------------------------------------------------------- references
-
 /// Why a relation can't be added to the ones before it.
 #[derive(Debug)]
 enum EdgeError {
@@ -1576,8 +1570,6 @@ fn check_references(file: &File, comment_lines: &[usize]) -> Result<()> {
     Ok(())
 }
 
-// ---------------------------------------------------------------- import
-
 impl Store {
     /// Imports a whole "lcl-export/1" file into this workspace, which must be
     /// empty and have the file's key (ignoring ASCII case). The file is read
@@ -1846,8 +1838,6 @@ fn insert(conn: &Connection, file: &File, at: i64) -> Result<i64> {
     Ok(next)
 }
 
-// ---------------------------------------------------------------- export
-
 impl Store {
     /// The workspace as an "lcl-export/1" file, read in one snapshot. A
     /// stored value import would refuse (one a hand edit or an older lcl
@@ -1920,7 +1910,6 @@ fn export_in(conn: &Connection) -> Result<(String, Counts)> {
         },
     );
 
-    // ----- labels
     let mut label_names: HashMap<String, String> = HashMap::new();
     {
         let mut stmt = conn
@@ -1953,7 +1942,6 @@ fn export_in(conn: &Connection) -> Result<(String, Counts)> {
         }
     }
 
-    // ----- projects
     let mut project_names: HashMap<String, String> = HashMap::new();
     {
         let mut stmt = conn.prepare("SELECT id, name, description, status, target_date, created_at, updated_at FROM projects ORDER BY name COLLATE NOCASE, name, id")?;
@@ -2006,7 +1994,6 @@ fn export_in(conn: &Connection) -> Result<(String, Counts)> {
         }
     }
 
-    // ----- milestones
     let mut milestone_names: HashMap<String, (String, String)> = HashMap::new();
     {
         let mut stmt = conn.prepare(
@@ -2069,7 +2056,6 @@ fn export_in(conn: &Connection) -> Result<(String, Counts)> {
         }
     }
 
-    // ----- cycles
     let mut cycle_ids: HashSet<String> = HashSet::new();
     {
         let mut stmt = conn.prepare(
@@ -2372,7 +2358,6 @@ fn export_in(conn: &Connection) -> Result<(String, Counts)> {
         );
     }
 
-    // ----- comments
     {
         let mut stmt = conn.prepare("SELECT i.number, c.body, c.author, c.created_at, c.id, c.issue_id FROM comments c LEFT JOIN issues i ON i.id = c.issue_id ORDER BY i.number, c.created_at, c.rowid")?;
         let rows = stmt.query_map([], |r| {
@@ -2494,7 +2479,6 @@ fn export_in(conn: &Connection) -> Result<(String, Counts)> {
         }
     }
 
-    // ----- docs
     {
         let mut stmt = conn.prepare("SELECT id, title, content, parent_id, created_at, updated_at FROM docs ORDER BY created_at, id")?;
         let rows = stmt.query_map([], |r| {
