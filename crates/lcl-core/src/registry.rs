@@ -660,8 +660,9 @@ fn v1(tx: &Transaction<'_>) -> Result<()> {
 
 /// v1 -> v2: each workspace's kind, one row per file, and a unique path.
 ///
-/// - A row is global when its recorded path ends in
-///   `/.lcl/projects/<slug>.sqlite`, else cwd.
+/// - A row is global when its recorded path ends in the components
+///   `.lcl/projects/<slug>.sqlite`, else cwd. Components, so a path
+///   recorded on Windows, with `\`, is matched there too.
 /// - Rows sharing one path (an `init` under another name used to add one)
 ///   become one: the row whose slug is the slug of the name stored in that
 ///   file, else the last row inserted. The name is read without opening
@@ -679,7 +680,10 @@ fn v2(tx: &Transaction<'_>) -> Result<()> {
     };
     let mut by_path: Vec<(&str, Vec<(i64, &str)>)> = vec![];
     for (rowid, slug, path) in &rows {
-        if path.ends_with(&format!("/.lcl/projects/{slug}.sqlite")) {
+        let global = Path::new(".lcl")
+            .join("projects")
+            .join(format!("{slug}.sqlite"));
+        if Path::new(path).ends_with(&global) {
             tx.execute(
                 "UPDATE workspaces SET kind = 'global' WHERE rowid = ?1",
                 params![rowid],

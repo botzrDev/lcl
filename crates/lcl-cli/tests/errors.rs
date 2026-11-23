@@ -43,6 +43,9 @@ fn errors_after_parsing_are_one_json_line_under_json() {
     env.lcl(&["label", "create", "bug"]).assert_ok();
     let db = env.db_path();
     let missing = env.cwd.path().join("no").join("such").join("x.jsonl");
+    // The OS's text for it: Windows says "The system cannot find the path
+    // specified. (os error 3)".
+    let no_dir = std::fs::File::create(&missing).expect_err("no such directory");
     let missing = missing.display().to_string();
     let cases: Vec<(Vec<&str>, i32, &str, String)> = vec![
         (
@@ -85,9 +88,7 @@ fn errors_after_parsing_are_one_json_line_under_json() {
             vec!["export", "--output", &missing],
             1,
             "io",
-            format!(
-                "can't write {missing}\n\nCaused by:\n    No such file or directory (os error 2)"
-            ),
+            format!("can't write {missing}\n\nCaused by:\n    {no_dir}"),
         ),
     ];
     for (args, code, kind, message) in &cases {

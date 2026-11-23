@@ -151,11 +151,12 @@ fn init_takes_its_name_from_the_directory() {
 }
 
 /// A directory name is trimmed, as a typed name is: from " padded " the
-/// workspace is "padded", slug padded.
+/// workspace is "padded", slug padded. Windows drops a trailing space from
+/// a file name, so there the directory is " padded".
 #[test]
 fn init_trims_the_directory_s_name() {
     let env = Env::new();
-    let dir = subdir(&env, " padded ");
+    let dir = subdir(&env, if cfg!(windows) { " padded" } else { " padded " });
     let made = lcl_in(&env, &dir, &["--json", "init", "--key", "PD"]);
     made.assert_ok();
     let db = db_in(&dir);

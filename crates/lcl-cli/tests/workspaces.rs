@@ -70,6 +70,16 @@ fn repoint(env: &Env, idx: &Path) -> String {
     home
 }
 
+/// The file of global workspace `slug` under `home`, as lcl prints it.
+fn global_file(home: &str, slug: &str) -> String {
+    Path::new(home)
+        .join(".lcl")
+        .join("projects")
+        .join(format!("{slug}.sqlite"))
+        .display()
+        .to_string()
+}
+
 /// Copies `fixture` to `rel` under this env's HOME.
 fn install(env: &Env, fixture: &str, rel: &str) -> PathBuf {
     let dst = env.home.path().join(rel);
@@ -145,15 +155,17 @@ fn upgrades_a_0_1_0_index() {
     assert_eq!(
         list,
         json!([
-            {"name": "R&D", "slug": "r-d", "kind": "global", "path": format!("{home}/.lcl/projects/r-d.sqlite"), "created_at": V0_CREATED, "missing": true},
-            {"name": "alpha", "slug": "alpha", "kind": "global", "path": format!("{home}/.lcl/projects/alpha.sqlite"), "created_at": V0_CREATED, "missing": false},
+            {"name": "R&D", "slug": "r-d", "kind": "global", "path": global_file(&home, "r-d"), "created_at": V0_CREATED, "missing": true},
+            {"name": "alpha", "slug": "alpha", "kind": "global", "path": global_file(&home, "alpha"), "created_at": V0_CREATED, "missing": false},
         ])
     );
     let human = env.lcl(&["workspace", "list"]).assert_ok().stdout.clone();
     assert_eq!(
         human,
         format!(
-            "R&D\tr-d\t{home}/.lcl/projects/r-d.sqlite\t(missing)\nalpha\talpha\t{home}/.lcl/projects/alpha.sqlite\n"
+            "R&D\tr-d\t{}\t(missing)\nalpha\talpha\t{}\n",
+            global_file(&home, "r-d"),
+            global_file(&home, "alpha")
         )
     );
 
@@ -214,10 +226,7 @@ fn opens_an_index_a_dev_build_migrated() {
         (&list[0]["name"], &list[0]["slug"], &list[0]["missing"]),
         (&json!("beta"), &json!("beta"), &json!(true))
     );
-    assert_eq!(
-        list[0]["path"],
-        json!(format!("{home}/.lcl/projects/beta.sqlite"))
-    );
+    assert_eq!(list[0]["path"], json!(global_file(&home, "beta")));
 
     workspace(&env, "gamma", "GAM");
     assert_eq!(

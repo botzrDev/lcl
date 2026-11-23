@@ -33,6 +33,9 @@ macro_rules! outln {
 #[derive(Parser)]
 #[command(
     name = "lcl",
+    // Usage and errors say `lcl`, not argv[0]'s name, which on Windows is
+    // `lcl.exe`: the text, `--json`'s too, is the same on every platform.
+    bin_name = "lcl",
     version,
     about = "Local Linear-like tracker (one SQLite database per workspace)",
     after_help = "Exit status: 0 success; 1 the command failed (not found, a conflict with what is stored, a newer schema, an I/O error); 2 the command line is wrong (a bad flag, value or combination).\nWith --json, an error is one line on stderr: {\"error\":{\"kind\":\"usage|not_found|conflict|schema|io|other\",\"message\":\"...\"}}"

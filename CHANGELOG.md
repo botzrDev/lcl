@@ -26,6 +26,8 @@ Found by rough handling before the alpha.
 - `lcl tui` without a terminal says so. 0.2.0 said `No such device or address (os error 6)`.
 - The TUI lays out only the rows on screen. With 20,000 issues each key took 45 ms; it takes under 1 ms.
 - Creating an issue after number 9223372036854775807 says the workspace has run out of numbers. 0.2.0 printed a SQLite type error.
+- On Windows, usage and error text, `--json`'s too, name the program `lcl`. 0.2.0 said `lcl.exe`.
+- On Windows, upgrading a registry from before 0.2.0 keeps a global workspace global. 0.2.0 took its path, recorded with `\`, for a cwd workspace's.
 
 ## [0.2.0] - 2026-11-12
 
