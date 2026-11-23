@@ -39,11 +39,15 @@ section=$(awk -v head="## [$version]" '
 [[ -n "${section//[[:space:]]/}" ]] || fail "the CHANGELOG.md section for $version is empty"
 
 {
-  echo "The agent skill for this version is attached as \`SKILL.md\`. In the repository it is \`skill/SKILL.md\`; install it as the README says."
+  echo "The agent skill for this version is attached as \`SKILL.md\`; in the repository it is \`skill/SKILL.md\`. To install it for Claude Code, from where you downloaded it:"
   echo
-  echo "Every archive is listed in \`SHA256SUMS\`. Check one with \`sha256sum --check --ignore-missing SHA256SUMS\`."
+  echo '```'
+  echo 'mkdir -p ~/.claude/skills/lcl && cp SKILL.md ~/.claude/skills/lcl/'
+  echo '```'
   echo
-  echo "The changes, from CHANGELOG.md. Changes to the command line and to the \`--json\` contract are among them."
+  echo "Every file is listed in \`SHA256SUMS\`. Check a download with \`sha256sum --check --ignore-missing SHA256SUMS\`."
+  echo
+  echo "The changes, from CHANGELOG.md. Every change to the command line and to the \`--json\` contract is listed; \`docs/json-contract.md\` has the shapes."
   echo
   printf '%s\n' "$section"
 } >"$notes"

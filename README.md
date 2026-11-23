@@ -39,7 +39,11 @@ To install it for Claude Code, copy the directory where Claude Code looks for sk
     mkdir -p ~/.claude/skills
     cp -r skill ~/.claude/skills/lcl
 
-Take the skill from the release whose binary you run. Another agent can be given `SKILL.md` as instructions as it is.
+Take the skill from the release whose binary you run. Each release has it as `SKILL.md`; from the directory you downloaded it to:
+
+    mkdir -p ~/.claude/skills/lcl && cp SKILL.md ~/.claude/skills/lcl/
+
+Another agent can be given `SKILL.md` as instructions as it is.
 
 ## Alpha testing
 
