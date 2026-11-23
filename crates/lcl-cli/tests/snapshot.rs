@@ -18,7 +18,6 @@ use common::{
     upgrade_line, user_version,
 };
 use lcl_core::SCHEMA_VERSION;
-use serde_json::Value;
 use std::path::{Path, PathBuf};
 
 /// What a fixture holds, read from a copy so the fixture itself is never
@@ -217,7 +216,8 @@ fn without_a_snapshot_there_is_no_upgrade() {
 
     assert_eq!(out.code, 1, "{out:#?}");
     assert_eq!(out.stdout, "");
-    let error: Value = serde_json::from_str(out.stderr.lines().last().unwrap()).unwrap();
+    let error: serde_json::Value =
+        serde_json::from_str(out.stderr.lines().last().unwrap()).unwrap();
     assert_eq!(error["error"]["kind"], "io", "{out:#?}");
     let message = error["error"]["message"].as_str().unwrap();
     assert!(
