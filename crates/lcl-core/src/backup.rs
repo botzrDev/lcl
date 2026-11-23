@@ -556,29 +556,30 @@ mod tests {
     }
 
     /// A copy that can't get a lock in time is kind other, as a write that
-    /// times out on the lock is, and leaves nothing. Here the temporary
-    /// file's own lock is held, which is the lock the copy waits on.
+    /// times out on the lock is, and leaves nothing. The source here is a
+    /// rollback-journal file another connection holds an exclusive lock on,
+    /// which keeps every reader out.
     #[test]
     fn a_copy_that_stays_locked_is_kind_other() {
         let dir = Dir::new();
         let out = Dir::new();
-        let store = source(&dir, 5);
+        let file = dir.0.join("rollback.sqlite");
+        let src = Connection::open(&file).unwrap();
+        src.execute_batch("CREATE TABLE t (body TEXT); INSERT INTO t VALUES ('row')")
+            .unwrap();
+        src.busy_timeout(Duration::ZERO).unwrap();
+        let holder = Connection::open(&file).unwrap();
+        holder.execute_batch("BEGIN EXCLUSIVE").unwrap();
         let dest = out.0.join("copy.sqlite");
-        let mut holder = None;
         let err = copy_database_with(
-            &store.conn,
+            &src,
             &dest,
             Duration::from_millis(50),
-            |dst| {
-                let other = Connection::open(dst.path().expect("a file"))?;
-                other.execute_batch("BEGIN EXCLUSIVE")?;
-                holder = Some(other);
-                Ok(())
-            },
+            |_| Ok(()),
             |_| Ok(()),
         )
         .unwrap_err();
-        drop(holder);
+        holder.execute_batch("COMMIT").unwrap();
         assert!(matches!(err, LclError::BackupLocked { .. }), "{err:?}");
         assert_eq!(err.kind(), crate::error::ErrorKind::Other);
         assert_eq!(
@@ -586,7 +587,7 @@ mod tests {
             format!(
                 "can't write {}: {} stayed locked by another lcl",
                 dest.display(),
-                dir.0.join("src.sqlite").display()
+                src.path().unwrap()
             )
         );
         assert_eq!(out.names(), BTreeSet::new());
