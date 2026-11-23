@@ -1,0 +1,192 @@
+name: release
+
+# A tag vX.Y.Z (or vX.Y.Z-pre) builds lcl for five targets and publishes a
+# GitHub release with one archive per target, SHA256SUMS and the agent
+# skill. Anything else is a dry run: the same checks and builds, the
+# release's files uploaded as an artifact, and nothing published. A dry
+# run comes from running the workflow by hand (gh workflow run release.yml
+# -f tag=vX.Y.Z), and from any branch push that changes the release files.
+
+on:
+  push:
+    tags: ["v*"]
+    branches: ["**"]
+    # Not checked for tags: a tag push always runs.
+    paths:
+      - .github/workflows/release.yml
+      - .github/scripts/release-check.sh
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "The tag to check, as v0.3.0. Empty: v and the workspace version."
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    outputs:
+      tag: ${{ steps.check.outputs.tag }}
+      version: ${{ steps.check.outputs.version }}
+      prerelease: ${{ steps.check.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: check
+        shell: bash
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            tag="$GITHUB_REF_NAME"
+          elif [[ -n "$INPUT_TAG" ]]; then
+            tag="$INPUT_TAG"
+          else
+            tag="v$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')"
+          fi
+          echo "tag=$tag" >>"$GITHUB_OUTPUT"
+          .github/scripts/release-check.sh "$tag" notes.md >>"$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: notes
+          path: notes.md
+
+  build:
+    needs: check
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-24.04
+            container: debian:11
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+            container: debian:11
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-apple-darwin
+            os: macos-latest
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+    runs-on: ${{ matrix.os }}
+    # Linux builds run in Debian 11, so the binary needs glibc 2.31 or
+    # later, not the runner's.
+    container: ${{ matrix.container }}
+    env:
+      TARGET: ${{ matrix.target }}
+      VERSION: ${{ needs.check.outputs.version }}
+    steps:
+      - name: Install the C compiler (Linux)
+        if: matrix.container
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates curl gcc libc6-dev git
+      - uses: actions/checkout@v4
+      # The version rust-toolchain.toml pins, with the target added.
+      - uses: dtolnay/rust-toolchain@1.98
+        with:
+          targets: ${{ matrix.target }}
+      - name: Build
+        shell: bash
+        env:
+          # Windows: link the C runtime in, so lcl.exe runs without the
+          # Visual C++ redistributable.
+          RUSTFLAGS: ${{ contains(matrix.target, 'windows') && '-C target-feature=+crt-static' || '' }}
+        run: cargo build --release --locked --target "$TARGET" -p lcl
+      - name: Check the binary's version
+        shell: bash
+        run: |
+          bin="target/$TARGET/release/lcl"
+          [[ "$TARGET" == *windows* ]] && bin="$bin.exe"
+          # x86_64 macOS is built on an arm64 runner: run it under Rosetta
+          # when the runner has it, else say so and go on.
+          if [[ "$TARGET" == x86_64-apple-darwin ]] && ! arch -x86_64 /usr/bin/true 2>/dev/null; then
+            echo "::notice::$TARGET was not run: this runner can't execute x86_64 code"
+            exit 0
+          fi
+          got=$("$bin" --version)
+          [[ "$got" == "lcl $VERSION" ]] || { echo "::error::$bin --version printed '$got', not 'lcl $VERSION'"; exit 1; }
+          echo "$got"
+      - name: Package
+        shell: bash
+        run: |
+          name="lcl-$VERSION-$TARGET"
+          mkdir -p "dist/$name"
+          cp LICENSE README.md "dist/$name/"
+          if [[ "$TARGET" == *windows* ]]; then
+            cp "target/$TARGET/release/lcl.exe" "dist/$name/"
+            (cd dist && 7z a -tzip "$name.zip" "$name" >/dev/null)
+          else
+            cp "target/$TARGET/release/lcl" "dist/$name/"
+            tar -C dist -czf "dist/$name.tar.gz" "$name"
+          fi
+          rm -r "dist/$name"
+          ls -l dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: archive-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    needs: [check, build]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ needs.check.outputs.tag }}
+      VERSION: ${{ needs.check.outputs.version }}
+      PRERELEASE: ${{ needs.check.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: archive-*
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: notes
+      - name: Checksums and skill
+        shell: bash
+        run: |
+          count=$(find dist -maxdepth 1 \( -name '*.tar.gz' -o -name '*.zip' \) | wc -l)
+          [[ "$count" -eq 5 ]] || { echo "::error::expected 5 archives, found $count"; exit 1; }
+          cp skill/SKILL.md dist/SKILL.md
+          (cd dist && sha256sum -- * >SHA256SUMS && cat SHA256SUMS)
+      - name: "Dry run: upload what would be released"
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-dry-run-${{ needs.check.outputs.tag }}
+          path: |
+            dist/*
+            notes.md
+      - name: "Dry run: show the notes"
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        shell: bash
+        run: |
+          {
+            echo "## Dry run of $TAG: nothing was published"
+            echo
+            echo '```'
+            cat dist/SHA256SUMS
+            echo '```'
+            echo
+            cat notes.md
+          } >>"$GITHUB_STEP_SUMMARY"
+      - name: Publish the release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          flags=(--verify-tag --title "lcl $VERSION" --notes-file notes.md)
+          [[ "$PRERELEASE" == true ]] && flags+=(--prerelease)
+          gh release create "$TAG" "${flags[@]}" dist/*

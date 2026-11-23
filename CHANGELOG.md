@@ -16,6 +16,7 @@ All notable changes to lcl are recorded here. The format follows
 - An issue's JSON has `deleted_at`: when it went to the trash, or null.
 - Docs, comments and labels have the same trash. `lcl doc restore ID`, `lcl comment restore ID` and `lcl label restore NAME` bring one back as it was. `lcl doc purge`, `lcl comment purge` and `lcl label purge` remove one in the trash for good, or every one with `--all`. `lcl doc list --trashed`, `lcl label list --trashed` and `lcl issue comments ID --trashed` list what is there. Their JSON has `deleted_at` too.
 
+- Pushing a version tag publishes a GitHub release with `lcl` for `x86_64` and `aarch64` Linux, `aarch64` and `x86_64` macOS, and `x86_64` Windows, with `SHA256SUMS` and the agent skill. The Linux binaries need glibc 2.31 or later. The Windows one needs no Visual C++ redistributable. `docs/building.md` says how a release is cut and dry-run.
 - The agent skill is in the repo, at `skill/SKILL.md`, and describes this version. It covers the trash, `lcl backup` and the `.lcl/.gitignore`. The README says how to install it.
 - `lcl init` writes `.lcl/.gitignore` containing `*`, so git ignores the workspace's file, its WAL and its snapshots without a step from you. An existing `.lcl/.gitignore` is left as it is. If the file can't be written, `lcl init` exits 1, kind `io`, and makes no workspace.
 

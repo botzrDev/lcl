@@ -26,3 +26,34 @@ The tests run the `lcl` binary. Each one gets its own `HOME` and its own directo
 A schema change is a new entry at the end of `MIGRATIONS` in `crates/lcl-core/src/migrations.rs`. `SCHEMA_VERSION` is the length of that list. A migration that has shipped is never edited.
 
 The crates stay `publish = false`. A version bump changes `workspace.package.version` and the versions of `lcl-core` and `lcl-tui` under `workspace.dependencies` together. Behavior a person can see goes in `CHANGELOG.md` under `[Unreleased]`. So does every change to [the `--json` contract](json-contract.md).
+
+## Releasing
+
+`.github/workflows/release.yml` builds and publishes a release when a tag `vX.Y.Z` (or `vX.Y.Z-pre`) is pushed. Before anything is built, `.github/scripts/release-check.sh` fails the run unless:
+
+- the tag is `v` and the workspace version;
+- `CHANGELOG.md` has a section for that version, which becomes the release notes;
+- `skill/SKILL.md` states that version.
+
+It builds `lcl` for five targets, each with the bundled SQLite:
+
+| Target | Runner | Version checked by running it |
+|---|---|---|
+| `x86_64-unknown-linux-gnu` | Debian 11 container on `ubuntu-24.04` | yes |
+| `aarch64-unknown-linux-gnu` | Debian 11 container on `ubuntu-24.04-arm` | yes |
+| `aarch64-apple-darwin` | `macos-latest` | yes |
+| `x86_64-apple-darwin` | `macos-latest`, cross-compiled | when the runner has Rosetta |
+| `x86_64-pc-windows-msvc` | `windows-latest` | yes |
+
+The Linux builds run in Debian 11, so the binaries need glibc 2.31 or later. The Windows build links the C runtime in, so `lcl.exe` runs without the Visual C++ redistributable.
+
+The release gets `lcl-VERSION-TARGET.tar.gz` (`.zip` on Windows) for each target, each holding the binary, `LICENSE` and `README.md`. It also gets `SKILL.md`, the agent skill, and `SHA256SUMS`, which covers every other file. A version with a `-` is published as a pre-release.
+
+To cut one: set the version in `Cargo.toml` (see above) and in `skill/SKILL.md`, rename `[Unreleased]` in `CHANGELOG.md` to `[X.Y.Z] - DATE`, land that on `main`, then tag it and push the tag:
+
+```
+git tag vX.Y.Z
+git push origin vX.Y.Z
+```
+
+A dry run does the same checks and builds and publishes nothing. The files it would release, and the notes, are uploaded as an artifact of the run, and the notes are shown in its summary. Start one with `gh workflow run release.yml -f tag=vX.Y.Z`. Any push to a branch that changes the workflow or the check script starts one too.
