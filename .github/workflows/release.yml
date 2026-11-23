@@ -64,10 +64,10 @@ jobs:
         include:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-24.04
-            container: debian:11
+            container: quay.io/pypa/manylinux_2_28_x86_64
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-24.04-arm
-            container: debian:11
+            container: quay.io/pypa/manylinux_2_28_aarch64
           - target: aarch64-apple-darwin
             os: macos-latest
           - target: x86_64-apple-darwin
@@ -75,23 +75,30 @@ jobs:
           - target: x86_64-pc-windows-msvc
             os: windows-latest
     runs-on: ${{ matrix.os }}
-    # Linux builds run in Debian 11, so the binary needs glibc 2.31 or
-    # later, not the runner's.
+    # Linux builds run in a manylinux_2_28 image (AlmaLinux 8, with gcc,
+    # git and curl), so the binary needs glibc 2.28 or later, not the
+    # runner's.
     container: ${{ matrix.container }}
     env:
       TARGET: ${{ matrix.target }}
       VERSION: ${{ needs.check.outputs.version }}
     steps:
-      - name: Install the C compiler (Linux)
-        if: matrix.container
-        run: |
-          apt-get update
-          apt-get install -y --no-install-recommends ca-certificates curl gcc libc6-dev git
       - uses: actions/checkout@v4
-      # The version rust-toolchain.toml pins, with the target added.
-      - uses: dtolnay/rust-toolchain@1.98
-        with:
-          targets: ${{ matrix.target }}
+      - name: Install Rust
+        shell: bash
+        run: |
+          if ! command -v rustup >/dev/null; then
+            curl --proto '=https' --tlsv1.2 --retry 5 -sSf https://sh.rustup.rs |
+              sh -s -- -y --profile minimal --default-toolchain none
+            echo "$HOME/.cargo/bin" >>"$GITHUB_PATH"
+            export PATH="$HOME/.cargo/bin:$PATH"
+          fi
+          # The toolchain rust-toolchain.toml pins, by its own name, and the
+          # target added to that one.
+          rustup toolchain install
+          rustup target add "$TARGET"
+          rustc --version
+          cc --version | head -1
       - name: Build
         shell: bash
         env:

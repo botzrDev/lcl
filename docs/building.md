@@ -39,13 +39,13 @@ It builds `lcl` for five targets, each with the bundled SQLite:
 
 | Target | Runner | Version checked by running it |
 |---|---|---|
-| `x86_64-unknown-linux-gnu` | Debian 11 container on `ubuntu-24.04` | yes |
-| `aarch64-unknown-linux-gnu` | Debian 11 container on `ubuntu-24.04-arm` | yes |
+| `x86_64-unknown-linux-gnu` | `manylinux_2_28` container on `ubuntu-24.04` | yes |
+| `aarch64-unknown-linux-gnu` | `manylinux_2_28` container on `ubuntu-24.04-arm` | yes |
 | `aarch64-apple-darwin` | `macos-latest` | yes |
 | `x86_64-apple-darwin` | `macos-latest`, cross-compiled | when the runner has Rosetta |
 | `x86_64-pc-windows-msvc` | `windows-latest` | yes |
 
-The Linux builds run in Debian 11, so the binaries need glibc 2.31 or later. The Windows build links the C runtime in, so `lcl.exe` runs without the Visual C++ redistributable.
+The Linux builds run in PyPA's `manylinux_2_28` images (AlmaLinux 8), so the binaries need glibc 2.28 or later: RHEL 8, Debian 10, Ubuntu 20.04 and newer. The Windows build links the C runtime in, so `lcl.exe` runs without the Visual C++ redistributable.
 
 The release gets `lcl-VERSION-TARGET.tar.gz` (`.zip` on Windows) for each target, each holding the binary, `LICENSE` and `README.md`. It also gets `SKILL.md`, the agent skill, and `SHA256SUMS`, which covers every other file. A version with a `-` is published as a pre-release.
 
