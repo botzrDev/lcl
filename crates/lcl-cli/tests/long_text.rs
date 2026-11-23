@@ -582,7 +582,9 @@ fn empty_input_clears_a_description_or_content() {
 }
 
 /// stdin on a terminal is refused at once rather than waited on. Needs
-/// util-linux `script` to give lcl a pseudo-terminal.
+/// util-linux `script` to give lcl a pseudo-terminal, and `timeout`, so it
+/// runs on Linux only (macOS's `script` takes no `-c`).
+#[cfg(target_os = "linux")]
 #[test]
 fn a_terminal_on_stdin_exits_2() {
     if std::process::Command::new("script")

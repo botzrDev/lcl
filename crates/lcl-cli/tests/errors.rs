@@ -624,7 +624,9 @@ fn refusals_other_stored_data_would_avoid_exit_1() {
 
 /// A workspace file lcl may not write is an io error, not other: SQLite's
 /// read-only, can't-open, I/O and disk-full errors are kind io. Skipped
-/// where the file stays writable after chmod 0444 (as root).
+/// where the file stays writable after chmod 0444 (as root). Unix only: it
+/// sets the mode bits.
+#[cfg(unix)]
 #[test]
 fn a_read_only_workspace_is_kind_io() {
     use std::os::unix::fs::PermissionsExt;

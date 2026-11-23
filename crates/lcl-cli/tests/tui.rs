@@ -5,7 +5,9 @@
 //!
 //! lcl runs under `setsid -w`, with no controlling terminal: if it ever
 //! went on to the terminal it would fail to open /dev/tty rather than take
-//! over the one running the tests.
+//! over the one running the tests. `setsid` is util-linux, so this runs on
+//! Linux only.
+#![cfg(target_os = "linux")]
 
 mod common;
 

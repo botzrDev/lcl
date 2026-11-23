@@ -326,7 +326,7 @@ fn a_home_move_keeps_every_global_workspace() {
     env.lcl(&["-w", "alpha", "issue", "create", "--title", "first"])
         .assert_ok();
     env.lcl(&["init", "here", "--key", "HERE"]).assert_ok();
-    let moved = tempfile::TempDir::new().expect("new HOME");
+    let moved = common::temp_dir();
     let copy = |from: &Path, to: &Path| {
         std::fs::create_dir_all(to.parent().unwrap()).expect("mkdir");
         std::fs::copy(from, to).expect("copy");
@@ -550,7 +550,7 @@ fn lcl_0_1_0_still_reads_an_upgraded_index() {
         );
         return;
     };
-    let bin_dir = tempfile::TempDir::new().expect("bin dir");
+    let bin_dir = common::temp_dir();
     let bin = bin_dir.path().join("lcl");
     std::fs::copy(&original, &bin).expect("copy 0.1.0");
     let env = Env::new();
@@ -961,7 +961,7 @@ fn no_home_is_an_error_only_where_home_is_needed() {
     env.lcl(&["init", "here", "--key", "HERE"]).assert_ok();
     env.create("in the cwd workspace");
     let message = "Error: HOME is not set; lcl keeps its workspace registry in $HOME/.lcl\n";
-    let fresh = tempfile::TempDir::new().expect("temp cwd");
+    let fresh = common::temp_dir();
     for (label, unset) in [("HOME unset", true), ("HOME empty", false)] {
         let without = |args: &[&str], cwd: &Path| {
             env.lcl_with(args, |cmd| {

@@ -118,6 +118,26 @@ impl Out {
     }
 }
 
+/// A fresh temp directory, deleted on drop, named by the path the OS gives
+/// back for it. lcl prints the cwd as the OS reports it, and on macOS the
+/// temp directory is reached through a symlink (`/var` is
+/// `/private/var`), so a path built from the unresolved name would never
+/// match. On Windows the name is kept as it is: resolving it adds a `\\?\`
+/// prefix that lcl doesn't print.
+pub fn temp_dir() -> TempDir {
+    let root = std::env::temp_dir();
+    let root = if cfg!(windows) {
+        root
+    } else {
+        std::fs::canonicalize(&root).unwrap_or_else(|e| panic!("resolve {}: {e}", root.display()))
+    };
+    TempDir::new_in(&root)
+        .unwrap_or_else(|e| panic!("create a temp dir in {}: {e}", root.display()))
+}
+
+/// The null device, to open as a file.
+pub const NULL_DEVICE: &str = if cfg!(windows) { "NUL" } else { "/dev/null" };
+
 /// An isolated environment: a fresh HOME and a fresh cwd, both deleted on drop.
 pub struct Env {
     pub home: TempDir,
@@ -127,8 +147,8 @@ pub struct Env {
 impl Env {
     pub fn new() -> Self {
         let env = Self {
-            home: TempDir::new().expect("create temp HOME"),
-            cwd: TempDir::new().expect("create temp cwd"),
+            home: temp_dir(),
+            cwd: temp_dir(),
         };
         // lcl discovers a project by walking up from cwd looking for
         // `.lcl/data.sqlite`. A stray one above the temp dir would leak into
@@ -156,13 +176,14 @@ impl Env {
         self.run(args, Some(input), Stdio::piped())
     }
 
-    /// As `lcl`, with stdin opened on /dev/null.
+    /// As `lcl`, with stdin opened on the null device (`/dev/null`, or `NUL`
+    /// on Windows).
     pub fn lcl_devnull(&self, args: &[&str]) -> Out {
         self.run(
             args,
             None,
-            std::fs::File::open("/dev/null")
-                .expect("open /dev/null")
+            std::fs::File::open(NULL_DEVICE)
+                .unwrap_or_else(|e| panic!("open {NULL_DEVICE}: {e}"))
                 .into(),
         )
     }
