@@ -24,7 +24,7 @@ use crate::db::{
 use crate::error::{LclError, Result, chain};
 use crate::models::{InvalidValue, Priority, ProjectStatus, Status, identifier, now};
 use crate::parse;
-use rusqlite::{Connection, TransactionBehavior, params};
+use rusqlite::{Connection, params};
 use serde::Serialize;
 use serde_json::{Map, Value};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -1584,9 +1584,7 @@ impl Store {
     pub fn import(&mut self, input: &[u8], dry_run: bool) -> Result<ImportSummary> {
         let at = now();
         let file = read_file(input, at)?;
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = crate::db::begin_write(&mut self.conn, &mut self.fts_checked)?;
         // Issue and doc parents may be inserted after the rows that name
         // them. The check runs at commit.
         tx.pragma_update(None, "defer_foreign_keys", true)?;

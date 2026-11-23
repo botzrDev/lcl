@@ -57,7 +57,10 @@ Every write runs in one `BEGIN IMMEDIATE` transaction, together with the reads i
 
 Opening a database retries while SQLite reports it busy, including the moment after a killed lcl when another connection is recovering the WAL. A command that finds the database locked waits. It does not fail at once.
 
-lcl does not run `VACUUM`. The search indexes are FTS5 tables keyed by rowid (`issues_fts`, `docs_fts`, `comments_fts`), and a vacuum can renumber those rowids. On open, lcl checks that each index still matches its rows. A mismatch is a schema error. The check is skipped on a file this process cannot write.
+lcl does not run `VACUUM`. The search indexes are FTS5 tables keyed by rowid (`issues_fts`, `docs_fts`, `comments_fts`), and a vacuum, or a dump loaded into a new file, can renumber those rowids. lcl checks each index against its rows in two ways. A mismatch is a schema error.
+
+- On every open, read-only: the index lists exactly the rowids of its table's rows. That shows a renumbering. An open of an up-to-date workspace takes no write lock, so a read runs while another lcl writes. A file this process cannot write is checked too.
+- In a process's first write, and in an upgrade before it commits: FTS5's `integrity-check`, which also compares the words. It is a write statement, so it runs only under the write lock the write or the upgrade holds already. A mismatch fails the write before it changes anything, and an upgrade is not committed.
 
 ## Schema
 

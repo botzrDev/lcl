@@ -50,6 +50,7 @@ You no longer need to back up by hand before an upgrade.
 
 ### Fixed
 
+- A read, such as `lcl issue list`, no longer waits while another lcl holds the write lock. Opening a workspace checked the search indexes with a write statement, so a read behind a long write waited 30 seconds and then failed with kind `schema`, saying the index did not match its rows. The check on open is now read-only. The full check, which also compares the words, runs in a process's first write and in an upgrade, under the lock they hold. A busy database is never reported as a mismatch.
 - On Windows, lcl finds the home directory through `USERPROFILE` when `HOME` is not set or is empty, so `lcl init` and `lcl workspace create` work in cmd and PowerShell. 0.3.0-alpha.1 exited 1 there. `HOME` still wins when it is set, on every platform, so a registry made under it stays where it is. With neither, the error names both; lcl never falls back to another directory.
 
 ## [0.3.0-alpha.1] - 2026-11-23

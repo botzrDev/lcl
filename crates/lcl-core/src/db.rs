@@ -72,6 +72,9 @@ pub(crate) const NEXT_ISSUE_NUMBER: &str = "next_issue_number";
 pub struct Store {
     pub(crate) conn: Connection,
     upgrade_note: Option<String>,
+    /// Whether this store's first write transaction has compared the search
+    /// indexes with their rows' text yet: see `begin_write`.
+    pub(crate) fts_checked: bool,
 }
 
 /// Which issues `Store::list_issues` returns. Each part narrows the list
@@ -327,7 +330,9 @@ impl Store {
     /// Connection setup shared by every open. The order matters: the busy
     /// timeout must be in place before anything can contend for a lock, and
     /// the version check must come before anything that can write, so a
-    /// database from a newer lcl is refused untouched.
+    /// database from a newer lcl is refused untouched. After an upgrade, if
+    /// one was due, nothing here writes: an up-to-date workspace opens
+    /// without the write lock, while another process holds it.
     ///
     /// `file` is where the database is, for the snapshot an upgrade takes
     /// beside it; None for one in memory, which gets none.
@@ -339,8 +344,12 @@ impl Store {
         use_wal(&conn)?;
         conn.pragma_update(None, "foreign_keys", true)?;
         let upgrade_note = migrate(&mut conn, file)?;
-        check_fts(&conn)?;
-        Ok(Store { conn, upgrade_note })
+        check_fts_rowids(&conn)?;
+        Ok(Store {
+            conn,
+            upgrade_note,
+            fts_checked: false,
+        })
     }
 
     /// When this open upgraded the file, one line saying so, naming the
@@ -365,9 +374,7 @@ impl Store {
     /// the lock for up to BUSY_TIMEOUT instead of failing. An error drops the
     /// transaction, which rolls all of it back.
     pub(crate) fn write<T>(&mut self, f: impl FnOnce(&Transaction<'_>) -> Result<T>) -> Result<T> {
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = begin_write(&mut self.conn, &mut self.fts_checked)?;
         let out = f(&tx)?;
         tx.commit()?;
         Ok(out)
@@ -2275,27 +2282,104 @@ fn json_array<T: Serialize>(items: &[T]) -> Result<String> {
     serde_json::to_string(items).map_err(|e| LclError::Encode(e.to_string()))
 }
 
-/// FTS5 external content is keyed by rowid. `VACUUM` can renumber those
-/// rowids and leave the index pointing at the wrong rows. This is the check
-/// the tests run, done on every open, with the content comparison turned on
-/// (`rank` 1). A mismatch is a schema error: search would lie.
+/// Each search index, with the table whose rows it indexes. Every row is in
+/// its index, in the trash or not: the triggers index each insert.
+const FTS_TABLES: [(&str, &str); 3] = [
+    ("issues_fts", "issues"),
+    ("docs_fts", "docs"),
+    ("comments_fts", "comments"),
+];
+
+/// Begins a write transaction (`BEGIN IMMEDIATE`), for `Store::write` and
+/// `Store::import`. The first one a store begins runs `check_fts` first,
+/// under the write lock it holds anyway, so the full check never waits on a
+/// lock of its own. A mismatch fails the write before it changes anything.
+pub(crate) fn begin_write<'c>(
+    conn: &'c mut Connection,
+    fts_checked: &mut bool,
+) -> Result<Transaction<'c>> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    if !*fts_checked {
+        check_fts(&tx)?;
+        *fts_checked = true;
+    }
+    Ok(tx)
+}
+
+/// The search indexes are FTS5 tables with external content, keyed by rowid.
+/// `VACUUM`, or a dump loaded into a new file, can renumber those rowids and
+/// leave an index naming the wrong rows; search would lie. Checked on every
+/// open, and read-only: each index's `_docsize` table has one row per rowid
+/// it holds, and that must be exactly the rowids of its table's rows. A read
+/// never waits on the write lock, so neither does an open. A mismatch is a
+/// schema error.
 ///
-/// The check is an `INSERT`, so SQLite refuses it on a file this process
-/// cannot write. That refusal is not a mismatch — the command that actually
-/// writes reports the read-only file — and the check is skipped.
-fn check_fts(conn: &Connection) -> Result<()> {
-    for table in ["issues_fts", "docs_fts", "comments_fts"] {
-        if let Err(e) = conn.execute(
-            &format!("INSERT INTO {table}({table}, rank) VALUES ('integrity-check', 1)"),
+/// A renumbering shows here. It keeps the rows' order (`VACUUM` and a
+/// reloaded dump number them 1, 2, 3 … in rowid order), so it changes the
+/// set unless the rows were numbered 1 to n already, and then no number
+/// changed. What this can't see, words that differ under the same rowids,
+/// `check_fts` sees on the next write.
+fn check_fts_rowids(conn: &Connection) -> Result<()> {
+    for (index, table) in FTS_TABLES {
+        let (unlisted, stray): (i64, i64) = conn.query_row(
+            &format!(
+                "SELECT
+                   (SELECT count(*) FROM {table} t
+                     WHERE NOT EXISTS (SELECT 1 FROM {index}_docsize d WHERE d.id = t.rowid)),
+                   (SELECT count(*) FROM {index}_docsize d
+                     WHERE NOT EXISTS (SELECT 1 FROM {table} t WHERE t.rowid = d.id))"
+            ),
             [],
-        ) {
-            if e.sqlite_error_code() == Some(rusqlite::ErrorCode::ReadOnly) {
-                return Ok(());
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        if unlisted != 0 || stray != 0 {
+            let mut parts = vec![];
+            if unlisted != 0 {
+                parts.push(format!(
+                    "{unlisted} {} it does not list",
+                    noun(unlisted, "row", "rows")
+                ));
+            }
+            if stray != 0 {
+                parts.push(format!(
+                    "{stray} {} it lists that no row has",
+                    noun(stray, "rowid", "rowids")
+                ));
             }
             return Err(LclError::FtsMismatch {
-                table,
-                detail: e.to_string(),
+                table: index,
+                detail: parts.join(" and "),
             });
+        }
+    }
+    Ok(())
+}
+
+fn noun<'a>(n: i64, one: &'a str, many: &'a str) -> &'a str {
+    if n == 1 { one } else { many }
+}
+
+/// FTS5's own check, with the content comparison turned on (`rank` 1): the
+/// words in each index are the words of its rows' text. The tests run it
+/// too. It is an `INSERT`, so it needs the write lock. It runs only where
+/// that lock is held already: in a store's first write (`begin_write`) and
+/// in an upgrade, before the upgrade commits.
+///
+/// Only FTS5's corrupt result is a mismatch. Anything else, such as a full
+/// disk, is reported as what it is.
+fn check_fts(conn: &Connection) -> Result<()> {
+    for (index, _) in FTS_TABLES {
+        if let Err(e) = conn.execute(
+            &format!("INSERT INTO {index}({index}, rank) VALUES ('integrity-check', 1)"),
+            [],
+        ) {
+            if e.sqlite_error_code() == Some(ErrorCode::DatabaseCorrupt) {
+                return Err(LclError::FtsMismatch {
+                    table: index,
+                    detail: "the words it holds are not the words of its rows".into(),
+                });
+            }
+            return Err(e.into());
         }
     }
     Ok(())
@@ -2454,8 +2538,9 @@ fn migrate_locked(conn: &mut Connection, file: Option<&Path>) -> Result<Option<S
     upgraded
 }
 
-/// Runs the pending steps in `tx` and checks the result, without
-/// committing. Returns the line for `Store::upgrade_note`.
+/// Runs the pending steps in `tx` and checks the result (foreign keys, then
+/// the search indexes), without committing. Returns the line for
+/// `Store::upgrade_note`.
 fn apply(
     tx: &Transaction<'_>,
     pending: &[Migration],
@@ -2480,6 +2565,11 @@ fn apply(
     if !violations.is_empty() {
         return Err(LclError::ForeignKeyCheck(violations.join(", ")));
     }
+    // Under the upgrade's lock, so in full: an upgrade that leaves an index
+    // not matching its rows is not committed. The rowids first, for the
+    // plainer message.
+    check_fts_rowids(tx)?;
+    check_fts(tx)?;
     if snapshot.is_none() && changed.is_empty() {
         return Ok(None);
     }
@@ -2502,6 +2592,133 @@ fn apply(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::ErrorKind;
+
+    /// A database file for one test, removed with its WAL files on drop.
+    struct TempDb(std::path::PathBuf);
+
+    impl TempDb {
+        fn new() -> Self {
+            TempDb(std::env::temp_dir().join(format!("lcl-db-{}.sqlite", uuid::Uuid::new_v4())))
+        }
+    }
+
+    impl Drop for TempDb {
+        fn drop(&mut self) {
+            for suffix in ["", "-wal", "-shm"] {
+                let _ = std::fs::remove_file(format!("{}{suffix}", self.0.display()));
+            }
+        }
+    }
+
+    fn seed_issue(conn: &Connection, n: i64) {
+        conn.execute(
+            "INSERT INTO issues(id, number, title, description, status, priority, created_at, updated_at) VALUES (?1, ?2, 't', '', 'Done', 0, 1, 1)",
+            params![format!("issue-{n}"), n],
+        )
+        .expect("seed");
+    }
+
+    /// An open, and the reads after it, need no write lock: they run while
+    /// another connection holds it, which it does until the test ends. One
+    /// that waited would give up after BUSY_TIMEOUT and fail.
+    #[test]
+    fn an_up_to_date_workspace_opens_and_reads_under_another_write_lock() {
+        let db = TempDb::new();
+        let store = Store::open(&db.0).expect("create");
+        seed_issue(&store.conn, 1);
+        drop(store);
+        let holder = Connection::open(&db.0).expect("second connection");
+        holder
+            .execute_batch("BEGIN IMMEDIATE")
+            .expect("take the write lock");
+
+        let started = Instant::now();
+        let store = Store::open(&db.0).expect("open under the lock");
+        let list = store
+            .list_issues(&IssueFilter::default(), IssueSort::Number, Page::ALL)
+            .expect("list under the lock");
+        assert_eq!(list.total, 1);
+        assert!(started.elapsed() < BUSY_TIMEOUT, "{:?}", started.elapsed());
+        holder.execute_batch("COMMIT").expect("release");
+    }
+
+    /// The full check's errors: only FTS5's corrupt result is a mismatch. A
+    /// busy one, from a connection that may not wait for the lock, is the
+    /// SQLite error it is, never kind schema.
+    #[test]
+    fn the_full_check_reports_only_a_mismatch_as_one() {
+        let db = TempDb::new();
+        let store = Store::open(&db.0).expect("create");
+        seed_issue(&store.conn, 1);
+        let other = Connection::open(&db.0).expect("second connection");
+        other.busy_timeout(Duration::ZERO).expect("no wait");
+        check_fts(&other).expect("an index that matches");
+
+        store
+            .conn
+            .execute_batch("BEGIN IMMEDIATE")
+            .expect("take the write lock");
+        let busy = check_fts(&other).expect_err("the lock is held");
+        assert!(
+            matches!(&busy, LclError::Db(e) if e.sqlite_error_code() == Some(ErrorCode::DatabaseBusy)),
+            "{busy:?}"
+        );
+        assert_ne!(busy.kind(), ErrorKind::Schema);
+        store.conn.execute_batch("COMMIT").expect("release");
+
+        let trigger: String = other
+            .query_row(
+                "SELECT sql FROM sqlite_schema WHERE name = 'issues_au'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("trigger");
+        other
+            .execute_batch(&format!(
+                "DROP TRIGGER issues_au; UPDATE issues SET title = 'changed'; {trigger};"
+            ))
+            .expect("change a title behind the index's back");
+        let mismatch = check_fts(&other).expect_err("the words differ");
+        assert!(
+            matches!(
+                mismatch,
+                LclError::FtsMismatch {
+                    table: "issues_fts",
+                    ..
+                }
+            ),
+            "{mismatch:?}"
+        );
+        assert_eq!(mismatch.kind(), ErrorKind::Schema);
+    }
+
+    /// A row whose rowid the index doesn't hold fails the open, read-only,
+    /// naming both sides of the difference.
+    #[test]
+    fn an_index_naming_other_rowids_fails_the_open() {
+        let db = TempDb::new();
+        let store = Store::open(&db.0).expect("create");
+        seed_issue(&store.conn, 1);
+        seed_issue(&store.conn, 2);
+        // The update trigger watches title and description only.
+        store
+            .conn
+            .execute(
+                "UPDATE issues SET rowid = rowid + 1000 WHERE number = 1",
+                [],
+            )
+            .expect("renumber");
+        drop(store);
+        let Err(err) = Store::open(&db.0) else {
+            panic!("opened");
+        };
+        assert_eq!(
+            err.to_string(),
+            "the search index issues_fts does not match its rows: 1 row it does not list and 1 rowid it lists that no row has"
+        );
+        assert_eq!(err.kind(), ErrorKind::Schema);
+    }
 
     /// A write that lands between `list_issues`' count and its page doesn't
     /// split them: both read the snapshot their read transaction started
