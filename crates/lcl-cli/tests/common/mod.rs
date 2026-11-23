@@ -204,7 +204,8 @@ impl Env {
             // checks an author sets or removes it.
             .env_remove("LCL_AUTHOR")
             // Human output shows timestamps in local time; tests read them
-            // in UTC unless they set TZ themselves.
+            // in UTC unless they set TZ themselves. Windows doesn't read TZ:
+            // there the tests need the system zone to be UTC, as it is on CI.
             .env("TZ", "UTC");
         cmd
     }

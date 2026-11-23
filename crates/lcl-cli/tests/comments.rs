@@ -93,20 +93,23 @@ fn comments_read_as_a_header_and_an_indented_body() {
     let shown = "W-1 one\nStatus: Backlog  Priority: None  Assignee: Unassigned\nCreator: ann\n\nComments:\nann · 2027-01-15 08:00\n  first line\n  second line\n  third line\n\nanon · 2027-01-15 09:02\n  no author\n";
     assert_eq!(trio(&env.lcl(&["issue", "show", "1"])), (0, shown, ""));
 
-    // Local time, whatever TZ says.
-    let tokyo = env.lcl_env(&[("TZ", "JST-9")], &["issue", "comments", "1"]);
-    assert!(
-        tokyo
-            .stdout
-            .starts_with(&format!("ann · 2027-01-15 17:00 · {a}\n")),
-        "{tokyo:#?}"
-    );
-    assert!(
-        tokyo
-            .stdout
-            .contains(&format!("\nanon · 2027-01-15 18:02 · {b}\n")),
-        "{tokyo:#?}"
-    );
+    // Local time, whatever TZ says. Unix only: on Windows the local zone is
+    // the system's, and TZ is not read.
+    if cfg!(unix) {
+        let tokyo = env.lcl_env(&[("TZ", "JST-9")], &["issue", "comments", "1"]);
+        assert!(
+            tokyo
+                .stdout
+                .starts_with(&format!("ann · 2027-01-15 17:00 · {a}\n")),
+            "{tokyo:#?}"
+        );
+        assert!(
+            tokyo
+                .stdout
+                .contains(&format!("\nanon · 2027-01-15 18:02 · {b}\n")),
+            "{tokyo:#?}"
+        );
+    }
 
     // JSON is as it was: the stored number, and the body as stored.
     let iid = issue_id(&env);
