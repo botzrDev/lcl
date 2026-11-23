@@ -16,7 +16,7 @@ The command line is the interface. `lcl --help` lists every flag. This page is h
 
 ## Files
 
-A workspace made with `lcl init` is `.lcl/data.sqlite` in that directory. Commands run there, or in a directory below it, use that file. `lcl workspace create` makes a global workspace at `~/.lcl/projects/<slug>.sqlite`. The slug is the name with ASCII letters lowercased and every other character turned into `-`.
+A workspace made with `lcl init` is `.lcl/data.sqlite` in that directory. Commands run there, or in a directory below it, use that file. Init also writes `.lcl/.gitignore` with `*`, unless something by that name is there, so git ignores everything in `.lcl/`. It writes it before it makes the workspace or registers it, and a failure stops the init with nothing made. `lcl workspace create` makes a global workspace at `~/.lcl/projects/<slug>.sqlite`. The slug is the name with ASCII letters lowercased and every other character turned into `-`.
 
 `~/.lcl/index.sqlite` is the registry. It records each workspace's name, key, and path. It is not a workspace: its schema is its own, at registry version 2, stored in `registry_meta`. `--workspace` and `LCL_WORKSPACE` look a name up there.
 

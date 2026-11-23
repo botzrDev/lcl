@@ -108,6 +108,10 @@ pub enum LclError {
     /// `path`.
     #[error("can't write {path}: {reason}")]
     BackupFailed { path: String, reason: String },
+    /// `lcl init` could not write `.lcl/.gitignore`. It made no workspace
+    /// and registered none.
+    #[error("can't write {path}, which keeps the workspace out of git: {reason}")]
+    GitignoreFailed { path: String, reason: String },
     /// The copy taken before an upgrade could not be written, so the
     /// upgrade did not run.
     #[error(
@@ -440,7 +444,10 @@ impl LclError {
             | LclError::BadRegistryVersion(_)
             | LclError::BadRegistryVersionNumber(_)
             | LclError::ExportRoundTrip(_) => Other,
-            LclError::Io(_) | LclError::BackupFailed { .. } | LclError::SnapshotFailed { .. } => Io,
+            LclError::Io(_)
+            | LclError::BackupFailed { .. }
+            | LclError::SnapshotFailed { .. }
+            | LclError::GitignoreFailed { .. } => Io,
             LclError::SchemaTooNew { .. }
             | LclError::UnknownStatus { .. }
             | LclError::UnknownPriority { .. }

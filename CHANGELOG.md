@@ -16,9 +16,12 @@ All notable changes to lcl are recorded here. The format follows
 - An issue's JSON has `deleted_at`: when it went to the trash, or null.
 - Docs, comments and labels have the same trash. `lcl doc restore ID`, `lcl comment restore ID` and `lcl label restore NAME` bring one back as it was. `lcl doc purge`, `lcl comment purge` and `lcl label purge` remove one in the trash for good, or every one with `--all`. `lcl doc list --trashed`, `lcl label list --trashed` and `lcl issue comments ID --trashed` list what is there. Their JSON has `deleted_at` too.
 
+- `lcl init` writes `.lcl/.gitignore` containing `*`, so git ignores the workspace's file, its WAL and its snapshots without a step from you. An existing `.lcl/.gitignore` is left as it is. If the file can't be written, `lcl init` exits 1, kind `io`, and makes no workspace.
+
 ### Upgrading
 
 - The first command that opens a workspace upgrades it to schema 13. Schema 12 adds the trash for issues and schema 13 for docs, comments and labels. Everything starts out of it.
+- A workspace made by an earlier `lcl init` has no `.lcl/.gitignore`. Run `lcl init` again in its directory, with its name and key, to add one. That changes nothing else. A file git already tracks stays tracked: `git rm -r --cached .lcl` stops tracking it.
 
 You no longer need to back up by hand before an upgrade.
 

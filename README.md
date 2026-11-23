@@ -26,6 +26,8 @@ That puts `lcl` in `~/.cargo/bin`. `lcl --version` prints the version.
 
 `lcl init` makes the workspace at `.lcl/data.sqlite` and registers its name in `~/.lcl/index.sqlite`. Commands run in that directory or below it use that workspace. From anywhere else, name it with `--workspace NAME`. `lcl workspace create NAME --key KEY` makes a workspace under `~/.lcl/projects` instead.
 
+`lcl init` also writes `.lcl/.gitignore`, so git leaves `.lcl/` alone. A SQLite file can't be merged, and one committed while lcl writes to it can be torn. To share a workspace, run `lcl export`; the file it writes is what another person imports with `lcl import`. An existing `.lcl/.gitignore` is left as it is. In a workspace an earlier lcl made, run `lcl init` again to add the file.
+
 `lcl help`, and `--help` on any command, list every flag.
 
 ## Alpha testing

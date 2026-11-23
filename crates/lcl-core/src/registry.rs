@@ -305,6 +305,13 @@ impl Registry {
     /// - else the file is made, as `create_workspace` makes one (built under
     ///   a temporary name, renamed into place, its row committed last), and
     ///   a row left for `path` by a file that is gone is replaced.
+    ///
+    /// Either way, once the name and key are good and before anything is
+    /// registered, `.gitignore` is written beside the file if nothing is
+    /// there by that name (`write_gitignore`). If it can't be, init fails:
+    /// no workspace is made, no row is written, and a directory init made
+    /// is removed. A failure later in making a workspace removes the
+    /// `.gitignore` it wrote too.
     pub fn init_workspace(
         &mut self,
         name: &str,
@@ -358,6 +365,10 @@ impl Registry {
             created,
         };
 
+        let dir = path.parent().ok_or_else(|| LclError::NoParentDir {
+            path: path.display().to_string(),
+        })?;
+
         // An empty file is no workspace (lcl never leaves one: it builds a
         // workspace under another name and renames it into place), so it is
         // replaced like a missing one.
@@ -383,6 +394,7 @@ impl Registry {
                     path: recorded,
                 });
             }
+            write_gitignore(dir)?;
             if path_row.is_none() {
                 tx.execute(
                     "INSERT INTO workspaces(slug, name, path, created_at, kind) VALUES (?1, ?2, ?3, ?4, 'cwd')",
@@ -397,15 +409,19 @@ impl Registry {
         if path_row.is_some() {
             tx.execute("DELETE FROM workspaces WHERE path = ?1", params![recorded])?;
         }
-        let dir = path.parent().ok_or_else(|| LclError::NoParentDir {
-            path: path.display().to_string(),
-        })?;
         let made_dir = std::fs::symlink_metadata(dir).is_err();
         std::fs::create_dir_all(dir)?;
         let undo_dir = || {
             if made_dir {
                 let _ = std::fs::remove_dir(dir);
             }
+        };
+        let gitignore = write_gitignore(dir).inspect_err(|_| undo_dir())?;
+        let undo = || {
+            if let Some(gitignore) = &gitignore {
+                let _ = std::fs::remove_file(gitignore);
+            }
+            undo_dir();
         };
         let created_at = now();
         let tmp = dir.join(format!(".data.{}.creating", uuid::Uuid::new_v4()));
@@ -420,12 +436,12 @@ impl Registry {
         })();
         if let Err(e) = made {
             remove_db_files(&tmp);
-            undo_dir();
+            undo();
             return Err(e); // dropping `tx` rolls the row back
         }
         if let Err(e) = tx.commit() {
             remove_db_files(path);
-            undo_dir();
+            undo();
             return Err(e.into());
         }
         Ok(found(true))
@@ -535,6 +551,40 @@ fn sidecar(path: &Path, ext: &str) -> PathBuf {
     let mut name = path.as_os_str().to_owned();
     name.push(format!("-{ext}"));
     PathBuf::from(name)
+}
+
+/// What `lcl init` writes to `.lcl/.gitignore`. `*` keeps everything in
+/// `.lcl/` out of git, the workspace's file, its WAL, its snapshots and this
+/// file too: a SQLite file does not merge, and one committed while lcl
+/// writes it can be torn. `lcl export` is what another person imports.
+pub const GITIGNORE: &str =
+    "# Written by lcl init. Share a workspace with lcl export, not git.\n*\n";
+
+/// Writes `GITIGNORE` to `dir/.gitignore` unless something is there by that
+/// name (a file, a link, anything), which is left as it is. Returns the path
+/// when it wrote one. A write that fails part way removes what it wrote.
+fn write_gitignore(dir: &Path) -> Result<Option<PathBuf>> {
+    use std::io::Write;
+    let path = dir.join(".gitignore");
+    let failed = |e: std::io::Error| LclError::GitignoreFailed {
+        path: path.display().to_string(),
+        reason: e.to_string(),
+    };
+    let mut file = match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+    {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Ok(None),
+        Err(e) => return Err(failed(e)),
+    };
+    if let Err(e) = file.write_all(GITIGNORE.as_bytes()) {
+        drop(file);
+        let _ = std::fs::remove_file(&path);
+        return Err(failed(e));
+    }
+    Ok(Some(path))
 }
 
 /// Removes a database file and its -wal and -shm files, if they're there.

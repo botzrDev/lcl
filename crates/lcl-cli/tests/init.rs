@@ -3,7 +3,8 @@
 //! finds it from anywhere. The user types the key; nothing is derived. Run
 //! again with the same name and key it does nothing; it never renames or
 //! re-keys a workspace; and a name another workspace has (by slug, whatever
-//! its kind) is refused. A refused init creates nothing.
+//! its kind) is refused. A refused init creates nothing. Init writes
+//! .lcl/.gitignore, unless one is there, so git ignores the workspace.
 
 mod common;
 
@@ -462,4 +463,120 @@ fn the_workspace_flag_finds_a_workspace_init_made() {
         ),
         "{list:#}"
     );
+}
+
+/// What init writes to `.lcl/.gitignore`.
+const GITIGNORE: &str = lcl_core::registry::GITIGNORE;
+
+fn gitignore_in(dir: &Path) -> PathBuf {
+    dir.join(".lcl").join(".gitignore")
+}
+
+fn read(path: &Path) -> String {
+    std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
+}
+
+/// A new workspace stays out of git with no step from the user: after init
+/// in a git repository, and a write (which makes the WAL files), `git
+/// status` lists nothing under .lcl/. Skipped where git can't be run.
+#[test]
+fn a_new_workspace_stays_out_of_git() {
+    let env = Env::new();
+    let git = |args: &[&str]| env.command("git").args(args).output();
+    match git(&["init", "-q"]) {
+        Ok(out) if out.status.success() => {}
+        other => {
+            eprintln!("SKIPPED a_new_workspace_stays_out_of_git: git init failed: {other:?}");
+            return;
+        }
+    }
+    std::fs::write(env.cwd.path().join("README"), "a file git sees\n").expect("write README");
+    env.lcl(&["init", "g", "--key", "G"]).assert_ok();
+    env.create("one");
+
+    assert_eq!(read(&gitignore_in(env.cwd.path())), GITIGNORE);
+    let status = git(&["status", "--porcelain", "--untracked-files=all"]).expect("git status");
+    assert!(status.status.success(), "{status:?}");
+    assert_eq!(String::from_utf8_lossy(&status.stdout), "?? README\n");
+}
+
+/// A `.gitignore` already in .lcl/ is left as it is, by an init that makes
+/// the workspace and by one that finds it.
+#[test]
+fn init_leaves_an_existing_gitignore_as_it_is() {
+    let env = Env::new();
+    let path = gitignore_in(env.cwd.path());
+    std::fs::create_dir_all(path.parent().unwrap()).expect("mkdir .lcl");
+    std::fs::write(&path, "data.sqlite\n").expect("write .gitignore");
+    let made = env.lcl(&["--json", "init", "w", "--key", "W"]);
+    assert_eq!(made.assert_ok().json()["created"], true);
+    assert_eq!(read(&path), "data.sqlite\n");
+    let again = env.lcl(&["--json", "init", "w", "--key", "W"]);
+    assert_eq!(again.assert_ok().json()["created"], false);
+    assert_eq!(read(&path), "data.sqlite\n");
+}
+
+/// Init in a workspace that has no `.gitignore` (one made before init wrote
+/// it) adds it, and writes nothing else: the workspace and its registry row
+/// are as they were.
+#[test]
+fn init_again_adds_a_missing_gitignore_and_nothing_else() {
+    let env = Env::new();
+    env.lcl(&["init", "w", "--key", "W"]).assert_ok();
+    let path = gitignore_in(env.cwd.path());
+    std::fs::remove_file(&path).expect("remove .gitignore");
+    let db = env.db_path();
+    let (before, registered) = (dump(&db), rows(&env));
+
+    let again = env.lcl(&["--json", "init", "w", "--key", "W"]);
+    assert_eq!(again.assert_ok().json()["created"], false);
+    assert_eq!(read(&path), GITIGNORE);
+    assert!(dump(&db) == before, "init again wrote to the workspace");
+    assert_eq!(rows(&env), registered);
+
+    // A 0.1.0 workspace gets one the same way.
+    let env = Env::new();
+    let db = env.install_db(V0_FIXTURE);
+    let (name, key): (String, String) = rusqlite::Connection::open(&db)
+        .expect("open")
+        .query_row(
+            "SELECT (SELECT value FROM meta WHERE key = 'name'), (SELECT value FROM meta WHERE key = 'key')",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .expect("name and key");
+    env.lcl(&["init", &name, "--key", &key]).assert_ok();
+    assert_eq!(read(&gitignore_in(env.cwd.path())), GITIGNORE);
+}
+
+/// An init that can't write `.lcl/.gitignore` fails with kind io, naming
+/// it, and makes nothing: no workspace file, no registry row. Unix only: it
+/// sets the mode bits. Skipped where the directory stays writable (root).
+#[cfg(unix)]
+#[test]
+fn an_init_that_cannot_write_the_gitignore_makes_nothing() {
+    use std::os::unix::fs::PermissionsExt;
+    let env = Env::new();
+    let dir = env.cwd.path().join(".lcl");
+    std::fs::create_dir(&dir).expect("mkdir .lcl");
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).expect("chmod");
+    if std::fs::write(dir.join("probe"), b"").is_ok() {
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        eprintln!("SKIPPED: this user can write to a read-only directory");
+        return;
+    }
+    let args = ["--json", "init", "w", "--key", "W"];
+    let out = env.lcl(&args);
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+
+    let message = format!(
+        "can't write {}, which keeps the workspace out of git: Permission denied (os error 13)",
+        dir.join(".gitignore").display()
+    );
+    assert_eq!(
+        trio(&out),
+        (1, "", common::error_text(&args, "io", &message).as_str())
+    );
+    assert_eq!(entries(&dir), Vec::<String>::new());
+    assert_eq!(rows(&env), []);
 }
