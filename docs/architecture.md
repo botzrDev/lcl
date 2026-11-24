@@ -10,7 +10,7 @@ The command line is the interface. `lcl --help` lists every flag. This page is h
 | --- | --- | --- |
 | `lcl` | `crates/lcl-cli` | The binary. Parses arguments, opens a workspace, prints text or JSON, and exits. |
 | `lcl-core` | `crates/lcl-core` | The workspace file, the registry, search, and the export format. |
-| `lcl-tui` | `crates/lcl-tui` | The terminal UI: the issue list, an issue's detail, search, and setting an issue's status and priority. Key handling and drawing are tested without a terminal. |
+| `lcl-tui` | `crates/lcl-tui` | The terminal UI: the issue list, an issue's detail, search, creating an issue, and setting an issue's status and priority. Key handling and drawing are tested without a terminal. |
 
 `unsafe` is forbidden in the workspace.
 
@@ -122,7 +122,7 @@ Before a migration changes a workspace file or the registry, lcl copies the file
 
 ## The terminal UI
 
-`lcl tui` lists issues. `j` and `k` move, `1` through `7` filter by status, `0` shows every status, `r` reloads, and `q` or Ctrl-C quits. Enter opens the selected issue's detail (fields, description, comments), which `j`/`k`, PgDn/PgUp, `g`/`G` scroll, and Esc goes back to the list. `/` opens a search prompt, which searches as `lcl search` does (`Store::search`), and `p` narrows the list to each project in turn. What is shown, and where keys go, is one enum, `Mode`: the list, the detail (with its scroll) or the prompt (with its line and cursor). A reload reads what `App::request` asks for: the open issue's comments and the search. `s` and `!` open a choice of the selected issue's status and priority (`Mode::Choose`). The app hands the loop an `Edit`, which it makes with `Store::update_issue`, as `issue update` does, in one transaction logged under the same author (LCL_AUTHOR, else USER), then reloads. A write that fails, as on a lock held past the 30-second busy timeout or an issue trashed elsewhere, is named on the keys line, and nothing else changes. It needs a terminal on both stdin and stdout. It does not create issues, change other fields, or comment. The command line does that.
+`lcl tui` lists issues. `j` and `k` move, `1` through `7` filter by status, `0` shows every status, `r` reloads, and `q` or Ctrl-C quits. Enter opens the selected issue's detail (fields, description, comments), which `j`/`k`, PgDn/PgUp, `g`/`G` scroll, and Esc goes back to the list. `/` opens a search prompt, which searches as `lcl search` does (`Store::search`), and `p` narrows the list to each project in turn. What is shown, and where keys go, is one enum, `Mode`: the list, the detail (with its scroll) or the prompt (with its line and cursor). A reload reads what `App::request` asks for: the open issue's comments and the search. `s` and `!` open a choice of the selected issue's status and priority (`Mode::Choose`), and `c` asks for a new issue's title, then its description (`Mode::Create`). The app hands the loop an `Edit`, which it makes as the command line does, with `Store::update_issue` or `Store::create_issue`, in one transaction logged under the same author (LCL_AUTHOR, else USER), then reloads. A new issue is selected, and a filter that would hide it is taken away. A write that fails, as on a lock held past the 30-second busy timeout or an issue trashed elsewhere, is named on the keys line, and nothing else changes. It needs a terminal on both stdin and stdout. It does not change other fields, or comment. The command line does that.
 
 ## The command contract
 

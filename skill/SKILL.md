@@ -224,4 +224,4 @@ lcl --json sync
 
 ## TUI
 
-`lcl tui` is an issue browser for people: j/k to move, 1-7 to filter by status, 0 for all, Enter to open an issue's detail and Esc to go back, / to search, p for the next project, s and ! to set the selected issue's status and priority, r to reload, q or Ctrl-C to quit. Its writes go through the same code as `issue update`. Agents use the CLI.
+`lcl tui` is an issue browser for people: j/k to move, 1-7 to filter by status, 0 for all, Enter to open an issue's detail and Esc to go back, / to search, p for the next project, c to create an issue (title, then description), s and ! to set the selected issue's status and priority, r to reload, q or Ctrl-C to quit. Its writes go through the same code as `issue create` and `issue update`. Agents use the CLI.

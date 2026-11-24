@@ -1,6 +1,7 @@
 //! A terminal view of a workspace's issues: a list, narrowed by status,
-//! project and search, and the detail of one issue. It changes an issue's
-//! status and priority; the command line does every other write.
+//! project and search, and the detail of one issue. It creates an issue,
+//! and changes an issue's status and priority; the command line does every
+//! other write.
 //!
 //! The state and its key handling (`App`) are pure, and drawing takes any
 //! ratatui backend, so both are tested without a terminal. A key that
@@ -17,7 +18,7 @@ use crossterm::event::{
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
-use lcl_core::db::{IssueFilter, IssueSort, IssueUpdate, Page, Placement, Store};
+use lcl_core::db::{IssueFilter, IssueSort, IssueUpdate, NewIssue, Page, Placement, Store};
 use lcl_core::models::{Comment, Issue, IssueId, IssueRef, Priority, Status};
 use lcl_core::search::SearchQuery;
 use ratatui::buffer::CellWidth;
@@ -30,7 +31,7 @@ use std::io::{IsTerminal, stdout};
 use std::time::Duration;
 use unicode_segmentation::UnicodeSegmentation;
 
-const LIST_HELP: &str = "j/k: move  Enter: open  s: status  !: priority  /: search  p: project  1-7: filter  0: all  r: reload  q: quit";
+const LIST_HELP: &str = "j/k: move  Enter: open  c: create  s: status  !: priority  /: search  p: project  1-7: filter  0: all  r: reload  q: quit";
 const DETAIL_HELP: &str = "j/k: scroll  PgUp/PgDn: page  Esc: back  r: reload  q: quit";
 
 /// What marks the selected row. Every row is indented by its width.
@@ -243,11 +244,12 @@ pub struct Request {
     pub search: Option<SearchQuery>,
 }
 
-/// A write the TUI asks for: one field of one issue.
+/// A write the TUI asks for: one field of one issue, or a new issue.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Edit {
     Status(IssueId, Status),
     Priority(IssueId, Priority),
+    Create { title: String, description: String },
 }
 
 /// What the terminal sends: a key, or text pasted in one piece.
@@ -270,13 +272,43 @@ pub enum Action {
 }
 
 /// What the screen shows, and where keys go: the list, the detail of one
-/// issue, the search prompt under the list, or a choice of status or
-/// priority over it. Each one's state exists only while it is shown.
+/// issue, a prompt under the list (the search, or a new issue's title and
+/// description), or a choice of status or priority over it. Each one's
+/// state exists only while it is shown.
 enum Mode {
     List,
     Detail(Detail),
-    Prompt(Prompt),
+    Search(Prompt),
+    Create(Draft),
     Choose(Choice),
+}
+
+/// A new issue being typed: its title, then its description.
+enum Draft {
+    Title(Prompt),
+    Description { title: String, description: Prompt },
+}
+
+impl Draft {
+    fn prompt(&self) -> &Prompt {
+        match self {
+            Draft::Title(p) | Draft::Description { description: p, .. } => p,
+        }
+    }
+
+    fn prompt_mut(&mut self) -> &mut Prompt {
+        match self {
+            Draft::Title(p) | Draft::Description { description: p, .. } => p,
+        }
+    }
+
+    /// What the prompt line says before the text.
+    fn label(&self) -> &'static str {
+        match self {
+            Draft::Title(_) => "New issue title: ",
+            Draft::Description { .. } => "Description (optional): ",
+        }
+    }
 }
 
 /// The field a choice sets.
@@ -517,7 +549,7 @@ impl App {
     pub fn open(&self) -> Option<&IssueId> {
         match &self.mode {
             Mode::Detail(d) => Some(&d.id),
-            Mode::List | Mode::Prompt(_) | Mode::Choose(_) => None,
+            Mode::List | Mode::Search(_) | Mode::Create(_) | Mode::Choose(_) => None,
         }
     }
 
@@ -576,14 +608,17 @@ impl App {
     /// Handles one key. Only presses count, and Ctrl-C quits everywhere.
     /// Any key takes away the message of a failed write.
     ///
-    /// At the prompt, keys edit its line (`Prompt::key`); Enter searches
-    /// and Esc goes back to the list as it was. Elsewhere q quits. In a
+    /// At a prompt, keys edit its line (`Prompt::key`), and Esc goes back to
+    /// the list as it was, with nothing written. At the search prompt,
+    /// Enter searches. At a new issue's title, Enter goes on to its
+    /// description, and there Enter creates it. Elsewhere q quits. In a
     /// choice, j/k (or the arrows) move, and Enter, or a value's number,
     /// sets it; Esc goes back with nothing written. In the list and the
     /// detail, r asks for a reload. In the list, j/k (or the arrows) move
     /// within it; 1-7 filter by status and 0 clears that filter, p goes to
-    /// the next project, and `/` opens the prompt with the search in it; s
-    /// and ! open a choice of the selected issue's status and priority; and
+    /// the next project, and `/` opens the prompt with the search in it; c
+    /// starts a new issue; s and ! open a choice of the selected issue's
+    /// status and priority; and
     /// Enter opens its detail, asking for a reload to read its comments. A
     /// new filter selects the first row. In the detail, keys scroll
     /// (`Detail::scroll`), and Esc goes back to the list, as it was.
@@ -622,14 +657,21 @@ impl App {
                 None => Action::Stay,
             };
         }
-        if let Mode::Prompt(p) = &mut self.mode {
+        let searching = matches!(self.mode, Mode::Search(_));
+        let prompt = match &mut self.mode {
+            Mode::Search(p) => Some(p),
+            Mode::Create(d) => Some(d.prompt_mut()),
+            _ => None,
+        };
+        if let Some(p) = prompt {
             p.error = None;
             return match key.code {
                 KeyCode::Esc => {
                     self.mode = Mode::List;
                     Action::Stay
                 }
-                KeyCode::Enter => self.submit(),
+                KeyCode::Enter if searching => self.submit(),
+                KeyCode::Enter => self.next_draft(),
                 _ => {
                     p.key(key);
                     Action::Stay
@@ -642,7 +684,9 @@ impl App {
             _ => {}
         }
         match &mut self.mode {
-            Mode::List | Mode::Prompt(_) | Mode::Choose(_) => self.list_key(key.code),
+            Mode::List | Mode::Search(_) | Mode::Create(_) | Mode::Choose(_) => {
+                self.list_key(key.code)
+            }
             Mode::Detail(_) if key.code == KeyCode::Esc => {
                 self.mode = Mode::List;
                 Action::Stay
@@ -682,7 +726,11 @@ impl App {
             }
             KeyCode::Char('/') => {
                 let text = self.search.as_ref().map_or("", |q| q.raw());
-                self.mode = Mode::Prompt(Prompt::new(text));
+                self.mode = Mode::Search(Prompt::new(text));
+                Action::Stay
+            }
+            KeyCode::Char('c') => {
+                self.mode = Mode::Create(Draft::Title(Prompt::new("")));
                 Action::Stay
             }
             KeyCode::Char('s') => self.choose(Field::Status),
@@ -732,20 +780,97 @@ impl App {
         self.failed = Some(clean(why).into_owned());
     }
 
-    /// Pasted text goes into the prompt; elsewhere it does nothing.
+    /// The prompt being typed in, if one is shown.
+    fn prompt(&self) -> Option<&Prompt> {
+        match &self.mode {
+            Mode::Search(p) => Some(p),
+            Mode::Create(d) => Some(d.prompt()),
+            Mode::List | Mode::Detail(_) | Mode::Choose(_) => None,
+        }
+    }
+
+    /// Pasted text goes into the prompt, its newlines as spaces; elsewhere
+    /// it does nothing.
     pub fn paste(&mut self, text: &str) -> Action {
-        if let Mode::Prompt(p) = &mut self.mode {
+        let prompt = match &mut self.mode {
+            Mode::Search(p) => Some(p),
+            Mode::Create(d) => Some(d.prompt_mut()),
+            _ => None,
+        };
+        if let Some(p) = prompt {
             p.error = None;
             p.insert(text);
         }
         Action::Stay
     }
 
+    /// Enter at a new issue's prompt. A title the command line takes
+    /// (`parse::title`: not blank) goes on to the description; a blank one
+    /// is refused with the command line's message. Enter at the
+    /// description, empty or not, creates the issue.
+    fn next_draft(&mut self) -> Action {
+        let Mode::Create(draft) = &mut self.mode else {
+            return Action::Stay;
+        };
+        match draft {
+            Draft::Title(p) => match lcl_core::parse::title(&p.text) {
+                Ok(title) => {
+                    *draft = Draft::Description {
+                        title,
+                        description: Prompt::new(""),
+                    };
+                }
+                Err(e) => p.error = Some(e.0),
+            },
+            Draft::Description { title, description } => {
+                let edit = Edit::Create {
+                    title: std::mem::take(title),
+                    description: std::mem::take(&mut description.text),
+                };
+                self.mode = Mode::List;
+                return Action::Write(edit);
+            }
+        }
+        Action::Stay
+    }
+
+    /// After a write and the reload that follows it: a new issue is
+    /// selected, and a status filter, project filter or search that would
+    /// hide it is taken away.
+    pub fn written(&mut self, edit: &Edit, id: &IssueId) {
+        if !matches!(edit, Edit::Create { .. }) {
+            return;
+        }
+        let Some(issue) = self.snapshot.issues.iter().find(|i| &i.id == id) else {
+            return;
+        };
+        if self.filter.is_some_and(|s| issue.status != s) {
+            self.filter = None;
+        }
+        if self
+            .project
+            .as_ref()
+            .is_some_and(|p| issue.project_id.as_deref() != Some(p.id.as_str()))
+        {
+            self.project = None;
+        }
+        if self
+            .snapshot
+            .search
+            .as_ref()
+            .is_some_and(|found| !found.issues.contains(id))
+        {
+            self.search = None;
+            self.snapshot.search = None;
+        }
+        self.selected = Some(id.clone());
+    }
+
     /// Enter at the prompt. A query `lcl search` takes becomes the search,
     /// and a reload runs it. An empty line takes the search away. A query
     /// with nothing to search for leaves the prompt open, and says so.
     fn submit(&mut self) -> Action {
-        let Mode::Prompt(p) = &mut self.mode else {
+        let Mode::Search(p) = &mut self.mode else {
             return Action::Stay;
         };
         if p.text.trim().is_empty() {
@@ -833,7 +958,7 @@ impl App {
         let shown = match &self.mode {
             Mode::Detail(d) => Some(&d.id),
             Mode::Choose(c) => Some(&c.issue),
-            Mode::List | Mode::Prompt(_) => None,
+            Mode::List | Mode::Search(_) | Mode::Create(_) => None,
         };
         if let Some(id) = shown
             && !self.snapshot.issues.iter().any(|i| &i.id == id)
@@ -846,9 +971,9 @@ impl App {
     /// has one; how many issues it has; and when the list is narrowed, how
     /// many of them are listed, and by what status, project and search.
     /// `demo (D) · 2 of 5 issues · status: Done · project: tui · search: login`.
-    /// At the prompt, after an Enter that didn't search, it says why.
+    /// At a prompt, after an Enter it refused, it says why.
     fn header(&self) -> String {
-        if let Mode::Prompt(Prompt { error: Some(e), .. }) = &self.mode {
+        if let Some(Prompt { error: Some(e), .. }) = self.prompt() {
             return clean(e).into_owned();
         }
         let mut out = self.snapshot.workspace.clone();
@@ -992,9 +1117,14 @@ impl App {
                 self.draw_detail(f, chunks[1], d);
                 DETAIL_HELP.into()
             }
-            Mode::Prompt(p) => {
+            Mode::Search(p) => {
                 self.draw_list(f, chunks[1]);
-                draw_prompt(f, chunks[2], p);
+                draw_prompt(f, chunks[2], "/", p);
+                return;
+            }
+            Mode::Create(d) => {
+                self.draw_list(f, chunks[1]);
+                draw_prompt(f, chunks[2], d.label(), d.prompt());
                 return;
             }
             Mode::Choose(c) => {
@@ -1099,16 +1229,16 @@ impl App {
     }
 }
 
-/// The prompt's line, `/` and its text, with the cursor on it. While the
+/// A prompt's line, `label` and its text, with the cursor on it. While the
 /// line is wider than `area`, its start is left out, so the cursor stays on
 /// screen with a cell for it.
-fn draw_prompt(f: &mut Frame, area: Rect, p: &Prompt) {
+fn draw_prompt(f: &mut Frame, area: Rect, label: &str, p: &Prompt) {
     let width = usize::from(area.width);
     if width == 0 {
         return;
     }
-    let line = format!("/{}", p.text);
-    let cursor = 1 + cells(&p.text[..p.cursor]);
+    let line = format!("{label}{}", p.text);
+    let cursor = cells(label) + cells(&p.text[..p.cursor]);
     let over = (cursor + 1).saturating_sub(width);
     let (mut start, mut dropped) = (line.len(), 0);
     for (i, g) in line.grapheme_indices(true) {
@@ -1193,10 +1323,22 @@ fn load(store: &Store, request: &Request) -> Result<Snapshot> {
     })
 }
 
-/// Makes `edit` with `Store::update_issue`, as `lcl issue update` does: one
-/// transaction, which the change log records under the store's author.
-fn write(store: &mut Store, edit: &Edit) -> Result<()> {
+/// Makes `edit` as the command line does, in one transaction, which the
+/// change log records under the store's author: a new issue with
+/// `Store::create_issue`, as `lcl issue create` does (Backlog, no
+/// priority, the author its creator), a change with `Store::update_issue`,
+/// as `lcl issue update` does. The issue it wrote.
+fn write(store: &mut Store, edit: &Edit) -> Result<IssueId> {
     let (id, update) = match edit {
+        Edit::Create { title, description } => {
+            let new = NewIssue {
+                title: title.clone(),
+                description: description.clone(),
+                creator: store.author().map(String::from),
+                ..Default::default()
+            };
+            return Ok(store.create_issue(new, &Placement::default())?.id);
+        }
         Edit::Status(id, status) => (
             id,
             IssueUpdate {
@@ -1214,7 +1356,7 @@ fn write(store: &mut Store, edit: &Edit) -> Result<()> {
     };
     let issue = IssueRef::Id(id.as_str().to_string());
     store.update_issue(&issue, &Placement::default(), &update)?;
-    Ok(())
+    Ok(id.clone())
 }
 
 /// The next key or paste, or None if none comes within a quarter second.
@@ -1231,13 +1373,14 @@ fn next_input() -> Result<Option<Input>> {
 
 /// Draws, then acts on the next key or paste, until a quit. A reload is
 /// given what the app asks for (`App::request`). A write is followed by a
-/// reload; if it fails, the app says why (`App::failed`) and goes on. An
+/// reload, then `App::written`; if it fails, the app says why
+/// (`App::failed`) and goes on. An
 /// error drawing, reading a key or reloading ends the loop with that error.
 fn run_app<B: Backend>(
     terminal: &mut Terminal<B>,
     app: &mut App,
     mut reload: impl FnMut(&Request) -> Result<Snapshot>,
-    mut write: impl FnMut(&Edit) -> Result<()>,
+    mut write: impl FnMut(&Edit) -> Result<IssueId>,
     mut next_input: impl FnMut() -> Result<Option<Input>>,
 ) -> Result<()>
 where
@@ -1257,9 +1400,10 @@ where
                 app.reloaded(snapshot);
             }
             Action::Write(edit) => match write(&edit) {
-                Ok(()) => {
+                Ok(id) => {
                     let snapshot = reload(&app.request())?;
                     app.reloaded(snapshot);
+                    app.written(&edit, &id);
                 }
                 Err(e) => app.failed(&e.to_string()),
             },
@@ -1494,6 +1638,7 @@ mod tests {
             press('/'),
             press('s'),
             press('!'),
+            press('c'),
             code(KeyCode::Enter),
             code(KeyCode::Esc),
         ];
@@ -1557,8 +1702,8 @@ mod tests {
                 }
             }
         }
-        // 1 + 14 + 14^2 + 14^3 + 14^4 sequences from each start.
-        assert_eq!(sequences, 3 * 41_371);
+        // 1 + 15 + 15^2 + 15^3 + 15^4 sequences from each start.
+        assert_eq!(sequences, 3 * 54_241);
     }
 
     #[test]
@@ -1664,7 +1809,7 @@ mod tests {
                 "   W-4  Backlog     None    issue 4                         ",
                 "   W-5  Backlog     None    issue 5                         ",
                 "                                                            ",
-                "j/k: move  Enter: open  s: status  !: priority  /: search  p",
+                "j/k: move  Enter: open  c: create  s: status  !: priority  /",
             ]
             .map(String::from)
         );
@@ -1681,7 +1826,7 @@ mod tests {
                 "work (W) · 2 of 5 issues · status: Done                     ",
                 "   W-1  Done        None    issue 1                         ",
                 ">> W-3  Done        None    issue 3                         ",
-                "j/k: move  Enter: open  s: status  !: priority  /: search  p",
+                "j/k: move  Enter: open  c: create  s: status  !: priority  /",
             ]
             .map(String::from)
         );
@@ -1732,7 +1877,7 @@ mod tests {
                 "   W-10   InProgress  High    Tabs and newlines                       ",
                 "   W-112  Todo        Low     Short               a very long…        ",
                 "                                                                      ",
-                "j/k: move  Enter: open  s: status  !: priority  /: search  p: project ",
+                "j/k: move  Enter: open  c: create  s: status  !: priority  /: search  ",
             ]
             .map(String::from)
         );
@@ -1971,7 +2116,7 @@ mod tests {
     }
 
     /// For a loop that is given no write to make.
-    fn no_write(edit: &Edit) -> Result<()> {
+    fn no_write(edit: &Edit) -> Result<IssueId> {
         panic!("wrote {edit:?}")
     }
 
@@ -2221,7 +2366,7 @@ mod tests {
         assert_eq!((opened(&app), selected(&app)), (None, "W-2"));
         assert_eq!(
             frame(&app, 30, 4)[3].trim_end(),
-            "j/k: move  Enter: open  s: sta"
+            "j/k: move  Enter: open  c: cre"
         );
     }
 
@@ -2858,6 +3003,154 @@ mod tests {
         )
         .unwrap();
         assert_eq!(*reloads.borrow(), 0);
+    }
+
+    #[test]
+    fn c_asks_for_a_title_then_a_description_and_esc_writes_nothing() {
+        let mut app = App::new(five());
+        assert_eq!(app.key(press('c')), Action::Stay);
+        // q, r and the other list keys are typed.
+        for c in "qrs !".chars() {
+            app.key(press(c));
+        }
+        assert_eq!(frame(&app, 30, 3)[2], "New issue title: qrs !        ");
+        assert_eq!(app.key(code(KeyCode::Esc)), Action::Stay);
+        assert!(matches!(app.mode, Mode::List));
+        // A title, then a description.
+        app.key(press('c'));
+        app.paste("Fix the build");
+        assert_eq!(app.key(code(KeyCode::Enter)), Action::Stay);
+        assert_eq!(frame(&app, 30, 3)[2], "Description (optional):       ");
+        app.paste("It fails\non Windows");
+        assert_eq!(
+            app.key(code(KeyCode::Enter)),
+            Action::Write(Edit::Create {
+                title: "Fix the build".into(),
+                description: "It fails on Windows".into()
+            })
+        );
+        assert!(matches!(app.mode, Mode::List));
+        // Esc at the description writes nothing either; an empty one is
+        // fine.
+        app.key(press('c'));
+        app.paste("x");
+        app.key(code(KeyCode::Enter));
+        assert_eq!(app.key(code(KeyCode::Esc)), Action::Stay);
+        app.key(press('c'));
+        app.paste("y");
+        app.key(code(KeyCode::Enter));
+        assert_eq!(
+            app.key(code(KeyCode::Enter)),
+            Action::Write(Edit::Create {
+                title: "y".into(),
+                description: String::new()
+            })
+        );
+    }
+
+    #[test]
+    fn a_blank_title_is_refused_with_the_command_line_s_message() {
+        let mut app = App::new(five());
+        app.key(press('c'));
+        app.paste("   ");
+        assert_eq!(app.key(code(KeyCode::Enter)), Action::Stay);
+        let message = lcl_core::parse::title("   ").unwrap_err().0;
+        assert_eq!(message, "a title can't be blank");
+        assert_eq!(frame(&app, 40, 3)[0].trim_end(), message);
+        // Still at the title; the next key takes the message away.
+        app.key(press('a'));
+        assert_eq!(frame(&app, 40, 3)[0].trim_end(), "work (W) · 5 issues");
+        assert_eq!(frame(&app, 40, 3)[2].trim_end(), "New issue title:    a");
+    }
+
+    #[test]
+    fn a_new_issue_is_selected_with_any_filter_that_hides_it_taken_away() {
+        let new = || Edit::Create {
+            title: "new".into(),
+            description: String::new(),
+        };
+        // Under Done, in project tui, searching: W-9 is Backlog, in no
+        // project, and the search didn't find it.
+        let mut app = App::new(four());
+        app.key(press('5'));
+        app.key(press('p'));
+        app.key(press('p'));
+        app.key(press('p'));
+        let mut found = four();
+        found.issues.push(issue(9, Status::Backlog));
+        found.search = Some(Found {
+            query: "login".into(),
+            issues: issue_ids(&["id-1"]),
+        });
+        app.search = Some(SearchQuery::parse("login").unwrap());
+        app.reloaded(found.clone());
+        assert_eq!(
+            app.header(),
+            "work (W) · 1 of 5 issues · status: Done · project: tui · search: login"
+        );
+        app.written(&new(), &id("id-9"));
+        assert_eq!(
+            (app.header(), selected(&app)),
+            ("work (W) · 5 issues".to_string(), "W-9")
+        );
+        assert!(app.request().search.is_none());
+        // A filter that doesn't hide it stays.
+        let mut app = App::new(five());
+        app.key(press('1'));
+        let mut more = five();
+        more.issues.insert(0, issue(6, Status::Backlog));
+        app.reloaded(more);
+        app.written(&new(), &id("id-6"));
+        assert_eq!(
+            (app.header(), selected(&app)),
+            (
+                "work (W) · 4 of 6 issues · status: Backlog".to_string(),
+                "W-6"
+            )
+        );
+        // A change to an issue moves no filter.
+        app.written(&Edit::Status(id("id-6"), Status::Done), &id("id-6"));
+        assert_eq!(app.filter, Some(Status::Backlog));
+    }
+
+    #[test]
+    fn an_issue_is_created_as_issue_create_creates_it() {
+        let store = RefCell::new(three());
+        let mut app = App::new(load(&store.borrow(), &Request::default()).unwrap());
+        // Under Done, which the new issue (Backlog) isn't.
+        let mut pressed = vec![press('5'), press('c')];
+        pressed.extend("Four".chars().map(press));
+        pressed.push(code(KeyCode::Enter));
+        pressed.extend("the fourth".chars().map(press));
+        pressed.extend([code(KeyCode::Enter), press('q')]);
+        run_on(&store, &mut app, &pressed).unwrap();
+        let issue = app.selected_issue().unwrap().clone();
+        assert_eq!(
+            (
+                issue.identifier.as_str(),
+                issue.title.as_str(),
+                issue.description.as_str(),
+                issue.status,
+                issue.priority,
+                issue.creator.as_deref(),
+            ),
+            (
+                "D-4",
+                "Four",
+                "the fourth",
+                Status::Backlog,
+                Priority::None,
+                Some("al")
+            )
+        );
+        assert_eq!(app.filter, None);
+        let four = IssueRef::Number {
+            key: None,
+            number: 4,
+        };
+        let history = store.borrow().issue_history(&four).unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].author.as_deref(), Some("al"));
     }
 
     /// `leave` runs once `enter` has, on every way out of `body`.

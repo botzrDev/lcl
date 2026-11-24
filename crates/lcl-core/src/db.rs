@@ -363,6 +363,11 @@ impl Store {
         self.author = author;
     }
 
+    /// Who makes this store's writes (`set_author`).
+    pub fn author(&self) -> Option<&str> {
+        self.author.as_deref()
+    }
+
     /// When this open upgraded the file, one line saying so, naming the
     /// snapshot taken first and what the upgrade changed, if anything:
     /// `upgraded workspace "prob" to schema 11; the file as it was is
