@@ -92,7 +92,7 @@ An issue matches when every word is in its title and description together, or ev
 
 `lcl export` writes the whole workspace as `lcl-export/1`: one JSON object per line. The workspace header is first, then labels, projects, milestones, cycles, issues, comments, relations, and docs. The same workspace exports to the same bytes. Issues are named by number in the file, not by the UUID stored on disk. Cycles and docs keep their ids, because a name is not unique for them.
 
-`lcl import` restores that file into an empty workspace with the same key. Numbers, refs, creators, authors, and timestamps are kept as the file gives them. The file is checked whole before anything is written, and the write is one transaction. `--dry-run` checks and counts, and writes nothing. A stored value the import would refuse stops an export as well, and the export writes nothing.
+`lcl import` restores that file into an empty workspace with the same key. Numbers, refs, creators, authors, and timestamps are kept as the file gives them. The file is checked whole before anything is written, and the write is one transaction. `--dry-run` checks and counts, and writes nothing. A record of a type this lcl doesn't know is skipped and counted by type, so a file from a later lcl, which adds new record types rather than new keys, still imports; an unknown key in a known record is refused. A stored value the import would refuse stops an export as well, and the export writes nothing.
 
 ## Backup
 

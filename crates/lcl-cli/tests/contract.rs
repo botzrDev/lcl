@@ -816,10 +816,28 @@ mod cases {
         let file = file.to_str().expect("a UTF-8 temp path");
         let empty = Env::new();
         j(&empty, &["init", "copy", "--key", "DEMO"]);
-        vec![
+        let mut samples = vec![
             j(&empty, &["import", file, "--dry-run"]),
             j(&empty, &["import", file]),
-        ]
+        ];
+        samples.push(import_with_unknown_types());
+        samples
+    }
+
+    /// An import of a file with records of a type lcl doesn't know.
+    pub fn import_with_unknown_types() -> Value {
+        let rich = rich();
+        j(&rich.env, &["export", "--output", "out.jsonl"]);
+        let path = rich.env.cwd.path().join("out.jsonl");
+        let mut text = std::fs::read_to_string(&path).expect("the export");
+        text.push_str("{\"type\":\"attachment\",\"issue\":1}\n");
+        std::fs::write(&path, text).expect("write the file back");
+        let empty = Env::new();
+        j(&empty, &["init", "copy", "--key", "DEMO"]);
+        j(
+            &empty,
+            &["import", path.to_str().expect("a UTF-8 temp path")],
+        )
     }
 }
 
@@ -941,6 +959,12 @@ mod objects {
         pin_object("Doc", &docs);
     }
 
+    #[test]
+    fn object_skipped_records() {
+        let out = super::cases::import_with_unknown_types();
+        pin_object("SkippedRecords", &[out["skipped"][0].clone()]);
+    }
+
     /// Every object in the note is pinned above or is one of the three that
     /// claim nothing, so a new object can't arrive without a test.
     #[test]
@@ -960,6 +984,7 @@ mod objects {
                 "Priority",
                 "Project",
                 "RelatedIssue",
+                "SkippedRecords",
                 "Status",
             ]
         );

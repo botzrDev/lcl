@@ -27,7 +27,7 @@ use crate::parse;
 use rusqlite::{Connection, params};
 use serde::Serialize;
 use serde_json::{Map, Value};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 /// The format this lcl writes and reads.
 pub const FORMAT: &str = "lcl-export/1";
@@ -71,6 +71,14 @@ pub struct Export {
     pub counts: Counts,
 }
 
+/// Records of one type an import didn't know, and so skipped.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Skipped {
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub records: usize,
+}
+
 /// What an import wrote (or, with `dry_run`, would have written).
 #[derive(Debug, Clone, Serialize)]
 pub struct ImportSummary {
@@ -79,6 +87,10 @@ pub struct ImportSummary {
     /// The number the next created issue gets.
     pub next_issue_number: i64,
     pub dry_run: bool,
+    /// The records whose type this lcl doesn't know, by type, in type
+    /// order. A later lcl-export/1 adds what it adds as new record types,
+    /// and an older lcl reads the rest of the file.
+    pub skipped: Vec<Skipped>,
     /// The workspace's name and key, for the message.
     #[serde(skip)]
     pub workspace: String,
@@ -392,6 +404,8 @@ struct DocRec {
 /// A whole file, every value and reference checked.
 struct File {
     header: Header,
+    /// Records of types this lcl doesn't know: their count, by type.
+    skipped: BTreeMap<String, usize>,
     labels: Vec<LabelRec>,
     projects: Vec<ProjectRec>,
     milestones: Vec<MilestoneRec>,
@@ -624,8 +638,10 @@ impl Rec {
 }
 
 /// Splits the input into lines (the last newline is optional) and reads
-/// each as a JSON object with a known "type".
-fn records(input: &[u8]) -> Result<Vec<Rec>> {
+/// each as a JSON object with a "type". A record of a type this lcl
+/// doesn't know is counted in the map and left out, unless it is the first
+/// line, which must be the workspace header.
+fn records(input: &[u8]) -> Result<(Vec<Rec>, BTreeMap<String, usize>)> {
     if input.is_empty() {
         return Err(bad(
             1,
@@ -643,6 +659,7 @@ fn records(input: &[u8]) -> Result<Vec<Rec>> {
     }
     let body = input.strip_suffix(b"\n").unwrap_or(input);
     let mut out = Vec::new();
+    let mut skipped = BTreeMap::new();
     for (i, raw) in body.split(|b| *b == b'\n').enumerate() {
         let line = i + 1;
         let text = std::str::from_utf8(raw).map_err(|e| {
@@ -676,18 +693,37 @@ fn records(input: &[u8]) -> Result<Vec<Rec>> {
         };
         let kind = match map.remove("type") {
             None => return Err(bad(line, "type", "missing; every record has one")),
-            Some(Value::String(t)) => {
-                TYPES.iter().find(|k| **k == t).copied().ok_or_else(|| {
-                    bad(
+            Some(Value::String(t)) => match TYPES.iter().find(|k| **k == t) {
+                Some(k) => *k,
+                None if t.trim().is_empty() => {
+                    return Err(bad(line, "type", "blank; every record has one"));
+                }
+                // A known type in other case is a typo, not a later type.
+                None if TYPES.iter().any(|k| k.eq_ignore_ascii_case(&t)) => {
+                    let k = TYPES
+                        .iter()
+                        .find(|k| k.eq_ignore_ascii_case(&t))
+                        .expect("just found");
+                    return Err(bad(
                         line,
                         "type",
+                        format!("{t:?} is not a record type; types are lower case, as {k:?}"),
+                    ));
+                }
+                None if line == 1 => {
+                    return Err(bad(
+                        1,
+                        "type",
                         format!(
-                            "unknown record type {t:?}; expected one of: {}",
-                            TYPES.join(", ")
+                            "the first line must be the workspace header (type \"workspace\"), not {t:?}"
                         ),
-                    )
-                })?
-            }
+                    ));
+                }
+                None => {
+                    *skipped.entry(t).or_insert(0) += 1;
+                    continue;
+                }
+            },
             Some(v) => {
                 return Err(bad(
                     line,
@@ -716,19 +752,21 @@ fn records(input: &[u8]) -> Result<Vec<Rec>> {
         map.insert("type".into(), Value::String(kind.into()));
         out.push(Rec { line, kind, map });
     }
-    Ok(out)
+    Ok((out, skipped))
 }
 
 /// Reads and checks every value of every record, then every reference
 /// between them. `now` is the import time, the default for timestamps.
 fn read_file(input: &[u8], now: i64) -> Result<File> {
-    let mut recs = records(input)?.into_iter();
+    let (recs, skipped) = records(input)?;
+    let mut recs = recs.into_iter();
     let mut first = recs
         .next()
         .expect("records() returns the header line or an error");
     let header = read_header(&mut first)?;
     let mut file = File {
         header,
+        skipped,
         labels: vec![],
         projects: vec![],
         milestones: vec![],
@@ -1610,6 +1648,14 @@ impl Store {
             counts: file.counts(),
             next_issue_number: next,
             dry_run,
+            skipped: file
+                .skipped
+                .iter()
+                .map(|(kind, &records)| Skipped {
+                    kind: kind.clone(),
+                    records,
+                })
+                .collect(),
             workspace,
             key,
         })

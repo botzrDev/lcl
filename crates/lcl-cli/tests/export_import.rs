@@ -636,8 +636,12 @@ fn a_bad_line_exits_2_naming_it_and_writes_nothing() {
             r#"line 9: id: invalid id "top"; expected a UUID"#.into()),
         ("an unknown key", set(12, r#"{"type":"issue","number":2,"title":"two","parent":1,"titel":"x"}"#),
             r#"line 12: issue: unknown key "titel"; an issue record has: type, number, title, description, status, priority, assignee, creator, ref, parent, project, milestone, labels, cycles, estimate, due_date, created_at, updated_at, started_at, completed_at, canceled_at"#.into()),
-        ("an unknown type", set(14, r#"{"type":"attachment","issue":1}"#),
-            r#"line 14: type: unknown record type "attachment"; expected one of: workspace, label, project, milestone, cycle, issue, comment, relation, doc"#.into()),
+        ("a known type in other case", set(14, r#"{"type":"Comment","issue":1,"body":"hi"}"#),
+            r#"line 14: type: "Comment" is not a record type; types are lower case, as "comment""#.into()),
+        ("a blank type", set(14, r#"{"type":" ","issue":1}"#),
+            "line 14: type: blank; every record has one".into()),
+        ("an unknown type first", { let mut l = base(); l.insert(0, r#"{"type":"initiative"}"#.into()); l },
+            r#"line 1: type: the first line must be the workspace header (type "workspace"), not "initiative""#.into()),
         ("no header", base()[1..].to_vec(),
             r#"line 1: type: the first line must be the workspace header (type "workspace"), not "label""#.into()),
         ("the header second", { let mut l = base(); l.swap(0, 1); l },
@@ -1008,7 +1012,7 @@ fn dry_run_counts_and_writes_nothing() {
     let out = env.lcl_stdin(&["--json", "import", "-", "--dry-run"], file.as_bytes());
     assert_eq!(
         out.assert_ok().json(),
-        json!({"issues": 9, "comments": 4, "relations": 5, "labels": 3, "projects": 2, "milestones": 2, "cycles": 1, "docs": 3, "next_issue_number": 10, "dry_run": true})
+        json!({"issues": 9, "comments": 4, "relations": 5, "labels": 3, "projects": 2, "milestones": 2, "cycles": 1, "docs": 3, "next_issue_number": 10, "dry_run": true, "skipped": []})
     );
     assert!(dump(&env.db_path()) == before, "--dry-run wrote");
     let real = env
@@ -1692,4 +1696,63 @@ fn a_second_person_importing_an_export_sees_the_same_issues() {
             .clone()
     };
     assert_eq!(next(&b), next(&a));
+}
+
+/// A record of a type this lcl doesn't know is skipped, and counted by
+/// type: a later lcl-export/1 adds what it adds as new record types, and
+/// this lcl reads the rest of the file. Its keys aren't checked, since it
+/// isn't read. The rest of the file imports as it would alone: an export
+/// afterwards is the file without them. (The file is a full export, so it
+/// carries every time, and the comparison holds whenever it runs.)
+#[test]
+fn records_of_unknown_types_are_skipped_and_counted() {
+    let original = export(&everything());
+    let mut lines: Vec<String> = original.lines().map(str::to_string).collect();
+    lines.insert(
+        3,
+        r#"{"type":"initiative","name":"Q1","whatever":[1,2]}"#.into(),
+    );
+    lines.push(r#"{"type":"attachment","issue":1,"url":"https://example.com/a.png"}"#.into());
+    lines.push(r#"{"type":"attachment"}"#.into());
+    let file = join(&lines);
+    let what = "9 issues, 4 comments, 5 relations, 3 labels, 2 projects, 2 milestones, 1 cycle, 3 docs into workspace drm (key DRM); next number DRM-10";
+
+    let env = drm();
+    let dry = env.lcl_stdin(&["import", "-", "--dry-run"], file.as_bytes());
+    assert_eq!(
+        trio(&dry),
+        (
+            0,
+            format!("Dry run, nothing written: would import {what}\nWould skip 3 records of types this lcl doesn't know: attachment (2), initiative (1)\n").as_str(),
+            ""
+        )
+    );
+    let out = import(&env, &file);
+    assert_eq!(
+        trio(&out),
+        (
+            0,
+            format!("Imported {what}\nSkipped 3 records of types this lcl doesn't know: attachment (2), initiative (1)\n").as_str(),
+            ""
+        )
+    );
+    assert_eq!(export(&env), original);
+
+    let json = drm().lcl_stdin(&["--json", "import", "-"], file.as_bytes());
+    assert_eq!(
+        json.assert_ok().json()["skipped"],
+        json!([{"type": "attachment", "records": 2}, {"type": "initiative", "records": 1}])
+    );
+    let none = drm().lcl_stdin(&["--json", "import", "-"], original.as_bytes());
+    assert_eq!(none.assert_ok().json()["skipped"], json!([]));
+    let one = drm().lcl_stdin(
+        &["import", "-"],
+        format!("{original}{{\"type\":\"release\"}}\n").as_bytes(),
+    );
+    assert!(
+        one.assert_ok()
+            .stdout
+            .ends_with("\nSkipped 1 record of types this lcl doesn't know: release (1)\n"),
+        "{one:#?}"
+    );
 }

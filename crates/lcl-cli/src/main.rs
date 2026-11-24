@@ -2866,6 +2866,20 @@ fn run(cli: Cli) -> Result<()> {
                 } else {
                     outln!("Imported {what}");
                 }
+                if !s.skipped.is_empty() {
+                    let total: usize = s.skipped.iter().map(|k| k.records).sum();
+                    let types: Vec<String> = s
+                        .skipped
+                        .iter()
+                        .map(|k| format!("{} ({})", k.kind, k.records))
+                        .collect();
+                    outln!(
+                        "{} {total} record{} of types this lcl doesn't know: {}",
+                        if s.dry_run { "Would skip" } else { "Skipped" },
+                        if total == 1 { "" } else { "s" },
+                        types.join(", ")
+                    );
+                }
             }
         }
         Commands::Tui => {

@@ -193,7 +193,8 @@ lcl --json backup demo-copy.sqlite
 ```
 
 - `lcl export` writes the whole workspace as `lcl-export/1` text (one JSON record per line), to `--output PATH` or to stdout. It leaves out what is in the trash. This is how a workspace is shared: another person imports the file. With `--output` and `--json` it prints `path` and a count of each kind of record (`labels`, `projects`, `milestones`, `cycles`, `issues`, `comments`, `relations`, `docs`).
-- `lcl -w NAME import FILE` restores such a file into an empty workspace that has the file's key (make one with `workspace create NAME --key KEY`). `--dry-run` checks everything and writes nothing. With `--json` it prints the same counts, `next_issue_number` and `dry_run`. A workspace that isn't empty is refused with exit 1, kind `conflict`.
+- `lcl -w NAME import FILE` restores such a file into an empty workspace that has the file's key (make one with `workspace create NAME --key KEY`). `--dry-run` checks everything and writes nothing. With `--json` it prints the same counts, `next_issue_number`, `dry_run` and `skipped`. A workspace that isn't empty is refused with exit 1, kind `conflict`.
+- A record whose `type` this lcl doesn't know (from a later lcl) is skipped, not refused: `skipped` lists each such type with its count (`[{"type": "attachment", "records": 2}]`), and the text output names them. An unknown key in a known record is still refused, exit 2.
 - `lcl backup PATH` copies the workspace's SQLite file to PATH, safely while other lcl commands run. PATH must not exist; its directory must. With `--json` it prints `path`, `bytes` and `schema_version`. To restore it, put the copy where the workspace's file is (`lcl workspace show` prints that path) while no lcl is running.
 
 ## TUI

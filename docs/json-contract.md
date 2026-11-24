@@ -106,6 +106,14 @@ An issue as a relation names it.
 {"identifier": "string", "status": "Status", "title": "string"}
 ```
 
+### `SkippedRecords`
+
+The records of one type an import didn't know, in type order. A later `lcl-export/1` adds new record types, not new keys, so an older lcl reads the rest of the file.
+
+```json
+{"type": "string", "records": "integer"}
+```
+
 ### `Comment`
 
 `issue_id` is the issue's `id`, not its `KEY-N`. `deleted_at` is when the comment went to the trash, and null otherwise; so too for a label and a doc. Only a `--trashed` listing prints one that is there.
@@ -574,7 +582,7 @@ With `--output PATH`, what was written, as counts. Without it, stdout is the exp
 
 ### `lcl import`
 
-What the file holds, as counts, and the number the next new issue gets. With `--dry-run` nothing was written and `dry_run` is true.
+What the file holds, as counts, and the number the next new issue gets. With `--dry-run` nothing was written and `dry_run` is true. `skipped` lists the records whose type this lcl doesn't know, which it left out: empty when there were none.
 
 ```json
 {
@@ -587,7 +595,8 @@ What the file holds, as counts, and the number the next new issue gets. With `--
   "relations": "integer",
   "docs": "integer",
   "next_issue_number": "integer",
-  "dry_run": "boolean"
+  "dry_run": "boolean",
+  "skipped": ["SkippedRecords"]
 }
 ```
 
