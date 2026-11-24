@@ -6,7 +6,9 @@ The command line is the interface. `lcl --json` prints one JSON value on stdout,
 
 ## Install
 
-lcl needs Rust 1.98 or later.
+Each [release](https://github.com/botzrDev/lcl/releases) has `lcl` for Linux (x86_64 and arm64, glibc 2.28 or later), macOS (Apple silicon and Intel) and Windows (x86_64). Unpack the archive for your platform and put `lcl` on your `PATH`. `SHA256SUMS` lists every file's checksum.
+
+To build it instead, lcl needs Rust 1.98 or later.
 
     cargo install --path crates/lcl-cli --locked
 

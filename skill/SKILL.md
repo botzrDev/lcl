@@ -1,11 +1,11 @@
 ---
 name: lcl
-description: Use the `lcl` CLI (0.3.0-alpha.1), a local tracker that mirrors Linear with one SQLite file per workspace (issues, projects, milestones, cycles, labels, relations, comments, docs, and a trash for each). Use whenever the user asks to track work, create or manage issues, projects or documentation, look up a ticket (including by its Linear id such as BZR-1532), back up a workspace, run the TUI, or replace Linear with a local tool. Trigger on "lcl", "create an issue", "track this", "open a ticket", "project board", "local linear", or any request to manage tasks, issues or docs. Always pass `--json` when a program reads the output.
+description: Use the `lcl` CLI (0.3.0-alpha.2), a local tracker that mirrors Linear with one SQLite file per workspace (issues, projects, milestones, cycles, labels, relations, comments, docs, and a trash for each). Use whenever the user asks to track work, create or manage issues, projects or documentation, look up a ticket (including by its Linear id such as BZR-1532), back up a workspace, run the TUI, or replace Linear with a local tool. Trigger on "lcl", "create an issue", "track this", "open a ticket", "project board", "local linear", or any request to manage tasks, issues or docs. Always pass `--json` when a program reads the output.
 ---
 
 # lcl: local Linear-like tracker
 
-This skill describes lcl 0.3.0-alpha.1: `lcl --version` prints `lcl 0.3.0-alpha.1`. If it prints another version, this skill may not match the binary; use the skill from the same release. Each workspace is one SQLite file. Never edit that file directly; every change goes through `lcl`.
+This skill describes lcl 0.3.0-alpha.2: `lcl --version` prints `lcl 0.3.0-alpha.2`. If it prints another version, this skill may not match the binary; use the skill from the same release. Each workspace is one SQLite file. Never edit that file directly; every change goes through `lcl`.
 
 ## Which workspace
 

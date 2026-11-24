@@ -6,6 +6,10 @@ All notable changes to lcl are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.0-alpha.2] - 2026-11-23
+
+The second alpha, and the first with binaries: for Linux, macOS and Windows, on the GitHub release.
+
 ### Added
 
 - `lcl backup PATH` copies the workspace's file to PATH, safely while other lcl commands read and write it. The copy is one committed state. It is written under a temporary name and gets its name only when complete, so PATH is never half a file. A PATH that exists is refused with exit 1. So is a PATH whose directory is missing or can't be written, with kind `io` and the reason. A backup that can't get a lock in 30 seconds exits 1 with kind `other`, as a write does. The copy has the workspace file's permissions, as does the snapshot taken before an upgrade. With `--json` it prints `path`, `bytes` and `schema_version`.
@@ -20,7 +24,7 @@ All notable changes to lcl are recorded here. The format follows
 - The agent skill is in the repo, at `skill/SKILL.md`, and describes this version. It covers the trash, `lcl backup` and the `.lcl/.gitignore`. The README says how to install it.
 - `lcl init` writes `.lcl/.gitignore` containing `*`, so git ignores the workspace's file, its WAL and its snapshots without a step from you. An existing `.lcl/.gitignore` is left as it is. If the file can't be written, `lcl init` exits 1, kind `io`, and makes no workspace.
 
-### Upgrading
+### Upgrading from 0.3.0-alpha.1
 
 - The first command that opens a workspace upgrades it to schema 13. Schema 12 adds the trash for issues and schema 13 for docs, comments and labels. Everything starts out of it.
 - A workspace made by an earlier `lcl init` has no `.lcl/.gitignore`. Run `lcl init` again in its directory, with its name and key, to add one. That changes nothing else. A file git already tracks stays tracked: `git rm -r --cached .lcl` stops tracking it.

@@ -1,6 +1,6 @@
 # Architecture
 
-lcl 0.3.0-alpha.1 is a local tracker. One process opens one SQLite file, does its work, and exits. There is no account, no network call, and no license check.
+lcl 0.3.0-alpha.2 is a local tracker. One process opens one SQLite file, does its work, and exits. There is no account, no network call, and no license check.
 
 The command line is the interface. `lcl --help` lists every flag. This page is how the program is put together, and what this version does and does not do.
 
