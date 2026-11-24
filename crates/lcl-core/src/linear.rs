@@ -13,7 +13,8 @@
 //!   unstarted Todo, started In Progress (In Review when the state's name
 //!   says review), completed Done, canceled Canceled, duplicate Duplicate.
 //!   Priorities are the same 0 to 4 in both. Estimates must be whole.
-//! - People are named by their Linear display name.
+//! - People are named by their full name in Linear, else (when that is
+//!   blank) their display name.
 //! - A value lcl would refuse is a `Problem` naming the Linear issue it
 //!   came from; nothing is changed to make it fit. The one exception is
 //!   whitespace around a name, which lcl trims: the name is trimmed and a
@@ -261,10 +262,10 @@ impl Report {
     }
 }
 
-/// A person's name for lcl: their display name, else their full name.
+/// A person's name for lcl: their full name, else their display name.
 fn person(u: &Option<User>) -> Option<&str> {
     let u = u.as_ref()?;
-    [u.display_name.as_str(), u.name.as_str()]
+    [u.name.as_str(), u.display_name.as_str()]
         .into_iter()
         .find(|n| !n.trim().is_empty())
 }
@@ -738,7 +739,7 @@ mod tests {
                 "description": "Line one\n\nLine two", "status": "InReview",
                 "priority": "High", "estimate": 3, "due_date": "2026-11-24",
                 "created_at": 1_794_925_904, "updated_at": 1_794_992_400,
-                "started_at": 1_795_268_576, "assignee": "pag", "creator": "ann",
+                "started_at": 1_795_268_576, "assignee": "P. Green", "creator": "Ann Example",
                 "labels": ["content", "Needs-Human"], "project": "buffer-management",
                 "milestone": "Nov 2026 goals",
             })
@@ -759,7 +760,7 @@ mod tests {
             of_type(&recs, "comment"),
             [
                 &json!({"type": "comment", "issue": 4, "body": "First", "created_at": 1_795_168_800}),
-                &json!({"type": "comment", "issue": 4, "body": "Second", "author": "bo", "created_at": 1_795_255_200}),
+                &json!({"type": "comment", "issue": 4, "body": "Second", "author": "Bo", "created_at": 1_795_255_200}),
             ]
         );
         // "related" both ways is one relation.
@@ -855,6 +856,20 @@ mod tests {
                 "SMM-5: comment: the comment of 2026-11-20T10:00:00Z is blank",
             ]
         );
+    }
+
+    #[test]
+    fn a_person_is_their_full_name_else_their_display_name() {
+        let u = |name: &str, display: &str| {
+            Some(User {
+                name: name.into(),
+                display_name: display.into(),
+            })
+        };
+        assert_eq!(person(&u("P. Green", "pag")), Some("P. Green"));
+        assert_eq!(person(&u(" ", "pag")), Some("pag"));
+        assert_eq!(person(&u("", "")), None);
+        assert_eq!(person(&None), None);
     }
 
     #[test]

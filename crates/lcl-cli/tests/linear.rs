@@ -114,7 +114,7 @@ fn a_team_fills_an_empty_workspace_page_by_page() {
             &json!("Batch the posts"),
             &json!("InReview"),
             &json!("High"),
-            &json!("pat"),
+            &json!("P. Example"),
             &json!("Launch"),
             &json!(["content", "social", "urgent"])
         ),
