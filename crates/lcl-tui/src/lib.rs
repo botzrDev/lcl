@@ -1,10 +1,12 @@
-//! A read-only terminal view of a workspace's issues: a list, narrowed by
-//! status, project and search, and the detail of one issue.
+//! A terminal view of a workspace's issues: a list, narrowed by status,
+//! project and search, and the detail of one issue. It changes an issue's
+//! status and priority; the command line does every other write.
 //!
 //! The state and its key handling (`App`) are pure, and drawing takes any
-//! ratatui backend, so both are tested without a terminal. `run` puts the
-//! terminal in raw mode on the alternate screen, and `guarded` puts it back
-//! on every way out.
+//! ratatui backend, so both are tested without a terminal. A key that
+//! writes gives the loop an `Edit`, which `write` makes through lcl-core,
+//! as `lcl issue update` does. `run` puts the terminal in raw mode on the
+//! alternate screen, and `guarded` puts it back on every way out.
 
 use anyhow::Result;
 use crossterm::ExecutableCommand;
@@ -15,21 +17,20 @@ use crossterm::event::{
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
-use lcl_core::db::{IssueFilter, IssueSort, Page, Store};
-use lcl_core::models::{Comment, Issue, IssueId, Status};
+use lcl_core::db::{IssueFilter, IssueSort, IssueUpdate, Page, Placement, Store};
+use lcl_core::models::{Comment, Issue, IssueId, IssueRef, Priority, Status};
 use lcl_core::search::SearchQuery;
 use ratatui::buffer::CellWidth;
 use ratatui::prelude::*;
 use ratatui::widgets::*;
 use std::borrow::Cow;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::io::{IsTerminal, stdout};
 use std::time::Duration;
 use unicode_segmentation::UnicodeSegmentation;
 
-const LIST_HELP: &str =
-    "j/k: move  Enter: open  /: search  p: project  1-7: status  0: all  r: reload  q: quit";
+const LIST_HELP: &str = "j/k: move  Enter: open  s: status  !: priority  /: search  p: project  1-7: filter  0: all  r: reload  q: quit";
 const DETAIL_HELP: &str = "j/k: scroll  PgUp/PgDn: page  Esc: back  r: reload  q: quit";
 
 /// What marks the selected row. Every row is indented by its width.
@@ -242,6 +243,13 @@ pub struct Request {
     pub search: Option<SearchQuery>,
 }
 
+/// A write the TUI asks for: one field of one issue.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Edit {
+    Status(IssueId, Status),
+    Priority(IssueId, Priority),
+}
+
 /// What the terminal sends: a key, or text pasted in one piece.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Input {
@@ -250,9 +258,11 @@ pub enum Input {
 }
 
 /// What the loop does after a key.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
     Stay,
+    /// Make this write, then reload; or, if it fails, say why (`App::failed`).
+    Write(Edit),
     /// Read the issues again, with what `App::request` asks for (see
     /// `App::reloaded`).
     Reload,
@@ -260,12 +270,80 @@ pub enum Action {
 }
 
 /// What the screen shows, and where keys go: the list, the detail of one
-/// issue, or the search prompt under the list. Each one's state exists only
-/// while it is shown.
+/// issue, the search prompt under the list, or a choice of status or
+/// priority over it. Each one's state exists only while it is shown.
 enum Mode {
     List,
     Detail(Detail),
     Prompt(Prompt),
+    Choose(Choice),
+}
+
+/// The field a choice sets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Field {
+    Status,
+    Priority,
+}
+
+/// The priorities in their number keys' order, 0 to 4.
+const PRIORITIES: [Priority; 5] = [
+    Priority::None,
+    Priority::Urgent,
+    Priority::High,
+    Priority::Medium,
+    Priority::Low,
+];
+
+impl Field {
+    /// How many values there are: 7 statuses, 5 priorities.
+    fn len(self) -> usize {
+        match self {
+            Field::Status => Status::all().len(),
+            Field::Priority => PRIORITIES.len(),
+        }
+    }
+
+    /// The value at `at`, named.
+    fn name(self, at: usize) -> &'static str {
+        match self {
+            Field::Status => Status::all()[at].as_str(),
+            Field::Priority => PRIORITIES[at].label(),
+        }
+    }
+
+    /// The number key that picks the value at `at`: statuses 1-7, as the
+    /// status filter's, and priorities 0-4, as `issue update` takes them.
+    fn digit(self, at: usize) -> usize {
+        match self {
+            Field::Status => at + 1,
+            Field::Priority => at,
+        }
+    }
+
+    /// Where `issue`'s value is.
+    fn of(self, issue: &Issue) -> usize {
+        match self {
+            Field::Status => Status::all().iter().position(|s| *s == issue.status),
+            Field::Priority => PRIORITIES.iter().position(|p| *p == issue.priority),
+        }
+        .unwrap_or(0)
+    }
+
+    /// The write that sets `issue` to the value at `at`.
+    fn edit(self, issue: IssueId, at: usize) -> Edit {
+        match self {
+            Field::Status => Edit::Status(issue, Status::all()[at]),
+            Field::Priority => Edit::Priority(issue, PRIORITIES[at]),
+        }
+    }
+}
+
+/// Setting one field of one issue: the values, with one highlighted.
+struct Choice {
+    issue: IssueId,
+    field: Field,
+    at: usize,
 }
 
 /// A line of text being typed, and the cursor in it: a byte offset on a
@@ -411,6 +489,8 @@ pub struct App {
     search: Option<SearchQuery>,
     selected: Option<IssueId>,
     mode: Mode,
+    /// Why the last write failed; the keys line shows it until the next key.
+    failed: Option<String>,
     /// How a comment's time is shown; local time, but for the tests.
     time: fn(i64) -> String,
 }
@@ -425,6 +505,7 @@ impl App {
             search: None,
             selected: None,
             mode: Mode::List,
+            failed: None,
             time: local_time,
         };
         app.select_row(0);
@@ -436,7 +517,7 @@ impl App {
     pub fn open(&self) -> Option<&IssueId> {
         match &self.mode {
             Mode::Detail(d) => Some(&d.id),
-            Mode::List | Mode::Prompt(_) => None,
+            Mode::List | Mode::Prompt(_) | Mode::Choose(_) => None,
         }
     }
 
@@ -493,21 +574,53 @@ impl App {
     }
 
     /// Handles one key. Only presses count, and Ctrl-C quits everywhere.
+    /// Any key takes away the message of a failed write.
     ///
     /// At the prompt, keys edit its line (`Prompt::key`); Enter searches
-    /// and Esc goes back to the list as it was. Elsewhere q quits and r asks
-    /// for a reload. In the list, j/k (or the arrows) move within it; 1-7
-    /// filter by status and 0 clears that filter, p goes to the next
-    /// project, and `/` opens the prompt with the search in it; and Enter
-    /// opens the selected issue's detail, asking for a reload to read its
-    /// comments. A new filter selects the first row. In the detail, keys
-    /// scroll (`Detail::scroll`), and Esc goes back to the list, as it was.
+    /// and Esc goes back to the list as it was. Elsewhere q quits. In a
+    /// choice, j/k (or the arrows) move, and Enter, or a value's number,
+    /// sets it; Esc goes back with nothing written. In the list and the
+    /// detail, r asks for a reload. In the list, j/k (or the arrows) move
+    /// within it; 1-7 filter by status and 0 clears that filter, p goes to
+    /// the next project, and `/` opens the prompt with the search in it; s
+    /// and ! open a choice of the selected issue's status and priority; and
+    /// Enter opens its detail, asking for a reload to read its comments. A
+    /// new filter selects the first row. In the detail, keys scroll
+    /// (`Detail::scroll`), and Esc goes back to the list, as it was.
     pub fn key(&mut self, key: KeyEvent) -> Action {
         if key.kind != KeyEventKind::Press {
             return Action::Stay;
         }
+        self.failed = None;
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
             return Action::Quit;
+        }
+        if let Mode::Choose(c) = &mut self.mode {
+            let last = c.field.len() - 1;
+            let pick = match key.code {
+                KeyCode::Char('q') => return Action::Quit,
+                KeyCode::Esc => {
+                    self.mode = Mode::List;
+                    return Action::Stay;
+                }
+                KeyCode::Char('j') | KeyCode::Down => {
+                    c.at = (c.at + 1).min(last);
+                    None
+                }
+                KeyCode::Char('k') | KeyCode::Up => {
+                    c.at = c.at.saturating_sub(1);
+                    None
+                }
+                KeyCode::Enter => Some(c.at),
+                KeyCode::Char(d) => d
+                    .to_digit(10)
+                    .and_then(|d| (0..=last).find(|&at| c.field.digit(at) == d as usize)),
+                _ => None,
+            };
+            return match pick {
+                Some(at) => self.set(at),
+                None => Action::Stay,
+            };
         }
         if let Mode::Prompt(p) = &mut self.mode {
             p.error = None;
@@ -529,7 +642,7 @@ impl App {
             _ => {}
         }
         match &mut self.mode {
-            Mode::List | Mode::Prompt(_) => self.list_key(key.code),
+            Mode::List | Mode::Prompt(_) | Mode::Choose(_) => self.list_key(key.code),
             Mode::Detail(_) if key.code == KeyCode::Esc => {
                 self.mode = Mode::List;
                 Action::Stay
@@ -572,8 +685,51 @@ impl App {
                 self.mode = Mode::Prompt(Prompt::new(text));
                 Action::Stay
             }
+            KeyCode::Char('s') => self.choose(Field::Status),
+            KeyCode::Char('!') => self.choose(Field::Priority),
             _ => Action::Stay,
         }
+    }
+
+    /// Opens a choice of `field` for the selected issue, at its value.
+    fn choose(&mut self, field: Field) -> Action {
+        if let Some(issue) = self.selected_issue() {
+            self.mode = Mode::Choose(Choice {
+                issue: issue.id.clone(),
+                field,
+                at: field.of(issue),
+            });
+        }
+        Action::Stay
+    }
+
+    fn selected_issue(&self) -> Option<&Issue> {
+        let id = self.selected.as_ref()?;
+        self.snapshot.issues.iter().find(|i| &i.id == id)
+    }
+
+    /// Ends a choice on the value at `at`: a write, unless the issue has
+    /// that value already.
+    fn set(&mut self, at: usize) -> Action {
+        let Mode::Choose(c) = std::mem::replace(&mut self.mode, Mode::List) else {
+            return Action::Stay;
+        };
+        let now = self
+            .snapshot
+            .issues
+            .iter()
+            .find(|i| i.id == c.issue)
+            .map(|i| c.field.of(i));
+        if now == Some(at) {
+            return Action::Stay;
+        }
+        Action::Write(c.field.edit(c.issue, at))
+    }
+
+    /// A write failed: the keys line says why until the next key, and
+    /// nothing else changes.
+    pub fn failed(&mut self, why: &str) {
+        self.failed = Some(clean(why).into_owned());
     }
 
     /// Pasted text goes into the prompt; elsewhere it does nothing.
@@ -647,8 +803,8 @@ impl App {
     /// selected issue, whatever row it is on now. If that issue is no longer
     /// in the filtered list, the selection goes to the row it was on (else
     /// the last). A search other than the last selects its best hit. The
-    /// detail stays on its issue, or goes back to the list if the workspace
-    /// no longer has it (deleted, or purged).
+    /// detail, or a choice, stays on its issue, or goes back to the list if
+    /// the workspace no longer has it (deleted, or purged).
     pub fn reloaded(&mut self, snapshot: Snapshot) {
         let row = self.row();
         let query = |s: &Snapshot| s.search.as_ref().map(|f| f.query.clone());
@@ -674,8 +830,13 @@ impl App {
         {
             self.select_row(row);
         }
-        if let Mode::Detail(d) = &self.mode
-            && !self.snapshot.issues.iter().any(|i| i.id == d.id)
+        let shown = match &self.mode {
+            Mode::Detail(d) => Some(&d.id),
+            Mode::Choose(c) => Some(&c.issue),
+            Mode::List | Mode::Prompt(_) => None,
+        };
+        if let Some(id) = shown
+            && !self.snapshot.issues.iter().any(|i| &i.id == id)
         {
             self.mode = Mode::List;
         }
@@ -822,25 +983,79 @@ impl App {
             Paragraph::new(self.header()).style(Style::default().add_modifier(Modifier::BOLD)),
             chunks[0],
         );
-        let help = match &self.mode {
+        let help: Cow<str> = match &self.mode {
             Mode::List => {
                 self.draw_list(f, chunks[1]);
-                LIST_HELP
+                LIST_HELP.into()
             }
             Mode::Detail(d) => {
                 self.draw_detail(f, chunks[1], d);
-                DETAIL_HELP
+                DETAIL_HELP.into()
             }
             Mode::Prompt(p) => {
                 self.draw_list(f, chunks[1]);
                 draw_prompt(f, chunks[2], p);
                 return;
             }
+            Mode::Choose(c) => {
+                self.draw_list(f, chunks[1]);
+                self.draw_choice(f, chunks[1], c);
+                let (first, last) = (c.field.digit(0), c.field.digit(c.field.len() - 1));
+                format!("j/k: move  Enter or {first}-{last}: set  Esc: cancel").into()
+            }
         };
-        f.render_widget(
-            Paragraph::new(help).style(Style::default().add_modifier(Modifier::DIM)),
-            chunks[2],
-        );
+        let line = match &self.failed {
+            Some(why) => Paragraph::new(format!("Not written: {why}"))
+                .style(Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+            None => Paragraph::new(help).style(Style::default().add_modifier(Modifier::DIM)),
+        };
+        f.render_widget(line, chunks[2]);
+    }
+
+    /// The choice in a box over the list: a title naming the issue and the
+    /// field, then each value with its number key, the issue's own marked.
+    fn draw_choice(&self, f: &mut Frame, area: Rect, c: &Choice) {
+        let Some(issue) = self.snapshot.issues.iter().find(|i| i.id == c.issue) else {
+            return;
+        };
+        let field = match c.field {
+            Field::Status => "status",
+            Field::Priority => "priority",
+        };
+        let title = format!(" {} {field} ", clean(&issue.identifier));
+        let now = c.field.of(issue);
+        let rows: Vec<String> = (0..c.field.len())
+            .map(|at| {
+                let mark = if at == now { " (now)" } else { "" };
+                format!("{}  {}{mark}", c.field.digit(at), c.field.name(at))
+            })
+            .collect();
+        let inner = rows
+            .iter()
+            .map(|r| cells(r))
+            .chain([cells(&title)])
+            .max()
+            .unwrap_or(0)
+            + cells(SYMBOL);
+        // Two cells of border, then as much as fits.
+        let width = u16::try_from(inner + 2).unwrap_or(u16::MAX).min(area.width);
+        let height = u16::try_from(rows.len() + 2)
+            .unwrap_or(u16::MAX)
+            .min(area.height);
+        let rect = Rect {
+            x: area.x + (area.width - width) / 2,
+            y: area.y + (area.height - height) / 2,
+            width,
+            height,
+        };
+        let list = List::new(rows.into_iter().map(ListItem::new))
+            .block(Block::bordered().title(title))
+            .highlight_style(Style::default().bg(Color::DarkGray))
+            .highlight_symbol(SYMBOL);
+        let mut state = ListState::default();
+        state.select(Some(c.at));
+        f.render_widget(Clear, rect);
+        f.render_stateful_widget(list, rect, &mut state);
     }
 
     /// The detail's lines that fit in `area`, from its scroll on; it keeps
@@ -929,6 +1144,7 @@ fn status_key(c: char) -> Option<Status> {
 /// first (see `guarded`).
 pub fn run(store: Store) -> Result<()> {
     let mut app = App::new(load(&store, &Request::default())?);
+    let store = RefCell::new(store);
     // Said here, in words: raw mode on something that isn't a terminal
     // fails with the system's "No such device or address".
     if !(std::io::stdin().is_terminal() && stdout().is_terminal()) {
@@ -936,7 +1152,13 @@ pub fn run(store: Store) -> Result<()> {
     }
     guarded(enter_terminal, leave_terminal, || {
         let mut terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
-        run_app(&mut terminal, &mut app, |r| load(&store, r), next_input)
+        run_app(
+            &mut terminal,
+            &mut app,
+            |r| load(&store.borrow(), r),
+            |e| write(&mut store.borrow_mut(), e),
+            next_input,
+        )
     })
 }
 
@@ -971,6 +1193,30 @@ fn load(store: &Store, request: &Request) -> Result<Snapshot> {
     })
 }
 
+/// Makes `edit` with `Store::update_issue`, as `lcl issue update` does: one
+/// transaction, which the change log records under the store's author.
+fn write(store: &mut Store, edit: &Edit) -> Result<()> {
+    let (id, update) = match edit {
+        Edit::Status(id, status) => (
+            id,
+            IssueUpdate {
+                status: Some(*status),
+                ..Default::default()
+            },
+        ),
+        Edit::Priority(id, priority) => (
+            id,
+            IssueUpdate {
+                priority: Some(*priority),
+                ..Default::default()
+            },
+        ),
+    };
+    let issue = IssueRef::Id(id.as_str().to_string());
+    store.update_issue(&issue, &Placement::default(), &update)?;
+    Ok(())
+}
+
 /// The next key or paste, or None if none comes within a quarter second.
 fn next_input() -> Result<Option<Input>> {
     if event::poll(Duration::from_millis(250))? {
@@ -984,12 +1230,14 @@ fn next_input() -> Result<Option<Input>> {
 }
 
 /// Draws, then acts on the next key or paste, until a quit. A reload is
-/// given what the app asks for (`App::request`). An error drawing, reading
-/// a key or reloading ends the loop with that error.
+/// given what the app asks for (`App::request`). A write is followed by a
+/// reload; if it fails, the app says why (`App::failed`) and goes on. An
+/// error drawing, reading a key or reloading ends the loop with that error.
 fn run_app<B: Backend>(
     terminal: &mut Terminal<B>,
     app: &mut App,
     mut reload: impl FnMut(&Request) -> Result<Snapshot>,
+    mut write: impl FnMut(&Edit) -> Result<()>,
     mut next_input: impl FnMut() -> Result<Option<Input>>,
 ) -> Result<()>
 where
@@ -1008,6 +1256,13 @@ where
                 let snapshot = reload(&app.request())?;
                 app.reloaded(snapshot);
             }
+            Action::Write(edit) => match write(&edit) {
+                Ok(()) => {
+                    let snapshot = reload(&app.request())?;
+                    app.reloaded(snapshot);
+                }
+                Err(e) => app.failed(&e.to_string()),
+            },
             Action::Stay => {}
         }
     }
@@ -1213,11 +1468,11 @@ mod tests {
     }
 
     /// Every sequence of up to four keys and reloads, from three starting
-    /// lists, among them a search and a project filter. After each one: the
-    /// selection is None exactly when the filtered list is empty, else an
-    /// issue in it; a reload with the same search that keeps the selected
-    /// issue in the filtered list leaves it selected; and an open issue is
-    /// one the workspace has.
+    /// lists, among them a search, a project filter and choices. After each
+    /// one: the selection is None exactly when the filtered list is empty,
+    /// else an issue in it; a reload with the same search that keeps the
+    /// selected issue in the filtered list leaves it selected; and an open
+    /// issue, or one being set, is one the workspace has.
     #[test]
     fn the_selection_is_always_an_issue_in_the_filtered_list() {
         // A search that found two issues, and one this read doesn't have.
@@ -1237,6 +1492,8 @@ mod tests {
             press('0'),
             press('p'),
             press('/'),
+            press('s'),
+            press('!'),
             code(KeyCode::Enter),
             code(KeyCode::Esc),
         ];
@@ -1277,6 +1534,14 @@ mod tests {
                     "{id} is open but the workspace doesn't have it"
                 );
             }
+            if let Mode::Choose(c) = &app.mode {
+                assert!(
+                    app.snapshot.issues.iter().any(|i| i.id == c.issue) && c.at < c.field.len(),
+                    "a choice for {} at {}",
+                    c.issue,
+                    c.at
+                );
+            }
         };
         let mut sequences = 0;
         for start in [work(vec![]), five(), four()] {
@@ -1292,8 +1557,8 @@ mod tests {
                 }
             }
         }
-        // 1 + 12 + 12^2 + 12^3 + 12^4 sequences from each start.
-        assert_eq!(sequences, 3 * 22_621);
+        // 1 + 14 + 14^2 + 14^3 + 14^4 sequences from each start.
+        assert_eq!(sequences, 3 * 41_371);
     }
 
     #[test]
@@ -1399,7 +1664,7 @@ mod tests {
                 "   W-4  Backlog     None    issue 4                         ",
                 "   W-5  Backlog     None    issue 5                         ",
                 "                                                            ",
-                "j/k: move  Enter: open  /: search  p: project  1-7: status  ",
+                "j/k: move  Enter: open  s: status  !: priority  /: search  p",
             ]
             .map(String::from)
         );
@@ -1416,7 +1681,7 @@ mod tests {
                 "work (W) · 2 of 5 issues · status: Done                     ",
                 "   W-1  Done        None    issue 1                         ",
                 ">> W-3  Done        None    issue 3                         ",
-                "j/k: move  Enter: open  /: search  p: project  1-7: status  ",
+                "j/k: move  Enter: open  s: status  !: priority  /: search  p",
             ]
             .map(String::from)
         );
@@ -1467,7 +1732,7 @@ mod tests {
                 "   W-10   InProgress  High    Tabs and newlines                       ",
                 "   W-112  Todo        Low     Short               a very long…        ",
                 "                                                                      ",
-                "j/k: move  Enter: open  /: search  p: project  1-7: status  0: all  r:",
+                "j/k: move  Enter: open  s: status  !: priority  /: search  p: project ",
             ]
             .map(String::from)
         );
@@ -1705,6 +1970,11 @@ mod tests {
         assert_eq!(ids(&store), ["D-2", "D-1"]);
     }
 
+    /// For a loop that is given no write to make.
+    fn no_write(edit: &Edit) -> Result<()> {
+        panic!("wrote {edit:?}")
+    }
+
     /// Keys from a list, then an error if the loop asks for more.
     fn keys(list: &[KeyEvent]) -> impl FnMut() -> Result<Option<Input>> + '_ {
         let mut it = list.iter();
@@ -1728,13 +1998,21 @@ mod tests {
             &mut terminal,
             &mut app,
             reload,
+            no_write,
             keys(&[press('r'), press('j'), press('q')]),
         )
         .unwrap();
         assert_eq!((*reloads.borrow(), app.row()), (1, 1));
 
         let failing = |_: &Request| Err(anyhow::anyhow!("database is locked"));
-        let e = run_app(&mut terminal, &mut app, failing, keys(&[press('r')])).unwrap_err();
+        let e = run_app(
+            &mut terminal,
+            &mut app,
+            failing,
+            no_write,
+            keys(&[press('r')]),
+        )
+        .unwrap_err();
         assert_eq!(e.to_string(), "database is locked");
     }
 
@@ -1943,7 +2221,7 @@ mod tests {
         assert_eq!((opened(&app), selected(&app)), (None, "W-2"));
         assert_eq!(
             frame(&app, 30, 4)[3].trim_end(),
-            "j/k: move  Enter: open  /: sea"
+            "j/k: move  Enter: open  s: sta"
         );
     }
 
@@ -2029,7 +2307,7 @@ mod tests {
             press('r'),
             press('q'),
         ];
-        run_app(&mut terminal, &mut app, reload, keys(&pressed)).unwrap();
+        run_app(&mut terminal, &mut app, reload, no_write, keys(&pressed)).unwrap();
         assert_eq!(
             asked.take(),
             [Some("id-2".to_string()), Some("id-2".to_string()), None]
@@ -2383,8 +2661,203 @@ mod tests {
                 .map(Some)
                 .ok_or_else(|| anyhow::anyhow!("out of input"))
         };
-        run_app(&mut terminal, &mut app, reload, next).unwrap();
+        run_app(&mut terminal, &mut app, reload, no_write, next).unwrap();
         assert_eq!(asked.take(), [Some("login ".to_string())]);
+    }
+
+    fn id(id: &str) -> IssueId {
+        IssueId::from_stored(id.to_string())
+    }
+
+    #[test]
+    fn s_and_bang_choose_a_value_and_esc_writes_nothing() {
+        let mut app = App::new(four());
+        assert_eq!(app.key(press('s')), Action::Stay);
+        // A box over the list, at the issue's status.
+        assert_eq!(
+            frame(&app, 44, 12)[1..],
+            [
+                ">> W-1    Don┌ W-1 status ────┐ix the login…",
+                "   W-2    Bac│   1  Backlog   │rite the imp…",
+                "   W-10   InP│   2  Todo      │abs and newl…",
+                "   W-112  Tod│   3  InProgress│hort         ",
+                "             │   4  InReview  │             ",
+                "             │>> 5  Done (now)│             ",
+                "             │   6  Canceled  │             ",
+                "             │   7  Duplicate │             ",
+                "             └────────────────┘             ",
+                "                                            ",
+                "j/k: move  Enter or 1-7: set  Esc: cancel   ",
+            ]
+            .map(String::from)
+        );
+        // Esc: back to the list, nothing to write.
+        assert_eq!(app.key(code(KeyCode::Esc)), Action::Stay);
+        assert!(matches!(app.mode, Mode::List));
+        // ! opens at the issue's priority, Urgent; j moves to High.
+        app.key(press('!'));
+        app.key(press('j'));
+        assert_eq!(
+            app.key(code(KeyCode::Enter)),
+            Action::Write(Edit::Priority(id("id-1"), Priority::High))
+        );
+        assert!(matches!(app.mode, Mode::List));
+        // A value's number sets it at once: statuses 1-7, priorities 0-4.
+        app.key(press('s'));
+        assert_eq!(
+            app.key(press('2')),
+            Action::Write(Edit::Status(id("id-1"), Status::Todo))
+        );
+        app.key(press('!'));
+        assert_eq!(
+            app.key(press('0')),
+            Action::Write(Edit::Priority(id("id-1"), Priority::None))
+        );
+        // The value the issue has: nothing to write.
+        app.key(press('s'));
+        assert_eq!(app.key(press('5')), Action::Stay);
+        assert!(matches!(app.mode, Mode::List));
+        // A number with no value, and j past the last, do nothing.
+        app.key(press('!'));
+        assert_eq!(app.key(press('7')), Action::Stay);
+        for _ in 0..9 {
+            app.key(press('j'));
+        }
+        assert_eq!(
+            app.key(code(KeyCode::Enter)),
+            Action::Write(Edit::Priority(id("id-1"), Priority::Low))
+        );
+        // In a choice, r is not a reload, and q still quits.
+        app.key(press('s'));
+        assert_eq!(app.key(press('r')), Action::Stay);
+        assert_eq!(app.key(press('q')), Action::Quit);
+        // With nothing selected, s and ! open nothing.
+        let mut empty = App::new(work(vec![]));
+        empty.key(press('s'));
+        empty.key(press('!'));
+        assert!(matches!(empty.mode, Mode::List));
+    }
+
+    #[test]
+    fn a_choice_closes_if_a_reload_finds_its_issue_gone() {
+        let mut app = App::new(five());
+        app.key(press('s'));
+        app.reloaded(work(five().issues.into_iter().skip(1).collect()));
+        assert!(matches!(app.mode, Mode::List));
+        assert_eq!(selected(&app), "W-2");
+    }
+
+    /// Workspace demo (D) with D-1, D-2 and D-3, all Backlog, written by al.
+    fn three() -> Store {
+        let mut store = Store::open_in_memory().unwrap();
+        store.set_meta(&[("name", "demo"), ("key", "D")]).unwrap();
+        store.set_author(Some("al".into()));
+        for title in ["one", "two", "three"] {
+            store
+                .create_issue(
+                    NewIssue {
+                        title: title.into(),
+                        ..Default::default()
+                    },
+                    &Default::default(),
+                )
+                .unwrap();
+        }
+        store
+    }
+
+    /// The loop as `run` wires it, on `store`, with these keys.
+    fn run_on(store: &RefCell<Store>, app: &mut App, pressed: &[KeyEvent]) -> Result<()> {
+        let mut terminal = Terminal::new(TestBackend::new(60, 10)).unwrap();
+        run_app(
+            &mut terminal,
+            app,
+            |r| load(&store.borrow(), r),
+            |e| write(&mut store.borrow_mut(), e),
+            keys(pressed),
+        )
+    }
+
+    #[test]
+    fn a_write_goes_through_update_issue_and_the_list_keeps_its_issue() {
+        let store = RefCell::new(three());
+        let mut app = App::new(load(&store.borrow(), &Request::default()).unwrap());
+        // D-2, In Progress, then Urgent.
+        let pressed = [
+            press('j'),
+            press('s'),
+            press('3'),
+            press('!'),
+            press('1'),
+            press('q'),
+        ];
+        run_on(&store, &mut app, &pressed).unwrap();
+        let issue = app.selected_issue().unwrap();
+        assert_eq!(
+            (issue.identifier.as_str(), issue.status, issue.priority),
+            ("D-2", Status::InProgress, Priority::Urgent)
+        );
+        // Each write is one entry in the change log, by the store's author.
+        let two = IssueRef::Number {
+            key: None,
+            number: 2,
+        };
+        let history = store.borrow().issue_history(&two).unwrap();
+        let authors: Vec<Option<&str>> = history.iter().map(|h| h.author.as_deref()).collect();
+        assert_eq!(authors, [Some("al"); 3]);
+        assert_eq!(history[1].changes.len(), 2, "status and started_at");
+        assert_eq!(history[2].changes.len(), 1, "priority");
+        // Under a status filter the issue leaves the list; the selection
+        // goes to the row it was on.
+        run_on(
+            &store,
+            &mut app,
+            &[press('3'), press('s'), press('5'), press('q')],
+        )
+        .unwrap();
+        assert_eq!(app.visible().len(), 0);
+    }
+
+    #[test]
+    fn a_failed_write_says_why_and_changes_nothing() {
+        let store = RefCell::new(three());
+        let mut app = App::new(load(&store.borrow(), &Request::default()).unwrap());
+        // Another process puts D-3 in the trash.
+        let three_ref = IssueRef::Number {
+            key: None,
+            number: 3,
+        };
+        store.borrow_mut().delete_issue(&three_ref).unwrap();
+        let out = run_on(&store, &mut app, &[press('s'), press('5')]).unwrap_err();
+        assert_eq!(out.to_string(), "out of keys");
+        // The list is as it was read: D-3 still in it, still Backlog.
+        let issue = app.selected_issue().unwrap();
+        assert_eq!(
+            (issue.identifier.as_str(), issue.status),
+            ("D-3", Status::Backlog)
+        );
+        assert_eq!(
+            frame(&app, 90, 4)[3].trim_end(),
+            "Not written: D-3 is in the trash; restore it with: lcl issue restore D-3"
+        );
+        // The next key takes the message away.
+        app.key(press('j'));
+        assert!(frame(&app, 60, 4)[3].starts_with("j/k: move"));
+        // A failed write leaves the loop running: it went on to the q.
+        let reloads = RefCell::new(0);
+        let mut terminal = Terminal::new(TestBackend::new(60, 10)).unwrap();
+        run_app(
+            &mut terminal,
+            &mut app,
+            |_: &Request| {
+                *reloads.borrow_mut() += 1;
+                Ok(work(vec![]))
+            },
+            |_: &Edit| Err(anyhow::anyhow!("database is locked")),
+            keys(&[press('!'), press('1'), press('j'), press('q')]),
+        )
+        .unwrap();
+        assert_eq!(*reloads.borrow(), 0);
     }
 
     /// `leave` runs once `enter` has, on every way out of `body`.
