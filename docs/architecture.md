@@ -120,6 +120,8 @@ With `--json`, stdout is one JSON value. On failure the error is the last line o
 
 Other stderr lines are notices and start with `lcl:`.
 
+Sync is designed, not built: [the sync note](sync.md) says how issues are numbered across machines, how conflicts and purges resolve, and what it changes in the schema, the `--json` contract and `lcl-export/1`.
+
 [The `--json` contract](json-contract.md) has the shape of every command's output. It is a draft through 0.x, and the tests in `crates/lcl-cli/tests/contract.rs` check the commands against it.
 
 Text on a terminal shows a control character as its picture, so ESC is `␛`. A newline and a tab stay. Output to a pipe or a file is unchanged, and so is `--json`.
