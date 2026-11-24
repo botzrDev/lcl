@@ -192,7 +192,7 @@ fn clap_errors_are_one_json_line_under_json() {
         // group's help.
         (
             vec!["--json", "issue"],
-            "'lcl issue' requires a subcommand but one was not provided\n  [subcommands: create, list, show, update, delete, restore, purge, relate, unrelate, comment, comments, history, help]",
+            "'lcl issue' requires a subcommand but one was not provided\n  [subcommands: create, similar, list, show, update, delete, restore, purge, relate, unrelate, comment, comments, history, help]",
         ),
         (
             vec!["--json", "doc"],
@@ -232,7 +232,7 @@ fn clap_errors_are_one_json_line_under_json() {
     // A group with no subcommand still prints its help, on stderr.
     let out = env.lcl(&["issue"]);
     assert_eq!(out.code, 2);
-    assert!(out.stderr.starts_with("Issues in this workspace: create, list, show, update, delete, restore, purge, relate, unrelate, comment, comments, history\n\nUsage: lcl issue [OPTIONS] <COMMAND>\n"), "{out:#?}");
+    assert!(out.stderr.starts_with("Issues in this workspace: create, similar, list, show, update, delete, restore, purge, relate, unrelate, comment, comments, history\n\nUsage: lcl issue [OPTIONS] <COMMAND>\n"), "{out:#?}");
 }
 
 /// --help and --version are not errors, with --json too: they print on

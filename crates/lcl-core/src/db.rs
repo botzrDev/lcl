@@ -2108,7 +2108,7 @@ const ISSUE_SELECT: &str = "SELECT i.id,i.number,i.title,i.description,i.status,
 
 /// The issues with these UUIDs, in this order, skipping any that are gone:
 /// one query for the rows and one for all their labels.
-fn fetch_issues(conn: &Connection, ids: &[String]) -> Result<Vec<Issue>> {
+pub(crate) fn fetch_issues(conn: &Connection, ids: &[String]) -> Result<Vec<Issue>> {
     if ids.is_empty() {
         return Ok(vec![]);
     }

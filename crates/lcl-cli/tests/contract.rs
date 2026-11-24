@@ -473,6 +473,7 @@ pinned! {
     workspace_list => "workspace list",
     workspace_show => "workspace show",
     issue_create => "issue create",
+    issue_similar => "issue similar",
     issue_list => "issue list",
     issue_show => "issue show",
     issue_update => "issue update",
@@ -659,7 +660,20 @@ mod cases {
 
     pub fn issue_create() -> Vec<Value> {
         let env = rich().env;
-        vec![j(&env, &["issue", "create", "--title", "new"])]
+        // Nothing like "new"; issue one's description has "words".
+        let samples = vec![
+            j(&env, &["issue", "create", "--title", "new"]),
+            j(&env, &["issue", "create", "--title", "words"]),
+        ];
+        assert_eq!(samples[1]["similar"][0]["identifier"], "DEMO-1");
+        samples
+    }
+
+    pub fn issue_similar() -> Vec<Value> {
+        let env = rich().env;
+        let found = j(&env, &["issue", "similar", "--title", "words"]);
+        assert_eq!(found["issues"][0]["identifier"], "DEMO-1");
+        vec![found, j(&env, &["issue", "similar", "--title", "the"])]
     }
 
     pub fn issue_list() -> Vec<Value> {

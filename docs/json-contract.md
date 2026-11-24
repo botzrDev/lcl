@@ -102,7 +102,7 @@ A shape is JSON. A string in it names what stands at that place:
 
 ### `RelatedIssue`
 
-An issue as a relation names it.
+An issue as a relation, or a list of similar issues, names it.
 
 ```json
 {"identifier": "string", "status": "Status", "title": "string"}
@@ -261,8 +261,18 @@ A change of this machine's that the service did not apply (its record was purged
 
 ### `lcl issue create`
 
+The issue, and `similar`: up to five open issues like it, best first, as `lcl issue similar` finds them. The list never stops or changes the create: it is made after the issue is written, and if it can't be, it is empty, with a notice on stderr.
+
 ```json
-"Issue"
+{"...": "Issue", "similar": ["RelatedIssue"]}
+```
+
+### `lcl issue similar`
+
+Writes nothing. `words` are the title's words it compared, lowercased, less the common ones: empty when the title has only common words, and then `issues` is empty too. `issues` are the open issues (Backlog, Todo, InProgress or InReview, not in the trash) holding more than half of `words`, best first, at most five.
+
+```json
+{"words": ["string"], "issues": ["RelatedIssue"]}
 ```
 
 ### `lcl issue list`

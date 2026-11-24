@@ -8,6 +8,7 @@ pub mod models;
 pub mod parse;
 pub mod registry;
 pub mod search;
+pub mod similar;
 pub mod store;
 pub mod sync;
 pub mod transfer;

@@ -81,8 +81,8 @@ enum Commands {
     Project(ProjectArgs),
     /// Milestones, each in one project for good: create, list, show, update, delete.
     Milestone(MilestoneArgs),
-    /// Issues in this workspace: create, list, show, update, delete, restore, purge, relate,
-    /// unrelate, comment, comments, history.
+    /// Issues in this workspace: create, similar, list, show, update, delete, restore, purge,
+    /// relate, unrelate, comment, comments, history.
     Issue(IssueArgs),
     /// Comments, by id: edit, delete, restore, purge. Add and list them with issue comment and
     /// issue comments.
@@ -465,7 +465,21 @@ enum IssueCmd {
     // a leading '-' so that "-3" reaches the IssueRef parser and is rejected
     // there, rather than being taken for a flag.
     /// Create an issue. It gets the next number: a number is never handed out twice.
+    ///
+    /// Then it lists up to five open issues like it, best first (see lcl
+    /// issue similar), to relate it to or mark it a duplicate of. The list
+    /// never stops or changes the create.
     Create(IssueCreateArgs),
+    /// List the open issues like a new issue with this title (and
+    /// description) would be, best first, at most five. Nothing is written.
+    ///
+    /// It compares the title's words, less common English words, the verbs
+    /// every tracker shares (fix, add, update...) and words in more than a
+    /// tenth of the issues. An open issue (Backlog, Todo, In Progress, In
+    /// Review) is similar when its title and description hold more than half
+    /// of them; the description's words only rank those found. A title made
+    /// only of common words finds nothing.
+    Similar(IssueSimilarArgs),
     /// List issues: 50 at a time unless told otherwise, newest number first.
     ///
     /// Filters narrow the list together. A repeated --status matches any of
@@ -602,6 +616,36 @@ struct IssueCreateArgs {
     /// Who is creating it. Without it: LCL_AUTHOR, else USER.
     #[arg(long, value_name = "NAME", value_parser = parse_author)]
     author: Option<String>,
+}
+
+#[derive(Args)]
+struct IssueSimilarArgs {
+    /// The title to compare. Not blank.
+    #[arg(long, value_parser = parse_title)]
+    title: String,
+    /// A description, inline, to rank what the title finds.
+    #[arg(long, value_parser = inline_description, conflicts_with = "description_file")]
+    description: Option<String>,
+    /// Read the description from PATH, or from stdin if PATH is `-`.
+    #[arg(long, value_name = "PATH", value_parser = read_description)]
+    description_file: Option<String>,
+}
+
+/// What `issue create --json` prints: the issue, and the open issues like
+/// it.
+#[derive(serde::Serialize)]
+struct Created<'a> {
+    #[serde(flatten)]
+    issue: &'a Issue,
+    similar: &'a [RelatedIssue],
+}
+
+/// Similar issues as people read them: one a line.
+fn similar_lines(issues: &[RelatedIssue]) -> Vec<String> {
+    issues
+        .iter()
+        .map(|i| format!("{}\t[{}]\t{}", i.identifier, i.status, i.title))
+        .collect()
 }
 
 #[derive(Args)]
@@ -2624,10 +2668,49 @@ fn run(cli: Cli) -> Result<()> {
                         ),
                         flag.as_deref(),
                     )?;
+                    // After the create has committed: nothing here can undo
+                    // or change it, and a failure is only a notice.
+                    let similar = store
+                        .similar_issues(&issue.title, &issue.description, Some(&issue.id))
+                        .map(|s| s.issues)
+                        .unwrap_or_else(|e| {
+                            eprintln!("lcl: similar issues not listed: {e}");
+                            vec![]
+                        });
                     if cli.json {
-                        print_json(&issue)?;
+                        print_json(&Created {
+                            issue: &issue,
+                            similar: &similar,
+                        })?;
                     } else {
                         outln!("Created {}", issue.identifier);
+                        if !similar.is_empty() {
+                            outln!("Similar open issues:");
+                            for line in similar_lines(&similar) {
+                                outln!("{line}");
+                            }
+                        }
+                    }
+                }
+                IssueCmd::Similar(IssueSimilarArgs {
+                    title,
+                    description,
+                    description_file,
+                }) => {
+                    let description = description.or(description_file).unwrap_or_default();
+                    let similar = store.similar_issues(&title, &description, None)?;
+                    if cli.json {
+                        print_json(&similar)?;
+                    } else if similar.words.is_empty() {
+                        outln!(
+                            "No similar open issues: every word of the title is too common to compare."
+                        );
+                    } else if similar.issues.is_empty() {
+                        outln!("No similar open issues.");
+                    } else {
+                        for line in similar_lines(&similar.issues) {
+                            outln!("{line}");
+                        }
                     }
                 }
                 IssueCmd::List(IssueListArgs {
