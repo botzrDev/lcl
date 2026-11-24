@@ -91,7 +91,7 @@ enum Commands {
     Doc(DocArgs),
     /// Labels in this workspace: create, list, delete, restore, purge.
     Label(LabelArgs),
-    /// Cycles in this workspace: create, list, update, delete.
+    /// Cycles in this workspace: create, list, report, update, delete.
     Cycle(CycleArgs),
     /// Search issues (with their comments) and docs.
     ///
@@ -1207,6 +1207,22 @@ enum CycleCmd {
     Create(CycleCreateArgs),
     /// List cycles: id, name and dates, newest first.
     List,
+    /// What a cycle held at its start, what was added and removed after, what
+    /// was completed in it, and the velocity of the cycles before it.
+    ///
+    /// Counts are of issues and of points (estimates); an issue with no
+    /// estimate is counted as an issue and in no point total, and the report
+    /// says how many there were. A cycle runs from its first day to its last,
+    /// in local time; one not over yet runs to now.
+    ///
+    /// Membership comes from each issue's history, not from what the cycle
+    /// holds now. For a cycle with no start date, or one that started before
+    /// lcl kept history and held issues then, scope change is unavailable and
+    /// only completion is reported.
+    ///
+    /// Velocity is the issues and points completed in this cycle and in up to
+    /// five before it, by start date.
+    Report(CycleReportArgs),
     /// Rename a cycle, or set or clear its dates. The end can't come before the start.
     Update(CycleUpdateArgs),
     /// Delete a cycle. Refused while any issue is in it.
@@ -1224,6 +1240,78 @@ struct CycleCreateArgs {
     /// Its last day, as YYYY-MM-DD: not before --start.
     #[arg(long, value_parser = parse_date)]
     end: Option<NaiveDate>,
+}
+
+#[derive(Args)]
+struct CycleReportArgs {
+    /// The cycle's name (trimmed, ignoring case) or id. A name several cycles have needs the id.
+    #[arg(value_name = "CYCLE", value_parser = parse_cycle_name)]
+    cycle: String,
+}
+
+/// A cycle's dates as people read them.
+fn cycle_dates(c: &Cycle) -> String {
+    match (&c.starts_at, &c.ends_at) {
+        (Some(s), Some(e)) => format!("{s} to {e}"),
+        (Some(s), None) => format!("from {s}"),
+        (None, Some(e)) => format!("to {e}"),
+        (None, None) => "no dates".to_string(),
+    }
+}
+
+/// `lcl cycle report` as people read it.
+fn cycle_report_text(r: &lcl_core::cycle_report::CycleReport) -> Vec<String> {
+    use lcl_core::cycle_report::Count;
+    let row = |name: &str, width: usize, c: &Count| {
+        format!("{name:<width$}  {:>6}  {:>6}", c.issues, c.points)
+    };
+    let mut out = vec![format!("{}: {}", r.cycle.name, cycle_dates(&r.cycle))];
+    out.push(format!("{:<9}  {:>6}  {:>6}", "", "Issues", "Points"));
+    match (&r.scope, &r.scope_unavailable) {
+        (Some(s), _) => {
+            out.push(row("Planned", 9, &s.planned));
+            out.push(row("Added", 9, &s.added));
+            out.push(row("Removed", 9, &s.removed));
+        }
+        (None, why) => out.insert(
+            1,
+            format!(
+                "Scope change unavailable: {}.",
+                why.as_deref().unwrap_or("unknown")
+            ),
+        ),
+    }
+    out.push(row("Completed", 9, &r.completed));
+    if r.unestimated > 0 {
+        out.push(if r.unestimated == 1 {
+            "1 issue has no estimate: counted as an issue, in no point total.".to_string()
+        } else {
+            format!(
+                "{} issues have no estimate: counted as issues, in no point total.",
+                r.unestimated
+            )
+        });
+    }
+    let width = r
+        .velocity
+        .iter()
+        .map(|v| v.cycle.name.chars().count())
+        .chain([8])
+        .max()
+        .unwrap_or(8);
+    out.push(String::new());
+    out.push(format!(
+        "{:<width$}  {:>6}  {:>6}",
+        "Velocity", "Issues", "Points"
+    ));
+    for v in &r.velocity {
+        out.push(format!(
+            "{}  {}",
+            row(&v.cycle.name, width, &v.completed),
+            cycle_dates(&v.cycle)
+        ));
+    }
+    out
 }
 
 #[derive(Args)]
@@ -3330,6 +3418,17 @@ fn run(cli: Cli) -> Result<()> {
                                 c.ends_at.as_deref().unwrap_or("?"),
                             );
                             outln!("{}\t{}\t{start}..{end}", c.id, c.name);
+                        }
+                    }
+                }
+                CycleCmd::Report(CycleReportArgs { cycle }) => {
+                    let report =
+                        store.cycle_report(&cycle, &chrono::Local, lcl_core::changes::now_ms())?;
+                    if cli.json {
+                        print_json(&report)?;
+                    } else {
+                        for line in cycle_report_text(&report) {
+                            outln!("{line}");
                         }
                     }
                 }

@@ -1,5 +1,6 @@
 pub mod backup;
 pub mod changes;
+pub mod cycle_report;
 pub mod db;
 pub mod error;
 pub mod insights;

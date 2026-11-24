@@ -506,6 +506,7 @@ pinned! {
     label_purge => "label purge",
     cycle_create => "cycle create",
     cycle_list => "cycle list",
+    cycle_report => "cycle report",
     cycle_update => "cycle update",
     cycle_delete => "cycle delete",
     doc_create => "doc create",
@@ -881,6 +882,14 @@ mod cases {
         vec![j(&rich().env, &["cycle", "list"])]
     }
 
+    pub fn cycle_report() -> Vec<Value> {
+        let env = rich().env;
+        // Sprint 1 has a start: scope from history. Open has none.
+        let dated = j(&env, &["cycle", "report", "Sprint 1"]);
+        assert!(dated["scope"].is_object(), "{dated:#}");
+        vec![dated, j(&env, &["cycle", "report", "Open"])]
+    }
+
     pub fn cycle_update() -> Vec<Value> {
         vec![j(
             &rich().env,
@@ -1147,6 +1156,19 @@ mod objects {
     }
 
     #[test]
+    fn object_cycle_scope_and_count() {
+        let report = &super::cases::cycle_report()[0];
+        pin_object("CycleScope", &[report["scope"].clone()]);
+        pin_object(
+            "CycleCount",
+            &[
+                report["completed"].clone(),
+                report["scope"]["planned"].clone(),
+            ],
+        );
+    }
+
+    #[test]
     fn object_skipped_records() {
         let out = super::cases::import_with_unknown_types();
         pin_object("SkippedRecords", &[out["skipped"][0].clone()]);
@@ -1162,6 +1184,8 @@ mod objects {
             [
                 "Comment",
                 "Cycle",
+                "CycleCount",
+                "CycleScope",
                 "Doc",
                 "Error",
                 "FieldChange",

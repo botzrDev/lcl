@@ -175,6 +175,7 @@ lcl --json cycle list
 - Label and cycle names are unique, ignoring case; a cycle name is also trimmed.
 - `--cycle` puts an issue in exactly that cycle, and `--no-cycle` takes it out. A cycle name that several cycles share (possible in workspaces from before 0.2.0) needs the cycle's id.
 - `cycle delete` is refused while any issue is in the cycle.
+- `cycle report "Sprint 1"` returns the cycle's scope and velocity in issues and points (estimates): `scope` with `planned` (held at its start), `added` and `removed` (after it), `completed`, `unestimated` (issues with no estimate, counted as issues and in no point total), and `velocity`, the completed counts of up to five cycles before it and of it. Membership is read from each issue's history. `scope` is null, and `scope_unavailable` says why, when the cycle has no start date, or started before lcl kept history and held issues then.
 
 ## Docs
 

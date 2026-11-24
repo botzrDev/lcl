@@ -51,7 +51,7 @@ pub fn next_clock(prev: Option<&str>, now_ms: i64, machine: &str) -> String {
 }
 
 /// A clock's milliseconds and counter.
-fn parse_clock(clock: &str) -> Option<(i64, i64)> {
+pub(crate) fn parse_clock(clock: &str) -> Option<(i64, i64)> {
     let mut parts = clock.splitn(3, '-');
     let ms = parts.next()?.parse().ok()?;
     let counter = parts.next()?.parse().ok()?;

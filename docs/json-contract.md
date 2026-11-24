@@ -197,6 +197,22 @@ The records of one type an import didn't know, in type order. A later `lcl-expor
 {"id": "string", "name": "string", "starts_at": "string|null", "ends_at": "string|null", "created_at": "integer"}
 ```
 
+### `CycleCount`
+
+Issues, and the sum of their estimates. An issue with no estimate counts in `issues` and adds nothing to `points`.
+
+```json
+{"issues": "integer", "points": "integer"}
+```
+
+### `CycleScope`
+
+What a cycle held at its start, what entered after (up to its end), and what it held at or after its start but not at its end.
+
+```json
+{"planned": "CycleCount", "added": "CycleCount", "removed": "CycleCount"}
+```
+
 ### `Label`
 
 ```json
@@ -520,6 +536,21 @@ What was removed for good: `purged` holds the names, and `removed_from_issues` c
 
 ```json
 [{"...": "Cycle", "issues": "integer"}]
+```
+
+### `lcl cycle report`
+
+A cycle runs from the first moment of its first day to the first moment after its last, in the machine's local time; one not over yet runs to now. Membership comes from each issue's history. `scope` is null, and `scope_unavailable` says why, for a cycle with no start date, or one that started before lcl kept history and held issues then (from an upgrade to schema 14 or an import): when those issues went in is not recorded. `completed` counts the issues the cycle held at its end that were completed (are Done, and were completed before its end). `unestimated` counts the issues in `scope` or `completed` with no estimate. `velocity` is `completed` for up to five cycles before this one, by start date (cycles with none after those with one, by creation), then this one. Issues in the trash are left out.
+
+```json
+{
+  "cycle": "Cycle",
+  "scope": "CycleScope|null",
+  "scope_unavailable": "string|null",
+  "completed": "CycleCount",
+  "unestimated": "integer",
+  "velocity": [{"...": "Cycle", "completed": "CycleCount"}]
+}
 ```
 
 ### `lcl cycle update`

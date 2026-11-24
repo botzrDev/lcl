@@ -2238,7 +2238,7 @@ fn row_to_cycle(r: &rusqlite::Row<'_>) -> rusqlite::Result<Cycle> {
 }
 
 /// Every cycle, oldest first.
-fn all_cycles(conn: &Connection) -> Result<Vec<Cycle>> {
+pub(crate) fn all_cycles(conn: &Connection) -> Result<Vec<Cycle>> {
     let mut stmt = conn.prepare(
         "SELECT id,name,starts_at,ends_at,created_at FROM cycles ORDER BY created_at, id",
     )?;
@@ -2255,7 +2255,7 @@ fn same_cycle_name(stored: &str, name: &str) -> bool {
 
 /// The cycle `r` names: its id (ignoring case), else its name (see
 /// `same_cycle_name`). A name several cycles have is refused, with their ids.
-fn resolve_cycle(conn: &Connection, r: &str) -> Result<Cycle> {
+pub(crate) fn resolve_cycle(conn: &Connection, r: &str) -> Result<Cycle> {
     let all = all_cycles(conn)?;
     if let Some(c) = all.iter().find(|c| c.id.eq_ignore_ascii_case(r)) {
         return Ok(c.clone());
