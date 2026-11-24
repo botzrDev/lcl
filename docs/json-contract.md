@@ -106,6 +106,22 @@ An issue as a relation names it.
 {"identifier": "string", "status": "Status", "title": "string"}
 ```
 
+### `HistoryEntry`
+
+One write's changes to an issue, for `lcl issue history`. `at` is when, in epoch seconds; `author` who, from `--author`, `LCL_AUTHOR` or `USER` (null for none, and for the entries an upgrade or import began a history with).
+
+```json
+{"at": "integer", "author": "string|null", "changes": ["FieldChange"]}
+```
+
+### `FieldChange`
+
+One field's change, `old` to `new`. `field` is a key of `Issue` but for `parent`, which is the parent's `KEY-N`, and the relations, which are `blocks`, `blocked_by`, `related`, `duplicate_of` and `duplicates` as in `lcl issue show`. Values are as `Issue` shows them: `priority` by name, and `project`, `milestone`, a label and a cycle by name (by UUID once deleted for good). `labels`, `cycles` and the relations change one member at a time: `new` is the member added, with `old` null, or `old` the member removed, with `new` null. A change to one of the issue's comments has its `comment_id`, and `field` `body` (`old` null when the comment was added) or `deleted_at`.
+
+```json
+{"field": "string", "comment_id": "string|null", "old": "string|integer|null", "new": "string|integer|null"}
+```
+
 ### `SkippedRecords`
 
 The records of one type an import didn't know, in type order. A later `lcl-export/1` adds new record types, not new keys, so an older lcl reads the rest of the file.
@@ -312,6 +328,14 @@ With `--trashed`, the issue's comments that are in the trash, and no others.
 
 ```json
 ["Comment"]
+```
+
+### `lcl issue history`
+
+Oldest first, one entry per write. The first entry sets every field that isn't null, `old` null: the issue's creation, or for an issue made before lcl kept history, or brought in by `lcl import`, its fields when lcl began to record them (its `created_at` change says when the issue was made). An issue in the trash has a history too; a purged one has none.
+
+```json
+["HistoryEntry"]
 ```
 
 ## Comments

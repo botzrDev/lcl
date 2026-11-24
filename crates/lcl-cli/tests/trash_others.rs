@@ -112,16 +112,19 @@ fn a_label_s_delete_and_restore_change_one_field() {
             row.insert("deleted_at".into(), rusqlite::types::Value::Null);
         }
     }
-    assert!(
-        trashed == before,
-        "deleting a label changed more than its deleted_at"
+    let logged = common::same_records(
+        &before,
+        &trashed,
+        "deleting a label changed more than its deleted_at",
     );
+    assert_eq!(common::logged_fields(&logged), ["deleted_at"]);
 
     assert_eq!(
         j(&env, &["label", "restore", "bug"])["restored_to_issues"],
         2
     );
-    assert!(dump(&db) == before, "the label came back changed");
+    let logged = common::same_records(&before, &dump(&db), "the label came back changed");
+    assert_eq!(common::logged_fields(&logged), ["deleted_at", "deleted_at"]);
     for (n, was) in ["1", "2", "3"].iter().zip(&shown) {
         assert_eq!(j(&env, &["issue", "show", n]), *was, "W-{n}");
     }
@@ -357,10 +360,12 @@ fn a_comment_s_delete_and_restore_change_one_field() {
             row.insert("deleted_at".into(), rusqlite::types::Value::Null);
         }
     }
-    assert!(
-        trashed == before,
-        "deleting a comment changed more than its deleted_at"
+    let logged = common::same_records(
+        &before,
+        &trashed,
+        "deleting a comment changed more than its deleted_at",
     );
+    assert_eq!(common::logged_fields(&logged), ["deleted_at"]);
 
     // Frozen.
     let in_trash =
@@ -383,7 +388,8 @@ fn a_comment_s_delete_and_restore_change_one_field() {
         j(&env, &["comment", "restore", &banana.to_uppercase()])["body"],
         "banana bread"
     );
-    assert!(dump(&db) == before, "the comment came back changed");
+    let logged = common::same_records(&before, &dump(&db), "the comment came back changed");
+    assert_eq!(common::logged_fields(&logged), ["deleted_at", "deleted_at"]);
     assert_eq!(
         env.lcl(&["issue", "show", "1", "--json"])
             .assert_ok()
@@ -571,10 +577,12 @@ fn a_doc_s_delete_and_restore_change_one_field() {
             row.insert("deleted_at".into(), rusqlite::types::Value::Null);
         }
     }
-    assert!(
-        trashed == before,
-        "deleting a doc changed more than its deleted_at"
+    let logged = common::same_records(
+        &before,
+        &trashed,
+        "deleting a doc changed more than its deleted_at",
     );
+    assert_eq!(common::logged_fields(&logged), ["deleted_at"]);
 
     // Frozen: no command reads or changes it, or puts a doc under it.
     for args in [
@@ -604,10 +612,11 @@ fn a_doc_s_delete_and_restore_change_one_field() {
             row.insert("deleted_at".into(), rusqlite::types::Value::Null);
         }
     }
-    assert!(still == before, "a refused command changed the workspace");
+    common::same_records(&before, &still, "a refused command changed the workspace");
 
     assert_eq!(j(&env, &["doc", "restore", &section])["title"], "Section");
-    assert!(dump(&db) == before, "the doc came back changed");
+    let logged = common::same_records(&before, &dump(&db), "the doc came back changed");
+    assert_eq!(common::logged_fields(&logged), ["deleted_at", "deleted_at"]);
     assert_eq!(
         env.lcl(&["doc", "list", "--json"]).assert_ok().stdout,
         listed
@@ -645,7 +654,8 @@ fn a_live_doc_s_parent_is_live() {
     for id in [&handbook, &chapter, &section] {
         env.lcl(&["doc", "restore", id]).assert_ok();
     }
-    assert!(dump(&db) == before);
+    let logged = common::same_records(&before, &dump(&db), "a doc came back changed");
+    assert_eq!(common::logged_fields(&logged), ["deleted_at"; 6]);
     let orphans: i64 = rusqlite::Connection::open(&db)
         .unwrap()
         .query_row(

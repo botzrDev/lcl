@@ -594,6 +594,19 @@ enum IssueCmd {
         #[arg(long)]
         trashed: bool,
     },
+    /// List what changed in an issue, oldest first: each write's time and
+    /// author, and every field it changed, from what to what.
+    ///
+    /// Its fields, labels, cycles, relations and comments. The first entry
+    /// is the issue's creation, or its fields when lcl started to record
+    /// them: at an import, or for an issue made before lcl kept history, at
+    /// the upgrade that started it. A purge takes its history with it.
+    History {
+        /// The issue: KEY-N, #N, N or its UUID. One in the trash has a
+        /// history too.
+        #[arg(allow_negative_numbers = true)]
+        id: IssueRef,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1460,6 +1473,108 @@ fn comment_text(c: &Comment, with_id: bool) -> String {
     out
 }
 
+/// An issue's history for people: per write, `DATE · AUTHOR`, then each
+/// change indented: `field: OLD → NEW`, `labels: + bug` for a member added
+/// and `- bug` for one removed, and for a comment `comment ID: …`. The
+/// first entry says `created`, or `first recorded` for an issue lcl began
+/// to record after it was made, and lists the fields it set.
+fn history_text(history: &[lcl_core::changes::HistoryEntry]) -> String {
+    use serde_json::Value;
+    const SETS: &[&str] = &[
+        "labels",
+        "cycles",
+        "blocks",
+        "blocked_by",
+        "related",
+        "duplicate_of",
+        "duplicates",
+    ];
+    const TIMES: &[&str] = &[
+        "created_at",
+        "started_at",
+        "completed_at",
+        "canceled_at",
+        "deleted_at",
+    ];
+    let shown = |field: &str, v: &Value| -> String {
+        match v {
+            Value::Null => "none".into(),
+            Value::Number(n) if TIMES.contains(&field) => {
+                n.as_i64().map_or_else(|| n.to_string(), local_time)
+            }
+            Value::String(s) => one_line(s),
+            other => other.to_string(),
+        }
+    };
+    let mut out = Vec::new();
+    for (i, entry) in history.iter().enumerate() {
+        let mut head = format!(
+            "{} · {}",
+            local_time(entry.at),
+            entry.author.as_deref().unwrap_or("anon")
+        );
+        if i == 0 {
+            let made = entry
+                .changes
+                .iter()
+                .find(|c| c.field == "created_at" && c.comment_id.is_none())
+                .and_then(|c| c.new.as_i64());
+            head.push_str(match made {
+                Some(t) if (entry.at - t).abs() > 2 => " · first recorded",
+                _ => " · created",
+            });
+        }
+        out.push(head);
+        for c in &entry.changes {
+            let line = match (&c.comment_id, c.field.as_str()) {
+                (Some(id), "body") if c.old.is_null() => {
+                    format!("comment {id}: + {}", shown("body", &c.new))
+                }
+                (Some(id), "deleted_at") if c.old.is_null() => {
+                    format!("comment {id}: to the trash")
+                }
+                (Some(id), "deleted_at") => format!("comment {id}: restored"),
+                (Some(id), field) => format!(
+                    "comment {id}: {field}: {} → {}",
+                    shown(field, &c.old),
+                    shown(field, &c.new)
+                ),
+                (None, field) if SETS.contains(&field) => {
+                    if c.old.is_null() {
+                        format!("{field}: + {}", shown(field, &c.new))
+                    } else {
+                        format!("{field}: - {}", shown(field, &c.old))
+                    }
+                }
+                (None, field) if i == 0 && c.old.is_null() => {
+                    if c.new.as_str() == Some("") {
+                        continue;
+                    }
+                    format!("{field}: {}", shown(field, &c.new))
+                }
+                (None, field) => format!(
+                    "{field}: {} → {}",
+                    shown(field, &c.old),
+                    shown(field, &c.new)
+                ),
+            };
+            out.push(format!("  {line}"));
+        }
+    }
+    out.join("\n")
+}
+
+/// Text on one line for a history: its first line, at most 60 characters,
+/// with `…` when anything was left out.
+fn one_line(s: &str) -> String {
+    let first = s.lines().next().unwrap_or("");
+    let mut out: String = first.chars().take(60).collect();
+    if out.len() < s.len() {
+        out.push('…');
+    }
+    out
+}
+
 /// Comments for people: each as `comment_text`, a blank line between them.
 fn comments_text(comments: &[Comment], with_id: bool) -> String {
     comments
@@ -1573,11 +1688,15 @@ fn resolve_workspace(workspace: Option<&str>) -> Result<(PathBuf, Store)> {
 
 /// Opens a workspace file, and when that upgraded it and the upgrade changed
 /// values, says so on stderr. The upgrade runs once, so the line shows once.
+///
+/// The change log names LCL_AUTHOR, else USER, for its writes; `issue
+/// create` and `issue comment` name `--author` instead, when given.
 fn open_store(path: &std::path::Path) -> lcl_core::error::Result<Store> {
-    let store = Store::open(path)?;
+    let mut store = Store::open(path)?;
     if let Some(note) = store.upgrade_note() {
         eprintln!("lcl: {note}");
     }
+    store.set_author(env_author());
     Ok(store)
 }
 
@@ -2117,6 +2236,8 @@ fn run(cli: Cli) -> Result<()> {
                 } => {
                     let description = description.or(description_file).unwrap_or_default();
                     let flag = project.clone();
+                    let author = author.or_else(env_author);
+                    store.set_author(author.clone());
                     let place =
                         placement(project, no_project, milestone, no_milestone, cycle, false);
                     let issue = project_hint(
@@ -2129,7 +2250,7 @@ fn run(cli: Cli) -> Result<()> {
                                 assignee,
                                 parent,
                                 r#ref: issue_ref,
-                                creator: author.or_else(env_author),
+                                creator: author,
                                 estimate,
                                 due_date: due.map(|d| d.to_string()),
                                 labels: label,
@@ -2468,7 +2589,9 @@ fn run(cli: Cli) -> Result<()> {
                     let Some(body) = body.or(body_file) else {
                         unreachable!("clap requires BODY or --body-file")
                     };
-                    let c = store.add_comment(&id, body, author.or_else(env_author))?;
+                    let author = author.or_else(env_author);
+                    store.set_author(author.clone());
+                    let c = store.add_comment(&id, body, author)?;
                     if cli.json {
                         print_json(&c)?;
                     } else {
@@ -2482,6 +2605,14 @@ fn run(cli: Cli) -> Result<()> {
                         print_json(&comments)?;
                     } else if !comments.is_empty() {
                         outln!("{}", comments_text(&comments, true));
+                    }
+                }
+                IssueCmd::History { id } => {
+                    let history = store.issue_history(&id)?;
+                    if cli.json {
+                        print_json(&history)?;
+                    } else if !history.is_empty() {
+                        outln!("{}", history_text(&history));
                     }
                 }
             }

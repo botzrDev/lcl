@@ -1,6 +1,6 @@
 # Sync (design note)
 
-Status: approved by the project's owner on 2026-11-24 (LOCL-22). Nothing here is built yet. The service lives in a separate closed repository; this note says what it needs from the data, and what the client changes. LOCL-30 builds sync from it, and LOCL-34 builds the change log.
+Status: approved by the project's owner on 2026-11-24 (LOCL-22). The change log is built (LOCL-34, schema 14), and import skips unknown record types (LOCL-48); sync itself is not built yet. The service lives in a separate closed repository; this note says what it needs from the data, and what the client changes. LOCL-30 builds sync from it.
 
 ## What sync is
 
@@ -42,9 +42,11 @@ Every write appends rows to a `changes` table, in the same transaction as the wr
 - Sync sends a machine's changes the service hasn't seen, and applies the changes it hasn't seen from others.
 - `lcl issue history` (LOCL-34) lists an issue's changes. LOCL-34 builds this log, not a second one.
 
-A row is one change to one field of one record: the record's kind and UUID, the field, the old and new values as JSON, the author, and a clock. A create is one row whose field is `*` and whose value is the whole record. A purge is one row too, and so is each membership added to or removed from a set (a label on an issue, an issue in a cycle, a relation).
+A row is one change to one field of one record: the record's kind and UUID, the field, the old and new values as JSON, the author, and a clock. A create is one row whose field is `*` and whose value is the whole record (every column but `id` and `updated_at`). A purge is one row too, with field `*` and no values.
 
-The clock is a hybrid logical clock: wall-clock milliseconds, a counter, and the machine's id, written so that comparing two clocks as text orders them. A machine's clock never goes back. On receiving a change with a later clock, it moves its own past it. The service refuses a change whose clock is more than a minute ahead of its own, so a machine with a wrong clock can't win every conflict; that machine is told to fix its clock.
+A membership is a field of the issue, one per member, so the issue's UUID and the field name it: `label:UUID` and `cycle:UUID` hold `true` while the issue has it, and a relation `KIND:UUID` (`blocks:`, `related:`, `duplicate:`, the other issue's UUID) holds its `created_at`. Removed, the value is null. Adding a member and removing it are each one row.
+
+The clock is a hybrid logical clock: wall-clock milliseconds, a counter, and the machine's id, written so that comparing two clocks as text orders them: `MS-COUNTER-MACHINE`, the milliseconds 13 digits and the counter 4 (`1795523737123-0000-local`). Until opt-in the machine is `local`: an id kept in the file would travel with a copy of it. One write's rows share its clock, in the order `seq` gives them. A machine's clock never goes back. On receiving a change with a later clock, it moves its own past it. The service refuses a change whose clock is more than a minute ahead of its own, so a machine with a wrong clock can't win every conflict; that machine is told to fix its clock.
 
 Rows are never updated or deleted, except when the record itself is purged.
 
@@ -86,8 +88,14 @@ What the client relies on. How the service is built is not this note's business.
 
 One migration:
 
-- `changes`: `seq INTEGER PRIMARY KEY`, `clock TEXT NOT NULL`, `kind TEXT NOT NULL`, `record TEXT NOT NULL` (the UUID, or the pair for a link), `field TEXT NOT NULL`, `old TEXT`, `new TEXT`, `author TEXT`, `synced INTEGER` (the service's sequence number, null until the service has it). An index on `(record, field, clock)`. It is written for every workspace, synced or not, because it is the history too. The migration writes one create row for each record that exists, with its current values.
+Built in schema 14 (LOCL-34):
+
+- `changes`: `seq INTEGER PRIMARY KEY AUTOINCREMENT` (never reused, even after a purge), `clock TEXT NOT NULL`, `kind TEXT NOT NULL`, `record TEXT NOT NULL` (the record's UUID; for a membership, the issue's), `field TEXT NOT NULL`, `old TEXT`, `new TEXT`, `author TEXT`, `synced INTEGER` (the service's sequence number, null until the service has it). An index on `(record, field, clock)`, and one on `field`, which finds the memberships naming a record. It is written for every workspace, synced or not, because it is the history too. The migration writes one create row for each record that exists, with its current values, and one row for each membership.
 - `purged`: `record TEXT PRIMARY KEY`, `kind TEXT NOT NULL`, `number INTEGER`, `clock TEXT NOT NULL`.
+- Triggers on every record and link table write both. They read the write's clock and author from `meta` (`clock`, the latest clock issued, and `author`, there only during a write).
+
+For sync (LOCL-30):
+
 - `meta` keys written at opt-in, and absent until then: the machine's id, the service's address and workspace id, the last sequence number seen, and the blocks held.
 - The existing tables and columns stay as they are.
 

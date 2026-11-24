@@ -164,6 +164,7 @@ fn upgrades_a_v7_workspace() {
     // Undoing V10's expected changes (none), V9's and V8's gives back the
     // v7 file exactly, the issues table's CREATE statement included.
     let mut after = dump(&db);
+    common::undo_v14_schema(&mut after);
     common::undo_v13_schema(&mut after, &before);
     common::undo_v12_schema(&mut after, &before);
     undo_v11_schema(&mut after, &before);

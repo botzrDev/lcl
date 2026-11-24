@@ -45,6 +45,7 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
     Code(v11),
     Sql(V12),
     Sql(V13),
+    Code(v14),
 ];
 
 /// v11 -> v12: the trash. An issue with `deleted_at` set is in the trash
@@ -90,6 +91,289 @@ CREATE TRIGGER comments_au AFTER UPDATE OF body ON comments BEGIN
     INSERT INTO comments_fts(rowid, body) VALUES (new.rowid, new.body);
 END;
 ";
+
+/// v13 -> v14: the change log (docs/sync.md, "The change log"). Every
+/// write to a record appends rows to `changes` in its own transaction:
+/// triggers on each table write them, so no write can leave one out, and a
+/// write that fails leaves none. A row is one change to one field of one
+/// record, its old and new values as JSON. A create is one row, field `*`,
+/// whose `new` is the whole record. A membership (an issue's label or
+/// cycle, a relation) is a field of the issue: `label:UUID`, `cycle:UUID`,
+/// or the relation's kind and the other issue (`blocks:UUID`), `true` or
+/// for a relation its `created_at` while it holds, else null. `updated_at`
+/// is not logged: it is the time of the latest change.
+///
+/// Deleting a row of a record table is a purge: its rows, and every
+/// membership naming it, leave the log, and one row with field `*` and no
+/// values takes their place, with a tombstone in `purged`. (Projects,
+/// milestones and cycles have no trash, so their delete is this too.)
+///
+/// The triggers read the write's clock and author from `meta` (`clock`,
+/// `author`), which `crate::changes::begin` sets at the start of every
+/// write: a trigger in the file can't read a connection's temp tables. A
+/// write made without lcl (a hand edit) is logged with the clock of lcl's
+/// last write and no author.
+///
+/// The migration logs a create row for every record there is, and one row
+/// for every membership, all under the clock it starts the log with.
+fn v14(tx: &Transaction<'_>) -> Result<Vec<String>> {
+    tx.execute_batch(V14_TABLES)?;
+    for t in V14_RECORDS {
+        tx.execute_batch(&v14_record_triggers(t))?;
+    }
+    for m in V14_MEMBERSHIPS {
+        tx.execute_batch(&v14_membership_triggers(m))?;
+    }
+    let clock = crate::changes::next_clock(None, crate::changes::now_ms());
+    crate::db::put_meta(tx, "clock", &clock)?;
+    for t in V14_RECORDS {
+        tx.execute(
+            &format!(
+                "INSERT INTO changes (clock, kind, record, field, old, new) \
+                 SELECT ?1, '{kind}', id, '*', NULL, {record} FROM {table} ORDER BY {order}",
+                kind = t.kind,
+                record = v14_record_json(t.fields, ""),
+                table = t.table,
+                order = if t.kind == "issue" { "number" } else { "rowid" },
+            ),
+            params![clock],
+        )?;
+    }
+    for m in V14_MEMBERSHIPS {
+        tx.execute(
+            &format!(
+                "INSERT INTO changes (clock, kind, record, field, old, new) \
+                 SELECT ?1, 'issue', issue_id, {field}, 'null', {value} FROM {table} ORDER BY rowid",
+                field = m.field.replace("{row}", ""),
+                value = m.value.replace("{row}", ""),
+                table = m.table,
+            ),
+            params![clock],
+        )?;
+    }
+    Ok(Vec::new())
+}
+
+const V14_TABLES: &str = "
+CREATE TABLE changes (
+    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    clock TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    record TEXT NOT NULL,
+    field TEXT NOT NULL,
+    old TEXT,
+    new TEXT,
+    author TEXT,
+    synced INTEGER
+);
+CREATE INDEX changes_record ON changes(record, field, clock);
+CREATE INDEX changes_field ON changes(field);
+CREATE TABLE purged (
+    record TEXT PRIMARY KEY,
+    kind TEXT NOT NULL,
+    number INTEGER,
+    clock TEXT NOT NULL
+);
+";
+
+/// A table whose rows are records, as v14 logs it.
+struct V14Record {
+    table: &'static str,
+    kind: &'static str,
+    /// Every column but `id` and `updated_at`.
+    fields: &'static [&'static str],
+    /// The membership fields, on issues, that name a record of this table:
+    /// a purge removes them with it.
+    named_by: &'static [&'static str],
+}
+
+const V14_RECORDS: &[V14Record] = &[
+    V14Record {
+        table: "issues",
+        kind: "issue",
+        fields: &[
+            "number",
+            "title",
+            "description",
+            "status",
+            "priority",
+            "assignee",
+            "parent_id",
+            "project_id",
+            "milestone_id",
+            "ref",
+            "creator",
+            "estimate",
+            "due_date",
+            "created_at",
+            "started_at",
+            "completed_at",
+            "canceled_at",
+            "deleted_at",
+        ],
+        named_by: &["blocks", "related", "duplicate"],
+    },
+    V14Record {
+        table: "comments",
+        kind: "comment",
+        fields: &["issue_id", "body", "author", "created_at", "deleted_at"],
+        named_by: &[],
+    },
+    V14Record {
+        table: "labels",
+        kind: "label",
+        fields: &["name", "color", "deleted_at"],
+        named_by: &["label"],
+    },
+    V14Record {
+        table: "projects",
+        kind: "project",
+        fields: &["name", "description", "status", "target_date", "created_at"],
+        named_by: &[],
+    },
+    V14Record {
+        table: "milestones",
+        kind: "milestone",
+        fields: &[
+            "project_id",
+            "name",
+            "description",
+            "target_date",
+            "sort_order",
+            "created_at",
+        ],
+        named_by: &[],
+    },
+    V14Record {
+        table: "cycles",
+        kind: "cycle",
+        fields: &["name", "starts_at", "ends_at", "created_at"],
+        named_by: &["cycle"],
+    },
+    V14Record {
+        table: "docs",
+        kind: "doc",
+        fields: &["title", "content", "parent_id", "created_at", "deleted_at"],
+        named_by: &[],
+    },
+];
+
+/// A link table whose rows are memberships, logged as fields of the issue.
+/// In `field` and `value`, `{row}` stands for `NEW.` or `OLD.`.
+struct V14Membership {
+    table: &'static str,
+    field: &'static str,
+    value: &'static str,
+}
+
+const V14_MEMBERSHIPS: &[V14Membership] = &[
+    V14Membership {
+        table: "issue_labels",
+        field: "'label:' || {row}label_id",
+        value: "'true'",
+    },
+    V14Membership {
+        table: "issue_cycles",
+        field: "'cycle:' || {row}cycle_id",
+        value: "'true'",
+    },
+    V14Membership {
+        table: "issue_relations",
+        field: "{row}kind || ':' || {row}related_id",
+        value: "json_quote({row}created_at)",
+    },
+];
+
+const V14_CLOCK: &str = "(SELECT value FROM meta WHERE key = 'clock')";
+const V14_AUTHOR: &str = "(SELECT value FROM meta WHERE key = 'author')";
+const V14_COLUMNS: &str = "clock, kind, record, field, old, new, author";
+
+/// `json_object('a', {row}a, ...)` over `fields`.
+fn v14_record_json(fields: &[&str], row: &str) -> String {
+    let pairs: Vec<String> = fields.iter().map(|f| format!("'{f}', {row}{f}")).collect();
+    format!("json_object({})", pairs.join(", "))
+}
+
+fn v14_record_triggers(t: &V14Record) -> String {
+    let V14Record {
+        table,
+        kind,
+        fields,
+        named_by,
+    } = t;
+    let (clock, author, cols) = (V14_CLOCK, V14_AUTHOR, V14_COLUMNS);
+    let updates: String = fields
+        .iter()
+        .map(|f| {
+            format!(
+                "    INSERT INTO changes ({cols}) SELECT {clock}, '{kind}', NEW.id, '{f}', \
+                 json_quote(OLD.{f}), json_quote(NEW.{f}), {author} WHERE OLD.{f} IS NOT NEW.{f};\n"
+            )
+        })
+        .collect();
+    let named = if named_by.is_empty() {
+        String::new()
+    } else {
+        let fields: Vec<String> = named_by
+            .iter()
+            .map(|p| format!("'{p}:' || OLD.id"))
+            .collect();
+        format!(
+            "    DELETE FROM changes WHERE field IN ({});\n",
+            fields.join(", ")
+        )
+    };
+    let number = if *kind == "issue" {
+        "OLD.number"
+    } else {
+        "NULL"
+    };
+    let record = v14_record_json(fields, "NEW.");
+    format!(
+        "CREATE TRIGGER {table}_log_insert AFTER INSERT ON {table} BEGIN
+    INSERT INTO changes ({cols}) VALUES ({clock}, '{kind}', NEW.id, '*', NULL, {record}, {author});
+END;
+CREATE TRIGGER {table}_log_update AFTER UPDATE ON {table} BEGIN
+{updates}END;
+CREATE TRIGGER {table}_log_delete AFTER DELETE ON {table} BEGIN
+    DELETE FROM changes WHERE record = OLD.id;
+{named}    INSERT INTO changes ({cols}) VALUES ({clock}, '{kind}', OLD.id, '*', NULL, NULL, {author});
+    INSERT INTO purged (record, kind, number, clock) VALUES (OLD.id, '{kind}', {number}, {clock});
+END;
+"
+    )
+}
+
+fn v14_membership_triggers(m: &V14Membership) -> String {
+    let V14Membership {
+        table,
+        field,
+        value,
+    } = m;
+    let (clock, author, cols) = (V14_CLOCK, V14_AUTHOR, V14_COLUMNS);
+    let row = |prefix: &str| {
+        (
+            field.replace("{row}", prefix),
+            value.replace("{row}", prefix),
+        )
+    };
+    let ((new_field, new_value), (old_field, old_value)) = (row("NEW."), row("OLD."));
+    let add = format!(
+        "    INSERT INTO changes ({cols}) VALUES ({clock}, 'issue', NEW.issue_id, {new_field}, 'null', {new_value}, {author});\n"
+    );
+    let remove = format!(
+        "    INSERT INTO changes ({cols}) VALUES ({clock}, 'issue', OLD.issue_id, {old_field}, {old_value}, 'null', {author});\n"
+    );
+    format!(
+        "CREATE TRIGGER {table}_log_insert AFTER INSERT ON {table} BEGIN
+{add}END;
+CREATE TRIGGER {table}_log_update AFTER UPDATE ON {table} BEGIN
+{remove}{add}END;
+CREATE TRIGGER {table}_log_delete AFTER DELETE ON {table} BEGIN
+{remove}END;
+"
+    )
+}
 
 /// v0 -> v1: the lcl 0.1.0 schema, verbatim.
 ///

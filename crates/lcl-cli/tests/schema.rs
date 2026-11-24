@@ -103,6 +103,8 @@ fn upgrades_a_0_1_0_database() {
     // expected changes on `after`; what's left must equal `before` exactly.
     let text = |s: &str| SqlValue::Text(s.into());
     let mut after = dump(&db);
+    // First, while its rows are as the upgrade left them.
+    common::undo_v14_schema(&mut after);
     // v2: the number mark, seeded one past the highest number.
     let meta = after.tables.get_mut("meta").expect("meta table");
     let seeded = meta

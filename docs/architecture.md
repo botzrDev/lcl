@@ -62,9 +62,20 @@ lcl does not run `VACUUM`. The search indexes are FTS5 tables keyed by rowid (`i
 - On every open, read-only: the index lists exactly the rowids of its table's rows. That shows a renumbering. An open of an up-to-date workspace takes no write lock, so a read runs while another lcl writes. A file this process cannot write is checked too.
 - In a process's first write, and in an upgrade before it commits: FTS5's `integrity-check`, which also compares the words. It is a write statement, so it runs only under the write lock the write or the upgrade holds already. A mismatch fails the write before it changes anything, and an upgrade is not committed.
 
+## The change log
+
+Every write to a record appends rows to the `changes` table in its own transaction: one row per field changed, with the old and new values as JSON, the author, and the write's clock. Triggers on each table write them, so no write path can leave one out, and a write that fails leaves none. `lcl issue history` reads an issue's rows; sync (docs/sync.md) will send them.
+
+- A create is one row with field `*` whose value is the whole record. An issue's labels, cycles and relations are fields of the issue, one per member: `label:UUID`, `cycle:UUID`, `blocks:UUID`.
+- `updated_at` is not logged.
+- The clock is a hybrid logical clock, `MS-COUNTER-MACHINE`, which orders as text and never goes back. The machine is `local` until sync gives it an id. One write's rows share its clock.
+- A write puts its clock and author in `meta` (`clock`, `author`) for the triggers, since a trigger in the file can't read the connection's temp tables. `author` leaves when the write ends. A write that logged nothing puts the clock back, so it leaves the log and the clock as they were.
+- Deleting a record row is a purge. The record's rows, and the memberships that name it, leave the log. One row with no values and a tombstone in `purged` (kind, UUID, issue number, clock) take their place. Rows are never changed or deleted otherwise.
+- A hand edit to the file is logged too, under the clock of lcl's last write and with no author.
+
 ## Schema
 
-`PRAGMA user_version` is the schema version. This build's is 11, the length of the migration list. Opening a file applies every pending migration in one transaction, then checks foreign keys. A file from a newer lcl is refused and left untouched. A migration that has shipped is never edited. A shipped step runs once; editing it would fork the files that already ran it.
+`PRAGMA user_version` is the schema version. This build's is 14, the length of the migration list. Opening a file applies every pending migration in one transaction, then checks foreign keys. A file from a newer lcl is refused and left untouched. A migration that has shipped is never edited. A shipped step runs once; editing it would fork the files that already ran it.
 
 An open that changes stored values prints one line on stderr and does not print it again.
 
@@ -81,6 +92,9 @@ An open that changes stored values prints one line on stderr and does not print 
 | 9 | An issue's `ref` and `creator`. |
 | 10 | Values 0.1.0 stored that this lcl could not read, repaired where they can be read. |
 | 11 | Status, parent, comment, doc-parent, and cycle-membership rules held in the tables. |
+| 12 | The trash for issues: `deleted_at`. |
+| 13 | The trash for docs, comments, and labels. |
+| 14 | The change log: `changes`, `purged`, and the triggers that write them. Every record there is gets a create row, so the file grows by about its records' size. |
 
 ## Search
 
@@ -91,6 +105,8 @@ An issue matches when every word is in its title and description together, or ev
 ## Export
 
 `lcl export` writes the whole workspace as `lcl-export/1`: one JSON object per line. The workspace header is first, then labels, projects, milestones, cycles, issues, comments, relations, and docs. The same workspace exports to the same bytes. Issues are named by number in the file, not by the UUID stored on disk. Cycles and docs keep their ids, because a name is not unique for them.
+
+An export carries no history. It is a snapshot of the records, and an import begins each record's history with its values as imported.
 
 `lcl import` restores that file into an empty workspace with the same key. Numbers, refs, creators, authors, and timestamps are kept as the file gives them. The file is checked whole before anything is written, and the write is one transaction. `--dry-run` checks and counts, and writes nothing. A record of a type this lcl doesn't know is skipped and counted by type, so a file from a later lcl, which adds new record types rather than new keys, still imports; an unknown key in a known record is refused. A stored value the import would refuse stops an export as well, and the export writes nothing.
 

@@ -480,6 +480,7 @@ pinned! {
     issue_unrelate => "issue unrelate",
     issue_comment => "issue comment",
     issue_comments => "issue comments",
+    issue_history => "issue history",
     comment_edit => "comment edit",
     comment_delete => "comment delete",
     comment_restore => "comment restore",
@@ -620,6 +621,25 @@ mod cases {
 
     pub fn issue_comment() -> Vec<Value> {
         vec![j(&rich().env, &["issue", "comment", "2", "a comment"])]
+    }
+
+    /// Issue 1's history after writes with an author and without one: a
+    /// field set and cleared, a label removed, and a comment added and
+    /// moved to the trash.
+    pub fn issue_history() -> Vec<Value> {
+        let rich = rich();
+        let env = &rich.env;
+        j(env, &["issue", "update", "1", "--assignee", "ann"]);
+        env.lcl_with(
+            &["issue", "update", "1", "--no-assignee", "--clear-labels"],
+            |cmd| {
+                cmd.env_remove("USER");
+            },
+        )
+        .assert_ok();
+        let c = j(env, &["issue", "comment", "1", "a word"]);
+        j(env, &["comment", "delete", &id(&c)]);
+        vec![j(env, &["issue", "history", "1"])]
     }
 
     pub fn issue_comments() -> Vec<Value> {
@@ -960,6 +980,18 @@ mod objects {
     }
 
     #[test]
+    fn object_history_entry_and_field_change() {
+        let history = super::cases::issue_history();
+        let entries: Vec<Value> = history[0].as_array().expect("entries").clone();
+        pin_object("HistoryEntry", &entries);
+        let changes: Vec<Value> = entries
+            .iter()
+            .flat_map(|e| e["changes"].as_array().expect("changes").clone())
+            .collect();
+        pin_object("FieldChange", &changes);
+    }
+
+    #[test]
     fn object_skipped_records() {
         let out = super::cases::import_with_unknown_types();
         pin_object("SkippedRecords", &[out["skipped"][0].clone()]);
@@ -977,6 +1009,8 @@ mod objects {
                 "Cycle",
                 "Doc",
                 "Error",
+                "FieldChange",
+                "HistoryEntry",
                 "Issue",
                 "IssueCounts",
                 "Label",

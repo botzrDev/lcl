@@ -10,10 +10,16 @@ All notable changes to lcl are recorded here. The format follows
 
 - One command installs lcl from the newest release: `curl -fsSL https://raw.githubusercontent.com/botzrDev/lcl/main/install.sh | sh` on Linux and macOS, `irm https://raw.githubusercontent.com/botzrDev/lcl/main/install.ps1 | iex` in PowerShell on Windows. It picks the build for the machine, checks it against `SHA256SUMS`, and checks that it runs and prints the release's version before it puts it in place. A failed download, a checksum that doesn't match, or a binary that doesn't run installs nothing and exits 1. `LCL_VERSION` installs a given release and `LCL_INSTALL_DIR` chooses the directory. Until 1.0 the newest release can be a pre-release.
 - The README says how to move a workspace to another machine or person with `lcl export` and `lcl import`, why `.lcl/` must stay out of synced folders and network drives, and gives a snippet for a project's own README: the install line, `lcl init --key`, and how to export.
+- `lcl issue history ID` lists what changed in an issue, oldest first. There is one entry per write: its time, its author, and each field it changed, from what to what. Labels, cycles and relations show each member added or removed. The issue's comments show as added, edited, trashed and restored. With `--json` it prints `[{"at", "author", "changes": [{"field", "comment_id", "old", "new"}]}]`. An issue in the trash has a history; a purge takes the history with it.
+- A change log under it. Every write to a record (issues, comments, labels, projects, milestones, cycles, docs) appends one row per field it changed, in the same transaction, so a write that fails leaves none. The author is `--author`, else `LCL_AUTHOR`, else `USER`. A write that changes nothing logs nothing. Sync will be built on this log (docs/sync.md). `lcl export` doesn't carry it.
 
 ### Changed
 
 - `lcl import` skips a record whose `type` it doesn't know, and says so: `Skipped 3 records of types this lcl doesn't know: attachment (2), initiative (1)`. 0.3.0-alpha.2 refused the file, exit 2. With `--json`, the output adds `skipped`, a list of `{"type", "records"}`, empty when nothing was skipped. A later `lcl-export/1` adds what it adds as new record types, so an older lcl reads the rest of a newer file. An unknown key in a known record is still refused, exit 2. So is a type that is a known one in other case, as `"Issue"`, a blank type, and an unknown type on the first line, which must be the workspace header.
+
+### Upgrading from 0.3.0-alpha.2
+
+- The first open by this lcl upgrades a workspace to schema 14, after taking a snapshot beside it, as every upgrade does. The upgrade starts the change log with a create row for every record, so the file grows by about the size of its records. Each issue's history begins at the upgrade, with its fields as they were then; nothing before it was recorded.
 
 ## [0.3.0-alpha.2] - 2026-11-23
 

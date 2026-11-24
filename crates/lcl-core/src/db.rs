@@ -75,6 +75,8 @@ pub struct Store {
     /// Whether this store's first write transaction has compared the search
     /// indexes with their rows' text yet: see `begin_write`.
     pub(crate) fts_checked: bool,
+    /// Who the change log names for this store's writes: see `set_author`.
+    pub(crate) author: Option<String>,
 }
 
 /// Which issues `Store::list_issues` returns. Each part narrows the list
@@ -349,7 +351,16 @@ impl Store {
             conn,
             upgrade_note,
             fts_checked: false,
+            author: None,
         })
+    }
+
+    /// Who makes this store's writes from now on, for the change log; None,
+    /// as a store starts, for nobody. It names the person, not what they
+    /// write: `create_issue` and `add_comment` take the creator and the
+    /// comment's author on their own.
+    pub fn set_author(&mut self, author: Option<String>) {
+        self.author = author;
     }
 
     /// When this open upgraded the file, one line saying so, naming the
@@ -373,9 +384,17 @@ impl Store {
     /// can change between its reads and its writes. Concurrent writers queue on
     /// the lock for up to BUSY_TIMEOUT instead of failing. An error drops the
     /// transaction, which rolls all of it back.
+    ///
+    /// The change log's triggers log what `f` writes, under the clock and
+    /// author `crate::changes::begin` gives the write.
     pub(crate) fn write<T>(&mut self, f: impl FnOnce(&Transaction<'_>) -> Result<T>) -> Result<T> {
-        let tx = begin_write(&mut self.conn, &mut self.fts_checked)?;
+        let (tx, pending) = begin_write(
+            &mut self.conn,
+            &mut self.fts_checked,
+            self.author.as_deref(),
+        )?;
         let out = f(&tx)?;
+        crate::changes::finish(&tx, pending)?;
         tx.commit()?;
         Ok(out)
     }
@@ -1433,17 +1452,34 @@ fn apply_labels(conn: &Connection, labels: &mut Vec<String>, update: &LabelUpdat
 /// The issue's links to labels in the trash are left alone: they are not
 /// among the labels it was read with, and `label restore` must find them
 /// (see `crate::trash`).
+///
+/// Only the links that change are written, so the change log records the
+/// labels added and removed, not the whole set again.
 fn set_labels(conn: &Connection, issue_id: &str, names: &[String]) -> Result<()> {
-    conn.execute(
-        "DELETE FROM issue_labels WHERE issue_id=?1
-         AND label_id IN (SELECT id FROM labels WHERE deleted_at IS NULL)",
-        params![issue_id],
-    )?;
+    let mut wanted = Vec::new();
     for name in names {
         let label = live_label(conn, name)?;
+        if !wanted.contains(&label.id) {
+            wanted.push(label.id);
+        }
+    }
+    let mut stmt = conn.prepare(
+        "SELECT label_id FROM issue_labels WHERE issue_id=?1
+         AND label_id IN (SELECT id FROM labels WHERE deleted_at IS NULL)",
+    )?;
+    let held: Vec<String> = stmt
+        .query_map(params![issue_id], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    for id in held.iter().filter(|id| !wanted.contains(id)) {
+        conn.execute(
+            "DELETE FROM issue_labels WHERE issue_id=?1 AND label_id=?2",
+            params![issue_id, id],
+        )?;
+    }
+    for id in wanted.iter().filter(|id| !held.contains(id)) {
         conn.execute(
             "INSERT OR IGNORE INTO issue_labels(issue_id,label_id) VALUES(?1,?2)",
-            params![issue_id, label.id],
+            params![issue_id, id],
         )?;
     }
     Ok(())
@@ -2162,13 +2198,16 @@ fn place_cycle(conn: &Connection, issue_id: &str, c: &Change<String>) -> Result<
         Change::Clear => None,
         Change::Set(r) => Some(resolve_cycle(conn, r)?),
     };
+    // Only what changes is written, for the change log: setting the cycle
+    // an issue is in already logs nothing.
+    let keep = cycle.as_ref().map(|c| c.id.clone());
     conn.execute(
-        "DELETE FROM issue_cycles WHERE issue_id=?1",
-        params![issue_id],
+        "DELETE FROM issue_cycles WHERE issue_id=?1 AND cycle_id IS NOT ?2",
+        params![issue_id, keep],
     )?;
     if let Some(cycle) = cycle {
         conn.execute(
-            "INSERT INTO issue_cycles(issue_id,cycle_id) VALUES(?1,?2)",
+            "INSERT OR IGNORE INTO issue_cycles(issue_id,cycle_id) VALUES(?1,?2)",
             params![issue_id, cycle.id],
         )?;
     }
@@ -2294,16 +2333,20 @@ const FTS_TABLES: [(&str, &str); 3] = [
 /// `Store::import`. The first one a store begins runs `check_fts` first,
 /// under the write lock it holds anyway, so the full check never waits on a
 /// lock of its own. A mismatch fails the write before it changes anything.
+/// Then the change log's clock and author for the write go in place: pass
+/// what comes back to `crate::changes::finish` before committing.
 pub(crate) fn begin_write<'c>(
     conn: &'c mut Connection,
     fts_checked: &mut bool,
-) -> Result<Transaction<'c>> {
+    author: Option<&str>,
+) -> Result<(Transaction<'c>, crate::changes::Pending)> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     if !*fts_checked {
         check_fts(&tx)?;
         *fts_checked = true;
     }
-    Ok(tx)
+    let pending = crate::changes::begin(&tx, author)?;
+    Ok((tx, pending))
 }
 
 /// The search indexes are FTS5 tables with external content, keyed by rowid.

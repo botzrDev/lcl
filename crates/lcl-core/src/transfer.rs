@@ -1622,7 +1622,11 @@ impl Store {
     pub fn import(&mut self, input: &[u8], dry_run: bool) -> Result<ImportSummary> {
         let at = now();
         let file = read_file(input, at)?;
-        let tx = crate::db::begin_write(&mut self.conn, &mut self.fts_checked)?;
+        let (tx, pending) = crate::db::begin_write(
+            &mut self.conn,
+            &mut self.fts_checked,
+            self.author.as_deref(),
+        )?;
         // Issue and doc parents may be inserted after the rows that name
         // them. The check runs at commit.
         tx.pragma_update(None, "defer_foreign_keys", true)?;
@@ -1642,6 +1646,7 @@ impl Store {
         if dry_run {
             tx.rollback()?;
         } else {
+            crate::changes::finish(&tx, pending)?;
             tx.commit()?;
         }
         Ok(ImportSummary {

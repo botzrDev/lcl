@@ -1,4 +1,5 @@
 pub mod backup;
+pub mod changes;
 pub mod db;
 pub mod error;
 mod migrations;

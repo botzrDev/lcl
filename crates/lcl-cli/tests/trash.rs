@@ -261,7 +261,14 @@ fn round_trip_every_issue(env: &Env, n: i64, seed: u64, trashed: &[i64]) -> (i64
         only_deleted_at_differs(&mut in_trash, &before, i, seed);
 
         env.lcl(&["issue", "restore", &id]).assert_ok();
-        assert!(dump(&db) == before, "seed {seed}: W-{i} came back changed");
+        let (mut was, mut now) = (before.clone(), dump(&db));
+        let logged = common::take_log(&mut was, &mut now);
+        assert!(now == was, "seed {seed}: W-{i} came back changed");
+        assert_eq!(
+            common::logged_fields(&logged),
+            ["deleted_at", "deleted_at"],
+            "seed {seed}: W-{i}: the log has its delete and restore, and nothing else"
+        );
         assert_eq!(
             env.lcl(&["issue", "show", &id, "--json"])
                 .assert_ok()
@@ -286,9 +293,17 @@ fn round_trip_every_issue(env: &Env, n: i64, seed: u64, trashed: &[i64]) -> (i64
 }
 
 /// Checks that `trashed` is `before` with issue `number`'s `deleted_at` set
-/// and nothing else changed.
+/// and nothing else changed, and that the change log has that, and only it.
 fn only_deleted_at_differs(trashed: &mut Dump, before: &Dump, number: i64, seed: u64) {
     use rusqlite::types::Value as Sql;
+    let mut before = before.clone();
+    let logged = common::take_log(&mut before, trashed);
+    assert_eq!(
+        common::logged_fields(&logged),
+        ["deleted_at"],
+        "seed {seed}: W-{number}: {logged:?}"
+    );
+    assert_eq!(logged[0].2.as_deref(), Some("null"), "seed {seed}");
     let rows = trashed.tables.get_mut("issues").expect("issues");
     let mut set = 0;
     for (row, was) in rows.iter_mut().zip(&before.tables["issues"]) {
@@ -303,7 +318,7 @@ fn only_deleted_at_differs(trashed: &mut Dump, before: &Dump, number: i64, seed:
     }
     assert_eq!(set, 1);
     assert!(
-        *trashed == *before,
+        *trashed == before,
         "seed {seed}: deleting W-{number} changed more than deleted_at"
     );
 }
@@ -887,12 +902,58 @@ fn a_purge_removes_the_issue_and_everything_on_it_and_nothing_else() {
             "{table}: a row changed that the purge should have left"
         );
     }
+    let (mut was, mut now) = (trashed.clone(), after.clone());
+    let logged = common::take_log(&mut was, &mut now);
     for table in ["labels", "projects", "milestones", "cycles", "docs", "meta"] {
-        assert!(
-            after.tables[table] == trashed.tables[table],
-            "{table} changed"
-        );
+        assert!(now.tables[table] == was.tables[table], "{table} changed");
     }
+    // The log lost every row about W-3 and its comments, and gained a
+    // purge row for each: W-3 and its two comments, with tombstones. What
+    // it logged for W-3's relations, labels and cycle went with W-3.
+    assert_eq!(
+        logged
+            .iter()
+            .map(|(kind, field, old, new)| (
+                kind.as_str(),
+                field.as_str(),
+                old.is_none(),
+                new.is_none()
+            ))
+            .collect::<Vec<_>>(),
+        [
+            ("comment", "*", true, true),
+            ("comment", "*", true, true),
+            ("issue", "*", true, true)
+        ]
+    );
+    let purged: Vec<(String, Option<i64>)> = rusqlite::Connection::open(&db)
+        .unwrap()
+        .prepare("SELECT kind, number FROM purged ORDER BY kind")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(
+        purged,
+        [
+            ("comment".into(), None),
+            ("comment".into(), None),
+            ("issue".into(), Some(3))
+        ]
+    );
+    let w3_rows: i64 = rusqlite::Connection::open(&db)
+        .unwrap()
+        .query_row(
+            "SELECT count(*) FROM changes c JOIN purged p ON c.record = p.record OR c.field LIKE '%:' || p.record WHERE c.new IS NOT NULL",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        w3_rows, 0,
+        "a row about W-3 or its comments outlived the purge"
+    );
     // The other issues read as they did while W-3 was in the trash, which
     // hid its relations from them already.
     for (n, was) in ["1", "2", "5"].iter().zip(&others_before) {

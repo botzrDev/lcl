@@ -129,6 +129,21 @@ lcl --json issue comments DEMO-1
   - `lcl --json comment delete ID` moves it to the trash; `comment restore ID` brings it back.
 - Adding, editing or deleting a comment doesn't change the issue's `updated_at`.
 
+## History
+
+```bash
+lcl --json issue history DEMO-1
+```
+
+- Lists what changed in an issue, oldest first, one entry per write: `{"at", "author", "changes"}`. Each change is `{"field", "comment_id", "old", "new"}`.
+- Fields are the `Issue` keys, but `parent` is the parent's `KEY-N`. `priority` is shown by name, and so are a project, a milestone, a label and a cycle.
+- `labels`, `cycles` and the relations (`blocks`, `blocked_by`, `related`, `duplicate_of`, `duplicates`) change one member at a time. `old` null means the member was added; `new` null means it was removed.
+- A comment's changes carry its `comment_id`, with field `body` (`old` null when it was added) or `deleted_at`.
+- The first entry sets every field that isn't null. It is the creation, or for an issue made before lcl kept history, or brought in by `lcl import`, the fields as they were then.
+- `author` is `--author`, else `LCL_AUTHOR`, else `USER`.
+- History keeps old values, a description's included. Only a purge removes them: a purged issue, comment or label takes its history with it.
+- An issue in the trash has a history too. `lcl export` doesn't carry history.
+
 ## Projects and milestones
 
 ```bash

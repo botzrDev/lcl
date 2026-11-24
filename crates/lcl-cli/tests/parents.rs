@@ -428,6 +428,8 @@ fn upgrade_repairs_parent_ids() {
     // apply: no issue here is Done or Canceled.)
     let t = |s: &str| SqlValue::Text(s.into());
     let mut after = dump(&db);
+    // First, while its rows are as the upgrade left them.
+    common::undo_v14_schema(&mut after);
     let meta = after.tables.get_mut("meta").expect("meta table");
     let mark = meta
         .iter()

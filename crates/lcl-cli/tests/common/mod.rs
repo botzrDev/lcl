@@ -797,6 +797,104 @@ pub fn undo_v11_schema(after: &mut Dump, before: &Dump) {
     }
 }
 
+/// Undoes migration 14 on an upgraded dump, after checking what it wrote:
+/// the change log (`changes`, `purged`, their indexes and the triggers that
+/// write them) and the clock in `meta`. The log must hold one create row
+/// for every record, with the record's values, and one row for every
+/// membership (an issue's label or cycle, a relation), all under the one
+/// clock `meta` holds, and nothing else; `purged` must be empty. Call it
+/// before `undo_v13_schema`.
+pub fn undo_v14_schema(after: &mut Dump) {
+    let text = |v: &Value| match v {
+        Value::Text(s) => s.clone(),
+        other => panic!("expected text, got {other:?}"),
+    };
+    let meta = after.tables.get_mut("meta").expect("meta");
+    let at = meta
+        .iter()
+        .position(|r| r["key"] == Value::Text("clock".into()))
+        .expect("the clock in meta");
+    let clock = text(&meta.remove(at)["value"]);
+    let mut log: Vec<Row> = after.tables.remove("changes").expect("changes");
+    assert_eq!(after.tables.remove("purged"), Some(vec![]), "purged");
+    let mut take = |kind: &str, record: &str, field: &str| -> (Option<String>, String) {
+        let i = log
+            .iter()
+            .position(|r| {
+                r["kind"] == Value::Text(kind.into())
+                    && r["record"] == Value::Text(record.into())
+                    && r["field"] == Value::Text(field.into())
+            })
+            .unwrap_or_else(|| panic!("no row for {kind} {record} {field}"));
+        let row = log.remove(i);
+        assert_eq!(text(&row["clock"]), clock, "{row:?}");
+        assert_eq!(row["author"], Value::Null, "{row:?}");
+        assert_eq!(row["synced"], Value::Null, "{row:?}");
+        let old = match &row["old"] {
+            Value::Null => None,
+            v => Some(text(v)),
+        };
+        (old, text(&row["new"]))
+    };
+    for (table, kind) in [
+        ("issues", "issue"),
+        ("comments", "comment"),
+        ("labels", "label"),
+        ("projects", "project"),
+        ("milestones", "milestone"),
+        ("cycles", "cycle"),
+        ("docs", "doc"),
+    ] {
+        for row in &after.tables[table] {
+            let (old, new) = take(kind, &text(&row["id"]), "*");
+            assert_eq!(old, None);
+            let new: serde_json::Value = serde_json::from_str(&new).expect("JSON");
+            let mut want = serde_json::Map::new();
+            for (col, v) in row {
+                if col == "id" || col == "updated_at" || col == "(rowid)" {
+                    continue;
+                }
+                want.insert(
+                    col.clone(),
+                    match v {
+                        Value::Null => serde_json::Value::Null,
+                        Value::Integer(n) => (*n).into(),
+                        Value::Text(s) => s.clone().into(),
+                        other => panic!("{table}.{col} is {other:?}"),
+                    },
+                );
+            }
+            assert_eq!(new, serde_json::Value::Object(want), "{table}");
+        }
+    }
+    for (table, column, prefix) in [
+        ("issue_labels", "label_id", "label:"),
+        ("issue_cycles", "cycle_id", "cycle:"),
+    ] {
+        for row in &after.tables[table] {
+            let field = format!("{prefix}{}", text(&row[column]));
+            let logged = take("issue", &text(&row["issue_id"]), &field);
+            assert_eq!(logged, (Some("null".into()), "true".into()));
+        }
+    }
+    for row in &after.tables["issue_relations"] {
+        let field = format!("{}:{}", text(&row["kind"]), text(&row["related_id"]));
+        let Value::Integer(created) = row["created_at"] else {
+            panic!("{row:?}");
+        };
+        let logged = take("issue", &text(&row["issue_id"]), &field);
+        assert_eq!(logged, (Some("null".into()), created.to_string()));
+    }
+    assert!(log.is_empty(), "rows nothing accounts for: {log:?}");
+    after.schema.retain(|r| {
+        let (table, name) = (text(&r["tbl_name"]), text(&r["name"]));
+        !["changes", "purged", "sqlite_sequence"].contains(&table.as_str())
+            && !name.ends_with("_log_insert")
+            && !name.ends_with("_log_update")
+            && !name.ends_with("_log_delete")
+    });
+}
+
 /// Undoes migration 13's schema changes on an upgraded dump, after checking
 /// them, as `undo_v12_schema` does for issues: docs, comments and labels
 /// gained `deleted_at`, NULL in every row an upgrade finds, and the search
@@ -938,10 +1036,67 @@ pub fn undo_v12_schema(after: &mut Dump, before: &Dump) {
 }
 
 /// The schema plus every row of every table, for before/after comparisons.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Dump {
     pub schema: Vec<Row>,
     pub tables: BTreeMap<String, Vec<Row>>,
+}
+
+/// One row the change log gained, as (kind, field, old, new).
+pub type Logged = (String, String, Option<String>, Option<String>);
+
+/// Takes the change log out of two dumps of one workspace, from `before`
+/// and `after` some writes, so that they compare as the records alone: the
+/// rows of `changes` and `purged`, and the clock in `meta`. Returns the rows
+/// `changes` gained between them, in order.
+pub fn take_log(before: &mut Dump, after: &mut Dump) -> Vec<Logged> {
+    let seq = |r: &Row| match r["seq"] {
+        Value::Integer(n) => n,
+        ref other => panic!("seq is {other:?}"),
+    };
+    let text = |v: &Value| match v {
+        Value::Text(s) => Some(s.clone()),
+        Value::Null => None,
+        other => panic!("a change log value is {other:?}"),
+    };
+    let since = before.tables["changes"].iter().map(seq).max().unwrap_or(0);
+    let gained = after.tables["changes"]
+        .iter()
+        .filter(|r| seq(r) > since)
+        .map(|r| {
+            (
+                text(&r["kind"]).expect("a kind"),
+                text(&r["field"]).expect("a field"),
+                text(&r["old"]),
+                text(&r["new"]),
+            )
+        })
+        .collect();
+    for d in [before, after] {
+        for table in ["changes", "purged"] {
+            d.tables.get_mut(table).expect("the change log").clear();
+        }
+        d.tables
+            .get_mut("meta")
+            .expect("meta")
+            .retain(|r| r["key"] != Value::Text("clock".into()));
+    }
+    gained
+}
+
+/// Fails unless `after` is `before` but for the change log; returns what
+/// the log gained.
+#[track_caller]
+pub fn same_records(before: &Dump, after: &Dump, what: &str) -> Vec<Logged> {
+    let (mut b, mut a) = (before.clone(), after.clone());
+    let logged = take_log(&mut b, &mut a);
+    assert!(a == b, "{what}");
+    logged
+}
+
+/// The fields of `logged`, in order.
+pub fn logged_fields(logged: &[Logged]) -> Vec<&str> {
+    logged.iter().map(|(_, f, _, _)| f.as_str()).collect()
 }
 
 pub fn dump(db: &Path) -> Dump {
