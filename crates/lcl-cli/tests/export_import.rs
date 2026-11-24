@@ -1593,3 +1593,103 @@ fn a_byte_order_mark_is_named_as_the_problem() {
     );
     assert!(dump(&env.db_path()) == before);
 }
+
+/// TEXT with each UUID replaced by `<uuid>`.
+fn mask_uuids(text: &str) -> String {
+    let is_uuid = |s: &[u8]| {
+        s.len() >= 36
+            && s[..36].iter().enumerate().all(|(i, c)| {
+                if [8, 13, 18, 23].contains(&i) {
+                    *c == b'-'
+                } else {
+                    c.is_ascii_hexdigit()
+                }
+            })
+    };
+    let (b, mut out, mut i) = (text.as_bytes(), Vec::new(), 0);
+    while i < b.len() {
+        if is_uuid(&b[i..]) {
+            out.extend_from_slice(b"<uuid>");
+            i += 36;
+        } else {
+            out.push(b[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).expect("a UUID is ASCII, so the rest stays UTF-8")
+}
+
+/// A second person, on a machine of their own (another HOME), is handed the
+/// file one person exported. They make a workspace with its key, under a
+/// name of their own, and import it. They then see what the first person
+/// sees: every issue with its number, fields, relations and comments, in
+/// the text output and the JSON. Only the UUIDs differ: the file names
+/// issues by number, and an import gives each record it makes a new id.
+/// The next issue either of them creates gets the same number.
+#[test]
+fn a_second_person_importing_an_export_sees_the_same_issues() {
+    let a = everything();
+    a.lcl(&["export", "--output", "issues.jsonl"]).assert_ok();
+    let file = std::fs::read(a.cwd.path().join("issues.jsonl")).expect("the export");
+
+    let b = Env::new();
+    std::fs::write(b.cwd.path().join("issues.jsonl"), &file).expect("hand the file over");
+    b.lcl(&["init", "theirs", "--key", "DRM"]).assert_ok();
+    b.lcl(&["import", "issues.jsonl"]).assert_ok();
+
+    let both = |args: &[&str]| -> (Out, Out) {
+        let (x, y) = (a.lcl(args), b.lcl(args));
+        x.assert_ok();
+        y.assert_ok();
+        (x, y)
+    };
+    let (seen, theirs) = both(&["--json", "issue", "list", "--all"]);
+    assert_eq!(
+        mask_uuids(&theirs.stdout),
+        mask_uuids(&seen.stdout),
+        "issue list --json differs"
+    );
+    let (seen_text, theirs_text) = both(&["issue", "list", "--all"]);
+    assert_eq!(theirs_text.stdout, seen_text.stdout, "issue list differs");
+
+    let issues = seen.json()["issues"].as_array().expect("issues").clone();
+    assert!(issues.len() >= 5, "everything() has issues: {issues:?}");
+    let mut comments = 0;
+    for issue in &issues {
+        let id = issue["identifier"].as_str().expect("an identifier");
+        for args in [
+            vec!["--json", "issue", "show", id],
+            vec!["issue", "show", id],
+            vec!["--json", "issue", "comments", id],
+        ] {
+            let (x, y) = both(&args);
+            assert_eq!(
+                mask_uuids(&y.stdout),
+                mask_uuids(&x.stdout),
+                "lcl {} differs",
+                args.join(" ")
+            );
+        }
+        comments += a
+            .lcl(&["--json", "issue", "comments", id])
+            .json()
+            .as_array()
+            .expect("comments")
+            .len();
+    }
+    assert!(comments >= 3, "everything() has comments: {comments}");
+
+    let next = |env: &Env| {
+        env.lcl(&[
+            "--json",
+            "issue",
+            "create",
+            "--title",
+            "after the hand-over",
+        ])
+        .assert_ok()
+        .json()["identifier"]
+            .clone()
+    };
+    assert_eq!(next(&b), next(&a));
+}

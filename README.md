@@ -32,9 +32,64 @@ The builds are for Linux (x86_64 and arm64, glibc 2.28 or later), macOS (Apple s
 
 `lcl init` makes the workspace at `.lcl/data.sqlite` and registers its name in `~/.lcl/index.sqlite`. Commands run in that directory or below it use that workspace. From anywhere else, name it with `--workspace NAME`. `lcl workspace create NAME --key KEY` makes a workspace under `~/.lcl/projects` instead.
 
-`lcl init` also writes `.lcl/.gitignore`, so git leaves `.lcl/` alone. A SQLite file can't be merged, and one committed while lcl writes to it can be torn. To share a workspace, run `lcl export`; the file it writes is what another person imports with `lcl import`. An existing `.lcl/.gitignore` is left as it is. In a workspace an earlier lcl made, run `lcl init` again to add the file.
+`lcl init` also writes `.lcl/.gitignore`, so git leaves `.lcl/` alone. A SQLite file can't be merged, and one committed while lcl writes to it can be torn. To share a workspace, export it, as the next section says. An existing `.lcl/.gitignore` is left as it is. In a workspace an earlier lcl made, run `lcl init` again to add the file.
 
 `lcl help`, and `--help` on any command, list every flag.
+
+## Moving a workspace
+
+`lcl export` and `lcl import` move a workspace to another machine, or hand it to another person. They need no account and no network; lcl itself makes no network call, shows no banner and asks for no license.
+
+    lcl export --output issues.jsonl
+
+The file is text, one JSON record per line: the workspace's labels, projects, milestones, cycles, issues, comments, relations and docs. On the other machine, make a workspace with the same key and import it:
+
+    lcl init --key MP
+    lcl import issues.jsonl
+
+The other person then sees the same issues, under the same numbers, with the same comments: MP-12 is MP-12 there too. The next issue either of you creates gets the same number.
+
+An import fills an empty workspace; it doesn't merge. Changes made on two machines after the hand-over stay apart. To read a newer export, import it into a new workspace, as `lcl workspace create mp-next --key MP` then `lcl -w mp-next import issues.jsonl`. `lcl export --output` refuses a file that exists; `--force` replaces it.
+
+### Not in a synced folder
+
+Keep `.lcl/`, and `~/.lcl`, out of Dropbox, iCloud Drive, OneDrive, Google Drive and network drives. On Windows that includes Documents and Desktop when OneDrive backs them up.
+
+lcl writes in SQLite's WAL mode. A change goes first to `data.sqlite-wal`, beside the file, and lcl processes take turns through file locks and a shared-memory file, `data.sqlite-shm`.
+
+- A sync service copies each of those files on its own, when it sees it change. The copy on another machine can be the file without its latest changes, or a torn file.
+- It doesn't carry the locks. Two machines writing at once each keep their own changes, and the service keeps one file and drops the other's, or makes a conflicted copy.
+- A network drive breaks the locks and the shared memory, which work only between processes on one machine.
+
+To keep a copy in a synced folder, put an export or an `lcl backup` there. Each is one file, and it gets its name only when it is complete.
+
+### For your project's README
+
+A project whose issues are in lcl can tell people how to get them. Paste this into its README, with your key for `MP`:
+
+```markdown
+## Issues
+
+This project's issues are in [lcl](https://github.com/botzrDev/lcl), a local issue tracker. `issues.jsonl` is an export of them.
+
+Install lcl on Linux or macOS:
+
+    curl -fsSL https://raw.githubusercontent.com/botzrDev/lcl/main/install.sh | sh
+
+On Windows, in PowerShell:
+
+    irm https://raw.githubusercontent.com/botzrDev/lcl/main/install.ps1 | iex
+
+In your clone, make the workspace and import the export:
+
+    lcl init --key MP
+    lcl import issues.jsonl
+    lcl issue list
+
+To hand the issues on, export them over the file:
+
+    lcl export --output issues.jsonl --force
+```
 
 ## For agents
 
