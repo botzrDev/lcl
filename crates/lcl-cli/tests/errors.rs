@@ -232,7 +232,7 @@ fn clap_errors_are_one_json_line_under_json() {
     // A group with no subcommand still prints its help, on stderr.
     let out = env.lcl(&["issue"]);
     assert_eq!(out.code, 2);
-    assert!(out.stderr.starts_with("Issues in this workspace: create, list, show, update, delete, relate, comment\n\nUsage: lcl issue [OPTIONS] <COMMAND>\n"), "{out:#?}");
+    assert!(out.stderr.starts_with("Issues in this workspace: create, list, show, update, delete, restore, purge, relate, unrelate, comment, comments, history\n\nUsage: lcl issue [OPTIONS] <COMMAND>\n"), "{out:#?}");
 }
 
 /// --help and --version are not errors, with --json too: they print on

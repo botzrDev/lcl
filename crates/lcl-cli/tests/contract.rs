@@ -1164,6 +1164,41 @@ fn subcommands(env: &Env, path: &[&str]) -> Vec<String> {
         .collect()
 }
 
+/// Each line of `lcl --help` that names a command's subcommands names all
+/// of them (LOCL-47): a summary that names some, and leaves out others such
+/// as `restore` and `purge`, hides them from whoever reads only the top.
+#[test]
+fn each_summary_names_every_subcommand_or_none() {
+    let env = Env::new();
+    let help = env.lcl(&["--help"]).assert_ok().stdout.clone();
+    let mut checked = 0;
+    for command in subcommands(&env, &[]) {
+        let subs: BTreeSet<String> = subcommands(&env, &[&command]).into_iter().collect();
+        if subs.is_empty() {
+            continue;
+        }
+        let summary = help
+            .lines()
+            .find_map(|l| {
+                l.strip_prefix("  ")?
+                    .strip_prefix(command.as_str())
+                    .filter(|rest| rest.starts_with(' '))
+            })
+            .unwrap_or_else(|| panic!("no summary for {command} in\n{help}"));
+        let words: BTreeSet<String> = summary
+            .split(|c: char| !c.is_ascii_alphanumeric() && c != '-')
+            .map(str::to_lowercase)
+            .collect();
+        let named: BTreeSet<String> = subs.intersection(&words).cloned().collect();
+        assert!(
+            named.is_empty() || named == subs,
+            "`lcl --help` says of {command}: {summary:?}\nIt names {named:?} of {subs:?}"
+        );
+        checked += 1;
+    }
+    assert!(checked >= 9, "only {checked} commands with subcommands");
+}
+
 /// Every command that runs something: the leaves under `lcl --help`, and
 /// a command whose subcommand is optional (`lcl sync [COMMAND]`).
 fn leaf_commands(env: &Env, path: &[&str], into: &mut BTreeSet<String>) {

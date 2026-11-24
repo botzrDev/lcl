@@ -98,22 +98,24 @@ enum Commands {
         #[command(subcommand)]
         cmd: MilestoneCmd,
     },
-    /// Issues in this workspace: create, list, show, update, delete, relate, comment.
+    /// Issues in this workspace: create, list, show, update, delete, restore, purge, relate,
+    /// unrelate, comment, comments, history.
     Issue {
         #[command(subcommand)]
         cmd: IssueCmd,
     },
-    /// Comments, by id: edit, delete. Add and list them with issue comment and issue comments.
+    /// Comments, by id: edit, delete, restore, purge. Add and list them with issue comment and
+    /// issue comments.
     Comment {
         #[command(subcommand)]
         cmd: CommentCmd,
     },
-    /// Docs in this workspace: create, list, show, update, delete.
+    /// Docs in this workspace: create, list, show, update, delete, restore, purge.
     Doc {
         #[command(subcommand)]
         cmd: DocCmd,
     },
-    /// Labels in this workspace: create, list, delete.
+    /// Labels in this workspace: create, list, delete, restore, purge.
     Label {
         #[command(subcommand)]
         cmd: LabelCmd,
