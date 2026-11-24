@@ -1,7 +1,7 @@
 //! A terminal view of a workspace's issues: a list, narrowed by status,
 //! project and search, and the detail of one issue. It creates an issue,
-//! and changes an issue's status and priority; the command line does every
-//! other write.
+//! changes an issue's status and priority, and adds a comment; the command
+//! line does every other write.
 //!
 //! The state and its key handling (`App`) are pure, and drawing takes any
 //! ratatui backend, so both are tested without a terminal. A key that
@@ -32,7 +32,7 @@ use std::time::Duration;
 use unicode_segmentation::UnicodeSegmentation;
 
 const LIST_HELP: &str = "j/k: move  Enter: open  c: create  s: status  !: priority  /: search  p: project  1-7: filter  0: all  r: reload  q: quit";
-const DETAIL_HELP: &str = "j/k: scroll  PgUp/PgDn: page  Esc: back  r: reload  q: quit";
+const DETAIL_HELP: &str = "j/k: scroll  PgUp/PgDn: page  c: comment  Esc: back  r: reload  q: quit";
 
 /// What marks the selected row. Every row is indented by its width.
 const SYMBOL: &str = ">> ";
@@ -244,12 +244,14 @@ pub struct Request {
     pub search: Option<SearchQuery>,
 }
 
-/// A write the TUI asks for: one field of one issue, or a new issue.
+/// A write the TUI asks for: one field of one issue, a new issue, or a
+/// comment on one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Edit {
     Status(IssueId, Status),
     Priority(IssueId, Priority),
     Create { title: String, description: String },
+    Comment(IssueId, String),
 }
 
 /// What the terminal sends: a key, or text pasted in one piece.
@@ -273,14 +275,17 @@ pub enum Action {
 
 /// What the screen shows, and where keys go: the list, the detail of one
 /// issue, a prompt under the list (the search, or a new issue's title and
-/// description), or a choice of status or priority over it. Each one's
-/// state exists only while it is shown.
+/// description), a choice of status or priority over it, or a comment
+/// being typed under the detail. Each one's state exists only while it is
+/// shown.
 enum Mode {
     List,
     Detail(Detail),
     Search(Prompt),
     Create(Draft),
     Choose(Choice),
+    /// The detail goes on showing, and Esc goes back to it.
+    Comment(Detail, Prompt),
 }
 
 /// A new issue being typed: its title, then its description.
@@ -548,7 +553,7 @@ impl App {
     /// reload reads its comments.
     pub fn open(&self) -> Option<&IssueId> {
         match &self.mode {
-            Mode::Detail(d) => Some(&d.id),
+            Mode::Detail(d) | Mode::Comment(d, _) => Some(&d.id),
             Mode::List | Mode::Search(_) | Mode::Create(_) | Mode::Choose(_) => None,
         }
     }
@@ -609,9 +614,10 @@ impl App {
     /// Any key takes away the message of a failed write.
     ///
     /// At a prompt, keys edit its line (`Prompt::key`), and Esc goes back to
-    /// the list as it was, with nothing written. At the search prompt,
-    /// Enter searches. At a new issue's title, Enter goes on to its
-    /// description, and there Enter creates it. Elsewhere q quits. In a
+    /// the list as it was, or from a comment to the detail, with nothing
+    /// written. At the search prompt, Enter searches. At a new issue's
+    /// title, Enter goes on to its description, and there Enter creates it.
+    /// At a comment, Enter adds it. Elsewhere q quits. In a
     /// choice, j/k (or the arrows) move, and Enter, or a value's number,
     /// sets it; Esc goes back with nothing written. In the list and the
     /// detail, r asks for a reload. In the list, j/k (or the arrows) move
@@ -621,7 +627,8 @@ impl App {
     /// status and priority; and
     /// Enter opens its detail, asking for a reload to read its comments. A
     /// new filter selects the first row. In the detail, keys scroll
-    /// (`Detail::scroll`), and Esc goes back to the list, as it was.
+    /// (`Detail::scroll`), c starts a comment, and Esc goes back to the
+    /// list, as it was.
     pub fn key(&mut self, key: KeyEvent) -> Action {
         if key.kind != KeyEventKind::Press {
             return Action::Stay;
@@ -658,8 +665,9 @@ impl App {
             };
         }
         let searching = matches!(self.mode, Mode::Search(_));
+        let commenting = matches!(self.mode, Mode::Comment(..));
         let prompt = match &mut self.mode {
-            Mode::Search(p) => Some(p),
+            Mode::Search(p) | Mode::Comment(_, p) => Some(p),
             Mode::Create(d) => Some(d.prompt_mut()),
             _ => None,
         };
@@ -667,10 +675,14 @@ impl App {
             p.error = None;
             return match key.code {
                 KeyCode::Esc => {
-                    self.mode = Mode::List;
+                    self.mode = match std::mem::replace(&mut self.mode, Mode::List) {
+                        Mode::Comment(d, _) => Mode::Detail(d),
+                        _ => Mode::List,
+                    };
                     Action::Stay
                 }
                 KeyCode::Enter if searching => self.submit(),
+                KeyCode::Enter if commenting => self.add_comment(),
                 KeyCode::Enter => self.next_draft(),
                 _ => {
                     p.key(key);
@@ -684,11 +696,19 @@ impl App {
             _ => {}
         }
         match &mut self.mode {
-            Mode::List | Mode::Search(_) | Mode::Create(_) | Mode::Choose(_) => {
-                self.list_key(key.code)
-            }
+            Mode::List
+            | Mode::Search(_)
+            | Mode::Create(_)
+            | Mode::Choose(_)
+            | Mode::Comment(..) => self.list_key(key.code),
             Mode::Detail(_) if key.code == KeyCode::Esc => {
                 self.mode = Mode::List;
+                Action::Stay
+            }
+            Mode::Detail(_) if key.code == KeyCode::Char('c') => {
+                if let Mode::Detail(d) = std::mem::replace(&mut self.mode, Mode::List) {
+                    self.mode = Mode::Comment(d, Prompt::new(""));
+                }
                 Action::Stay
             }
             Mode::Detail(d) => {
@@ -783,7 +803,7 @@ impl App {
     /// The prompt being typed in, if one is shown.
     fn prompt(&self) -> Option<&Prompt> {
         match &self.mode {
-            Mode::Search(p) => Some(p),
+            Mode::Search(p) | Mode::Comment(_, p) => Some(p),
             Mode::Create(d) => Some(d.prompt()),
             Mode::List | Mode::Detail(_) | Mode::Choose(_) => None,
         }
@@ -793,7 +813,7 @@ impl App {
     /// it does nothing.
     pub fn paste(&mut self, text: &str) -> Action {
         let prompt = match &mut self.mode {
-            Mode::Search(p) => Some(p),
+            Mode::Search(p) | Mode::Comment(_, p) => Some(p),
             Mode::Create(d) => Some(d.prompt_mut()),
             _ => None,
         };
@@ -802,6 +822,29 @@ impl App {
             p.insert(text);
         }
         Action::Stay
+    }
+
+    /// Enter at a comment: a body the command line takes (`parse::comment`:
+    /// not blank) is added to the open issue, and the detail comes back;
+    /// a blank one is refused with the command line's message.
+    fn add_comment(&mut self) -> Action {
+        let Mode::Comment(_, p) = &mut self.mode else {
+            return Action::Stay;
+        };
+        match lcl_core::parse::comment(&p.text) {
+            Ok(body) => match std::mem::replace(&mut self.mode, Mode::List) {
+                Mode::Comment(d, _) => {
+                    let edit = Edit::Comment(d.id.clone(), body);
+                    self.mode = Mode::Detail(d);
+                    Action::Write(edit)
+                }
+                _ => Action::Stay,
+            },
+            Err(e) => {
+                p.error = Some(e.0);
+                Action::Stay
+            }
+        }
     }
 
     /// Enter at a new issue's prompt. A title the command line takes
@@ -836,8 +879,18 @@ impl App {
 
     /// After a write and the reload that follows it: a new issue is
     /// selected, and a status filter, project filter or search that would
-    /// hide it is taken away.
+    /// hide it is taken away. After a comment, the detail scrolls to its
+    /// end, where the comment is.
     pub fn written(&mut self, edit: &Edit, id: &IssueId) {
+        if let Edit::Comment(..) = edit {
+            if let Mode::Detail(d) = &mut self.mode
+                && &d.id == id
+            {
+                // The draw stops it at the bottom.
+                d.scroll = usize::MAX;
+            }
+            return;
+        }
         if !matches!(edit, Edit::Create { .. }) {
             return;
         }
@@ -956,7 +1009,7 @@ impl App {
             self.select_row(row);
         }
         let shown = match &self.mode {
-            Mode::Detail(d) => Some(&d.id),
+            Mode::Detail(d) | Mode::Comment(d, _) => Some(&d.id),
             Mode::Choose(c) => Some(&c.issue),
             Mode::List | Mode::Search(_) | Mode::Create(_) => None,
         };
@@ -1125,6 +1178,11 @@ impl App {
             Mode::Create(d) => {
                 self.draw_list(f, chunks[1]);
                 draw_prompt(f, chunks[2], d.label(), d.prompt());
+                return;
+            }
+            Mode::Comment(d, p) => {
+                self.draw_detail(f, chunks[1], d);
+                draw_prompt(f, chunks[2], "Comment: ", p);
                 return;
             }
             Mode::Choose(c) => {
@@ -1327,9 +1385,16 @@ fn load(store: &Store, request: &Request) -> Result<Snapshot> {
 /// change log records under the store's author: a new issue with
 /// `Store::create_issue`, as `lcl issue create` does (Backlog, no
 /// priority, the author its creator), a change with `Store::update_issue`,
-/// as `lcl issue update` does. The issue it wrote.
+/// as `lcl issue update` does, and a comment with `Store::add_comment`, as
+/// `lcl issue comment` does (the author its author). The issue it wrote.
 fn write(store: &mut Store, edit: &Edit) -> Result<IssueId> {
     let (id, update) = match edit {
+        Edit::Comment(id, body) => {
+            let issue = IssueRef::Id(id.as_str().to_string());
+            let author = store.author().map(String::from);
+            store.add_comment(&issue, body.clone(), author)?;
+            return Ok(id.clone());
+        }
         Edit::Create { title, description } => {
             let new = NewIssue {
                 title: title.clone(),
@@ -2253,7 +2318,7 @@ mod tests {
                     "",
                     "anon · 90s",
                     "  Fixed",
-                    "j/k: scroll  PgUp/PgDn: page  Esc: back",
+                    "j/k: scroll  PgUp/PgDn: page  c: comment",
                 ],
                 40
             )
@@ -3151,6 +3216,94 @@ mod tests {
         let history = store.borrow().issue_history(&four).unwrap();
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].author.as_deref(), Some("al"));
+    }
+
+    #[test]
+    fn c_in_the_detail_asks_for_a_comment_and_esc_goes_back_to_the_detail() {
+        let mut app = long();
+        frame(&app, 30, 8);
+        app.key(press('j'));
+        app.key(press('j'));
+        assert_eq!(app.key(press('c')), Action::Stay);
+        // q, j and r are typed; the detail stays where it was scrolled.
+        for c in "qjr".chars() {
+            assert_eq!(app.key(press(c)), Action::Stay);
+        }
+        let lines = frame(&app, 30, 8);
+        assert_eq!(
+            (lines[1].trim_end(), lines[7].as_str()),
+            ("Status    Todo", "Comment: qjr                  ")
+        );
+        // Esc: back to the detail, as it was, with nothing written.
+        assert_eq!(app.key(code(KeyCode::Esc)), Action::Stay);
+        assert!(matches!(app.mode, Mode::Detail(_)));
+        assert_eq!(frame(&app, 30, 8)[1].trim_end(), "Status    Todo");
+        // A blank comment is refused with the command line's message.
+        app.key(press('c'));
+        app.paste(" \n ");
+        assert_eq!(app.key(code(KeyCode::Enter)), Action::Stay);
+        let message = lcl_core::parse::comment(" ").unwrap_err().0;
+        assert_eq!(message, "a comment can't be blank");
+        assert_eq!(frame(&app, 30, 8)[0].trim_end(), message);
+        // Enter adds it to the open issue, and the detail comes back.
+        app.paste("Looks good");
+        assert_eq!(
+            app.key(code(KeyCode::Enter)),
+            Action::Write(Edit::Comment(id("id-1"), "   Looks good".into()))
+        );
+        assert_eq!(opened(&app), Some("id-1"));
+        assert!(matches!(app.mode, Mode::Detail(_)));
+        // In the list, c is still a new issue.
+        app.key(code(KeyCode::Esc));
+        app.key(press('c'));
+        assert!(matches!(app.mode, Mode::Create(_)));
+    }
+
+    #[test]
+    fn a_comment_is_added_as_issue_comment_adds_it_and_shows_at_the_end() {
+        let mut store = three();
+        let two = IssueRef::Number {
+            key: None,
+            number: 2,
+        };
+        store
+            .add_comment(&two, "first".into(), Some("bo".into()))
+            .unwrap();
+        let store = RefCell::new(store);
+        let mut app = App::new(load(&store.borrow(), &Request::default()).unwrap());
+        app.time = |at| format!("{at}");
+        let mut pressed = vec![press('j'), code(KeyCode::Enter), press('c')];
+        pressed.extend("Fine by me".chars().map(press));
+        pressed.extend([code(KeyCode::Enter), press('q')]);
+        run_on(&store, &mut app, &pressed).unwrap();
+        // Oldest first, the new one last, by the store's author.
+        let comments = store
+            .borrow()
+            .list_comments(app.open().unwrap().as_str(), false)
+            .unwrap();
+        let said: Vec<(&str, Option<&str>)> = comments
+            .iter()
+            .map(|c| (c.body.as_str(), c.author.as_deref()))
+            .collect();
+        assert_eq!(said, [("first", Some("bo")), ("Fine by me", Some("al"))]);
+        // The reload brought it, and the detail is scrolled to it.
+        let lines = frame(&app, 40, 8);
+        assert_eq!(lines[6].trim_end(), "  Fine by me");
+        assert!(lines[5].starts_with("al · "), "{}", lines[5]);
+
+        // On an issue trashed behind the TUI: not written, and the detail
+        // stays as it was.
+        store.borrow_mut().delete_issue(&two).unwrap();
+        let mut pressed = vec![press('c')];
+        pressed.extend("x".chars().map(press));
+        pressed.push(code(KeyCode::Enter));
+        let out = run_on(&store, &mut app, &pressed).unwrap_err();
+        assert_eq!(out.to_string(), "out of keys");
+        assert!(matches!(app.mode, Mode::Detail(_)));
+        assert_eq!(
+            frame(&app, 90, 8)[7].trim_end(),
+            "Not written: D-2 is in the trash; restore it with: lcl issue restore D-2"
+        );
     }
 
     /// `leave` runs once `enter` has, on every way out of `body`.

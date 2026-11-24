@@ -1263,11 +1263,8 @@ fn inline_content(s: &str) -> std::result::Result<String, String> {
 }
 /// A comment inline: not `-`, and not blank (empty or only whitespace).
 fn inline_body(s: &str) -> std::result::Result<String, String> {
-    if s.trim().is_empty() {
-        Err("a comment can't be blank".into())
-    } else {
-        not_dash(s, "--body-file")
-    }
+    parse::comment(s).map_err(|e| e.0)?;
+    not_dash(s, "--body-file")
 }
 
 fn read_description(path: &str) -> std::result::Result<String, String> {

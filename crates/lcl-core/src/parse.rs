@@ -73,6 +73,16 @@ pub fn title(s: &str) -> Result<String, InvalidValue> {
     }
 }
 
+/// A comment's body, as given: it isn't trimmed, but one that is empty or
+/// all whitespace is refused.
+pub fn comment(s: &str) -> Result<String, InvalidValue> {
+    if s.trim().is_empty() {
+        Err(invalid("a comment can't be blank"))
+    } else {
+        Ok(s.to_string())
+    }
+}
+
 /// A label name, trimmed; blank is refused.
 pub fn label_name(s: &str) -> Result<String, InvalidValue> {
     non_blank(s, "a label name can't be empty")

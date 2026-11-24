@@ -139,7 +139,7 @@ Known limits:
 - `lcl import` and `lcl export` take a blank title, which the command line refuses: 0.1.0 stored them.
 - `issue update` with no flags changes nothing but the issue's `updated_at`.
 - A hand-edited value of the wrong type (text where a number goes) stops the commands that read it, with SQLite's own message.
-- The TUI creates an issue with a title and a one-line description, and sets an issue's status and priority. Every other write is made on the command line.
+- The TUI creates an issue with a title and a one-line description, sets an issue's status and priority, and adds a one-line comment. Every other write is made on the command line.
 
 ## Schema
 
