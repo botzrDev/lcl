@@ -74,7 +74,7 @@ Rows are never updated or deleted, except when the record itself is purged.
 
 ## The service's part
 
-What the client relies on. How the service is built is not this note's business.
+What the client relies on. How the service is built is not this note's business. How the two talk is in [sync-protocol.md](sync-protocol.md).
 
 - It gives each change it accepts a sequence number. A machine syncs from the last sequence number it has seen.
 - It hands out number blocks, and numbers the browser's issues.
