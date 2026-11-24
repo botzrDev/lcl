@@ -244,6 +244,21 @@ enum SyncCmd {
     /// left as it is, and issues are numbered from the file's counter
     /// again.
     Stop,
+    /// Leave the service: write the whole workspace to PATH, as lcl export
+    /// --output does, then delete the replica on the service and forget
+    /// it, as stop does. The local file keeps everything.
+    ///
+    /// A replica already gone counts as deleted. In a workspace that
+    /// doesn't sync, it writes the export and nothing else.
+    Leave {
+        /// Where to write the export (through a temporary file in its
+        /// directory, renamed into place).
+        #[arg(long, value_name = "PATH")]
+        output: String,
+        /// Replace PATH if it exists.
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 /// An import file's bytes, read as the arguments are parsed.
@@ -3051,6 +3066,36 @@ fn run(cli: Cli) -> Result<()> {
                             counted_list(&[(s.received as i64, "change", "changes")]),
                             s.numbers_left
                         );
+                    }
+                }
+                Some(SyncCmd::Leave { output, force }) => {
+                    // The token is checked first, and the export written
+                    // before anything is deleted.
+                    let service = match store.sync_status()? {
+                        Some(s) => Some(lcl_core::sync::Http::new(&s.server, token())?),
+                        None => None,
+                    };
+                    let export = store.export()?;
+                    write_export(&output, &export.text, force)?;
+                    let left = match &service {
+                        Some(svc) => Some(store.sync_leave(svc)?),
+                        None => None,
+                    };
+                    if cli.json {
+                        let mut v = serde_json::to_value(export.counts)?;
+                        v["path"] = serde_json::Value::String(output.clone());
+                        v["server"] = serde_json::json!(left.as_ref().map(|l| &l.server));
+                        v["workspace"] = serde_json::json!(left.as_ref().map(|l| &l.workspace));
+                        print_json(&v)?;
+                    } else {
+                        outln!("Exported {} to {output}", export.counts.phrase());
+                        if let Some(l) = &left {
+                            outln!(
+                                "Deleted the replica {} at {}; this workspace no longer syncs",
+                                l.workspace,
+                                l.server
+                            );
+                        }
                     }
                 }
                 Some(SyncCmd::Stop) => {

@@ -566,3 +566,136 @@ fn after_start_the_first_sync_pulls_only_what_is_new() {
     let expected = format!("/v1/workspaces/{}/changes?after={sent}&limit=500", "ws-1");
     assert_eq!(pulls, [expected.as_str()]);
 }
+
+#[test]
+fn leave_writes_the_export_then_deletes_the_replica() {
+    let svc = Service::start();
+    let a = demo();
+    a.lcl(&["label", "create", "bug"]).assert_ok();
+    let ws = start(&a, &svc);
+    let (b, _) = join(&svc, &ws);
+    let before = records(&a);
+    let path = a.cwd.path().join("leaving.jsonl");
+    let p = path.to_str().unwrap();
+    let left = ok(&a, &["sync", "leave", "--output", p]);
+    assert_eq!(
+        (&left["path"], &left["issues"], &left["labels"]),
+        (&json!(p), &json!(1), &json!(1))
+    );
+    assert_eq!(
+        (&left["server"], &left["workspace"]),
+        (&json!(svc.url), &json!(ws))
+    );
+    let export = a.lcl(&["export"]).assert_ok().stdout.clone();
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), export);
+    assert!(svc.state().replicas.is_empty(), "the replica is gone");
+    // The local file keeps everything, and no longer syncs.
+    assert_eq!(records(&a), before);
+    assert_eq!(ok(&a, &["workspace", "show"])["sync"], Value::Null);
+    // The other machine finds no replica.
+    let token = Some(sync_service::TOKEN);
+    assert_eq!(fails(&b, token, &["sync"], 1).0, "not_found");
+
+    // Run again, with no replica: the export, and nothing else.
+    let asked = svc.state().requests.len();
+    let again = a.cwd.path().join("again.jsonl");
+    let out = ok(&a, &["sync", "leave", "--output", again.to_str().unwrap()]);
+    assert_eq!(
+        (&out["server"], &out["workspace"]),
+        (&Value::Null, &Value::Null)
+    );
+    assert_eq!(std::fs::read_to_string(&again).unwrap(), export);
+    assert_eq!(svc.state().requests.len(), asked);
+    let text = a
+        .lcl(&[
+            "sync",
+            "leave",
+            "--output",
+            again.to_str().unwrap(),
+            "--force",
+        ])
+        .assert_ok()
+        .stdout
+        .clone();
+    assert!(
+        text.starts_with("Exported ") && text.lines().count() == 1,
+        "{text}"
+    );
+
+    // The other machine leaves too: a replica already gone counts as
+    // deleted.
+    let theirs = b.cwd.path().join("theirs.jsonl");
+    let out = ok(&b, &["sync", "leave", "--output", theirs.to_str().unwrap()]);
+    assert_eq!(out["workspace"], json!(ws));
+    assert_eq!(ok(&b, &["workspace", "show"])["sync"], Value::Null);
+}
+
+#[test]
+fn leave_deletes_nothing_until_the_export_is_written() {
+    let svc = Service::start();
+    let a = demo();
+    let ws = start(&a, &svc);
+    let token = Some(sync_service::TOKEN);
+    let still_there = |svc: &Service| svc.state().replicas.contains_key(&ws);
+
+    let taken = a.cwd.path().join("taken.jsonl");
+    std::fs::write(&taken, "keep").unwrap();
+    let (kind, _) = fails(
+        &a,
+        token,
+        &["sync", "leave", "--output", taken.to_str().unwrap()],
+        1,
+    );
+    assert_eq!(kind, "conflict");
+    assert_eq!(std::fs::read_to_string(&taken).unwrap(), "keep");
+    assert!(still_there(&svc));
+
+    let fresh = a.cwd.path().join("fresh.jsonl");
+    let (kind, _) = fails(
+        &a,
+        None,
+        &["sync", "leave", "--output", fresh.to_str().unwrap()],
+        1,
+    );
+    assert_eq!(kind, "auth");
+    assert!(!fresh.exists(), "no token: nothing written");
+    assert!(still_there(&svc));
+
+    svc.state().down = true;
+    let (kind, _) = fails(
+        &a,
+        token,
+        &["sync", "leave", "--output", fresh.to_str().unwrap()],
+        1,
+    );
+    assert_eq!(kind, "network");
+    assert!(fresh.exists(), "the export is written first");
+    assert!(still_there(&svc));
+    assert!(
+        ok(&a, &["workspace", "show"])["sync"].is_object(),
+        "still syncing"
+    );
+
+    svc.state().down = false;
+    let text = with_token(
+        &a,
+        &[
+            "sync",
+            "leave",
+            "--output",
+            fresh.to_str().unwrap(),
+            "--force",
+        ],
+    )
+    .assert_ok()
+    .stdout
+    .clone();
+    assert!(
+        text.ends_with(&format!(
+            "\nDeleted the replica {ws} at {}; this workspace no longer syncs\n",
+            svc.url
+        )),
+        "{text}"
+    );
+    assert!(!still_there(&svc));
+}

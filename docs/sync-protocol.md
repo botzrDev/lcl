@@ -127,6 +127,7 @@ For LOCL-40. `204`. Every machine's next request about it is `404`. Local files 
 - `lcl sync join URL ID`, in an empty workspace with the replica's key (made with `workspace create NAME --key KEY`, as for `lcl import`). It pulls everything and takes a block.
 - `lcl sync` pushes this machine's changes, pulls the others', and takes a block when fewer than 50 numbers are left (a machine holds at most two). It reports any change of this machine's that was not applied, and any field where a change made here was overwritten by a later one from elsewhere.
 - `lcl sync stop` forgets the service: the `meta` keys go, and the local file and the replica stay. Issues are numbered from the file's counter again, from past the highest number used.
+- `lcl sync leave --output PATH` (LOCL-40) writes the whole workspace to PATH, as `lcl export --output` does, then deletes the replica and forgets the service, as `stop` does. The export is written before anything is deleted. A replica already gone (`404`) counts as deleted. In a workspace that doesn't sync, it writes the export and makes no call.
 
 Only these commands touch the network. A workspace that never ran `lcl sync start` or `join` makes no network call.
 
@@ -200,6 +201,7 @@ Made with the owner on 2026-11-24, when the note was approved:
 
 1. The service is the arbiter. It orders every change, and fixes a conflict between two changes with ordinary correction changes. Clients apply the later change per field, purge first, and retry what a rule refuses.
 2. The token comes from `LCL_SYNC_TOKEN` and is never stored.
-3. The commands are `lcl sync start URL`, `lcl sync join URL ID`, `lcl sync` and `lcl sync stop`, with the error kinds `network` and `auth`.
+3. The commands are `lcl sync start URL`, `lcl sync join URL ID`, `lcl sync` and `lcl sync stop` (and `leave`, below), with the error kinds `network` and `auth`.
 4. The client uses `ureq` with `rustls` on `ring`.
 5. A workspace's name, key and description are set at opt-in, and not synced in 1.0.
+6. Leaving is `lcl sync leave --output PATH`: export, then delete the replica, then stop (LOCL-40, decided 2026-11-24).

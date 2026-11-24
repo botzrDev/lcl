@@ -143,6 +143,8 @@ pub trait Service {
     /// The accepted changes after `after`, at most `limit`, in `seq` order.
     fn pull(&self, workspace: &str, after: i64, limit: usize) -> Result<Page>;
     fn block(&self, workspace: &str, machine: &str) -> Result<Block>;
+    /// Deletes the replica. One already gone is `ReplicaNotFound`.
+    fn delete(&self, workspace: &str) -> Result<()>;
 }
 
 /// The service over HTTPS.
@@ -191,13 +193,21 @@ impl Http {
         &self,
         sent: std::result::Result<ureq::http::Response<ureq::Body>, ureq::Error>,
     ) -> Result<T> {
+        self.answered(sent)?
+            .body_mut()
+            .read_json::<T>()
+            .map_err(|e| self.network(format!("an answer this lcl can't read: {e}")))
+    }
+
+    /// The response, for a status under 400; else the service's error.
+    fn answered(
+        &self,
+        sent: std::result::Result<ureq::http::Response<ureq::Body>, ureq::Error>,
+    ) -> Result<ureq::http::Response<ureq::Body>> {
         let mut response = sent.map_err(|e| self.network(e.to_string()))?;
         let status = response.status().as_u16();
         if status < 400 {
-            return response
-                .body_mut()
-                .read_json::<T>()
-                .map_err(|e| self.network(format!("an answer this lcl can't read: {e}")));
+            return Ok(response);
         }
         let body: Value = response.body_mut().read_json().unwrap_or(Value::Null);
         let message = body["error"]["message"]
@@ -270,6 +280,17 @@ impl Service for Http {
                 .header("User-Agent", user_agent())
                 .send_empty(),
         )
+    }
+
+    fn delete(&self, workspace: &str) -> Result<()> {
+        self.answered(
+            self.agent
+                .delete(self.url(&format!("/workspaces/{workspace}")))
+                .header("Authorization", format!("Bearer {}", self.token))
+                .header("User-Agent", user_agent())
+                .call(),
+        )
+        .map(|_| ())
     }
 
     fn pull(&self, workspace: &str, after: i64, limit: usize) -> Result<Page> {
@@ -689,6 +710,20 @@ impl Store {
             }
             e => e,
         })
+    }
+
+    /// Deletes the replica this workspace syncs with, then forgets the
+    /// service as `sync_stop` does. A replica already gone counts as
+    /// deleted. The caller writes the export first (`lcl sync leave`).
+    pub fn sync_leave(&mut self, svc: &dyn Service) -> Result<SyncStopped> {
+        let Some(s) = self.sync_status()? else {
+            return Err(LclError::NotSyncing);
+        };
+        match svc.delete(&s.workspace) {
+            Ok(()) | Err(LclError::ReplicaNotFound { .. }) => {}
+            Err(e) => return Err(e),
+        }
+        self.sync_stop()
     }
 
     /// Forgets the service. The file keeps everything else; the replica is

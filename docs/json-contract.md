@@ -672,6 +672,26 @@ See [the protocol](sync-protocol.md). The token is read from `LCL_SYNC_TOKEN`.
 {"sent": "integer", "received": "integer", "numbers_left": "integer", "not_applied": ["SyncConflict"], "overwritten": ["SyncConflict"]}
 ```
 
+### `lcl sync leave`
+
+`path` and the counts are as for `lcl export --output`. `server` and `workspace` name the replica deleted (or found gone); both are null when the workspace didn't sync, and only the export was written.
+
+```json
+{
+  "path": "string",
+  "labels": "integer",
+  "projects": "integer",
+  "milestones": "integer",
+  "cycles": "integer",
+  "issues": "integer",
+  "comments": "integer",
+  "relations": "integer",
+  "docs": "integer",
+  "server": "string|null",
+  "workspace": "string|null"
+}
+```
+
 ### `lcl sync stop`
 
 The service and the replica the workspace synced with, which is left as it is.

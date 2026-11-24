@@ -219,7 +219,7 @@ lcl --json sync
 ```
 
 - Sync is opt-in, per workspace, and only the owner opts in: `lcl sync start URL` (it needs `LCL_SYNC_TOKEN`). Don't run it unless asked. `lcl workspace show` has `sync`: null for a workspace that doesn't sync.
-- In a workspace that syncs, `lcl sync` sends this machine's changes, receives the others', and prints `sent`, `received`, `numbers_left`, `not_applied` (changes the service didn't apply) and `overwritten` (fields where a later change from elsewhere won). `lcl sync join URL ID` joins from another machine, into an empty workspace with the same key. Exit 1, kind `network`: the service is out of reach; the edits are kept and go next time. Kind `auth`: no token, or a refused one.
+- In a workspace that syncs, `lcl sync` sends this machine's changes, receives the others', and prints `sent`, `received`, `numbers_left`, `not_applied` (changes the service didn't apply) and `overwritten` (fields where a later change from elsewhere won). `lcl sync join URL ID` joins from another machine, into an empty workspace with the same key. `lcl sync leave --output PATH` exports, then deletes the service's replica (only when the owner asks). Exit 1, kind `network`: the service is out of reach; the edits are kept and go next time. Kind `auth`: no token, or a refused one.
 - A synced workspace numbers new issues from blocks the service hands out. When they run out, `issue create` exits 1, kind `conflict`, until `lcl sync` gets more. Every other write works offline.
 
 ## TUI

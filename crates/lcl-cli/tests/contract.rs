@@ -520,6 +520,7 @@ pinned! {
     sync_start => "sync start",
     sync_join => "sync join",
     sync => "sync",
+    sync_leave => "sync leave",
     sync_stop => "sync stop",
 }
 
@@ -633,6 +634,18 @@ mod cases {
         let overwritten = with_token(&env, &["sync"]);
         assert_eq!(overwritten["overwritten"][0]["identifier"], "DEMO-2");
         vec![quiet, refused, overwritten]
+    }
+
+    /// Leaving a replica, then again with none.
+    pub fn sync_leave() -> Vec<Value> {
+        let svc = Service::start();
+        let env = rich().env;
+        with_token(&env, &["sync", "start", &svc.url]);
+        let path = env.cwd.path().join("left.jsonl");
+        let p = path.to_str().unwrap();
+        let left = with_token(&env, &["sync", "leave", "--output", p]);
+        let again = j(&env, &["sync", "leave", "--output", p, "--force"]);
+        vec![left, again]
     }
 
     pub fn sync_stop() -> Vec<Value> {
