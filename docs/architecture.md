@@ -122,7 +122,7 @@ Before a migration changes a workspace file or the registry, lcl copies the file
 
 ## The terminal UI
 
-`lcl tui` lists issues. `j` and `k` move, `1` through `7` filter by status, `0` shows every status, `r` reloads, and `q` or Ctrl-C quits. Enter opens the selected issue's detail (fields, description, comments), which `j`/`k`, PgDn/PgUp, `g`/`G` scroll, and Esc goes back to the list. Which of the two is shown is one enum, `Mode`; the detail's scroll lives in it. It needs a terminal on both stdin and stdout. It does not create, edit, search, or comment. The command line does that.
+`lcl tui` lists issues. `j` and `k` move, `1` through `7` filter by status, `0` shows every status, `r` reloads, and `q` or Ctrl-C quits. Enter opens the selected issue's detail (fields, description, comments), which `j`/`k`, PgDn/PgUp, `g`/`G` scroll, and Esc goes back to the list. `/` opens a search prompt, which searches as `lcl search` does (`Store::search`), and `p` narrows the list to each project in turn. What is shown, and where keys go, is one enum, `Mode`: the list, the detail (with its scroll) or the prompt (with its line and cursor). A reload reads what `App::request` asks for: the open issue's comments and the search. It needs a terminal on both stdin and stdout. It does not create or edit issues, or comment. The command line does that.
 
 ## The command contract
 

@@ -1,5 +1,5 @@
-//! A read-only terminal view of a workspace's issues: a list, and the
-//! detail of one issue.
+//! A read-only terminal view of a workspace's issues: a list, narrowed by
+//! status, project and search, and the detail of one issue.
 //!
 //! The state and its key handling (`App`) are pure, and drawing takes any
 //! ratatui backend, so both are tested without a terminal. `run` puts the
@@ -8,21 +8,28 @@
 
 use anyhow::Result;
 use crossterm::ExecutableCommand;
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyEventKind,
+    KeyModifiers,
+};
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use lcl_core::db::{IssueFilter, IssueSort, Page, Store};
 use lcl_core::models::{Comment, Issue, IssueId, Status};
+use lcl_core::search::SearchQuery;
 use ratatui::buffer::CellWidth;
 use ratatui::prelude::*;
 use ratatui::widgets::*;
 use std::borrow::Cow;
 use std::cell::Cell;
+use std::collections::HashMap;
 use std::io::{IsTerminal, stdout};
 use std::time::Duration;
+use unicode_segmentation::UnicodeSegmentation;
 
-const LIST_HELP: &str = "j/k: move  Enter: open  r: reload  q: quit  1-7: filter status  0: all";
+const LIST_HELP: &str =
+    "j/k: move  Enter: open  /: search  p: project  1-7: status  0: all  r: reload  q: quit";
 const DETAIL_HELP: &str = "j/k: scroll  PgUp/PgDn: page  Esc: back  r: reload  q: quit";
 
 /// What marks the selected row. Every row is indented by its width.
@@ -204,31 +211,148 @@ impl Widths {
 }
 
 /// One read of a workspace: its name and key (either may be empty), every
-/// issue in list order, and the comments of the issue open in the detail.
+/// issue in list order, the comments of the issue open in the detail, and
+/// what the search found.
 #[derive(Debug, Clone, Default)]
 pub struct Snapshot {
     pub workspace: String,
     pub key: String,
     pub issues: Vec<Issue>,
-    /// The comments of the issue that was open (`App::open`) when this was
-    /// read, oldest first; none while the list is shown.
+    /// The comments of the issue that was open (`Request::open`) when this
+    /// was read, oldest first; none while the list is shown.
     pub comments: Vec<Comment>,
+    /// The search asked for (`Request::search`), if one was.
+    pub search: Option<Found>,
+}
+
+/// What a search found: its query as typed, and the issues, best first, as
+/// `lcl search` ranks them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Found {
+    pub query: String,
+    pub issues: Vec<IssueId>,
+}
+
+/// What a reload reads besides the issues (`App::request`).
+#[derive(Debug, Clone, Default)]
+pub struct Request {
+    /// The issue open in the detail, whose comments are read.
+    pub open: Option<IssueId>,
+    /// The search the list is narrowed by.
+    pub search: Option<SearchQuery>,
+}
+
+/// What the terminal sends: a key, or text pasted in one piece.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Input {
+    Key(KeyEvent),
+    Paste(String),
 }
 
 /// What the loop does after a key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
     Stay,
-    /// Read the issues again, and the open issue's comments (see
-    /// `App::open` and `App::reloaded`).
+    /// Read the issues again, with what `App::request` asks for (see
+    /// `App::reloaded`).
     Reload,
     Quit,
 }
 
-/// What the screen shows. The detail's state exists only while it is shown.
+/// What the screen shows, and where keys go: the list, the detail of one
+/// issue, or the search prompt under the list. Each one's state exists only
+/// while it is shown.
 enum Mode {
     List,
     Detail(Detail),
+    Prompt(Prompt),
+}
+
+/// A line of text being typed, and the cursor in it: a byte offset on a
+/// grapheme boundary, so a wide character, or a letter with its accent, is
+/// passed over and deleted whole.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct Prompt {
+    text: String,
+    cursor: usize,
+    /// Why Enter didn't search; the header shows it until the next key.
+    error: Option<String>,
+}
+
+impl Prompt {
+    /// `text`, with the cursor at its end.
+    fn new(text: &str) -> Prompt {
+        Prompt {
+            text: text.into(),
+            cursor: text.len(),
+            error: None,
+        }
+    }
+
+    /// Puts `text` at the cursor, cleaned (a pasted newline is a space), and
+    /// the cursor after it, or after the grapheme it joined.
+    fn insert(&mut self, text: &str) {
+        let text = clean(text);
+        self.text.insert_str(self.cursor, &text);
+        let at = self.cursor + text.len();
+        self.cursor = self
+            .text
+            .grapheme_indices(true)
+            .map(|(i, _)| i)
+            .find(|&i| i >= at)
+            .unwrap_or(self.text.len());
+    }
+
+    /// Where the grapheme before the cursor starts.
+    fn before(&self) -> usize {
+        self.text[..self.cursor]
+            .grapheme_indices(true)
+            .next_back()
+            .map_or(0, |(i, _)| i)
+    }
+
+    /// Where the grapheme after the cursor ends.
+    fn after(&self) -> usize {
+        self.text[self.cursor..]
+            .graphemes(true)
+            .next()
+            .map_or(self.cursor, |g| self.cursor + g.len())
+    }
+
+    /// Backspace, Delete, the arrows, Home and End edit and move; any other
+    /// character without Ctrl or Alt is typed.
+    fn key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Backspace => {
+                let at = self.before();
+                self.text.replace_range(at..self.cursor, "");
+                self.cursor = at;
+            }
+            KeyCode::Delete => {
+                let end = self.after();
+                self.text.replace_range(self.cursor..end, "");
+            }
+            KeyCode::Left => self.cursor = self.before(),
+            KeyCode::Right => self.cursor = self.after(),
+            KeyCode::Home => self.cursor = 0,
+            KeyCode::End => self.cursor = self.text.len(),
+            KeyCode::Char(c)
+                if !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                self.insert(c.encode_utf8(&mut [0; 4]));
+            }
+            _ => {}
+        }
+    }
+}
+
+/// A project the list is narrowed to: its id, and its name as last read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProjectFilter {
+    id: String,
+    name: String,
 }
 
 /// The detail of one issue, scrolled to a line.
@@ -270,8 +394,8 @@ impl Detail {
     }
 }
 
-/// The workspace as last read, the status filter, the selected issue, and
-/// what the screen shows: the list, or the detail of one issue.
+/// The workspace as last read, what narrows the list (a status, a project,
+/// a search), the selected issue, and what the screen shows (`Mode`).
 ///
 /// The selection is the issue's UUID, not its row, so it stays on the same
 /// issue when a reload moves the rows. It is `None` exactly when the
@@ -282,6 +406,9 @@ pub struct App {
     /// Of `snapshot.issues`; set wherever the snapshot is.
     widths: Widths,
     filter: Option<Status>,
+    project: Option<ProjectFilter>,
+    /// The search a reload asks for. What it found is `snapshot.search`.
+    search: Option<SearchQuery>,
     selected: Option<IssueId>,
     mode: Mode,
     /// How a comment's time is shown; local time, but for the tests.
@@ -294,6 +421,8 @@ impl App {
             widths: Widths::of(&snapshot.issues),
             snapshot,
             filter: None,
+            project: None,
+            search: None,
             selected: None,
             mode: Mode::List,
             time: local_time,
@@ -307,7 +436,16 @@ impl App {
     pub fn open(&self) -> Option<&IssueId> {
         match &self.mode {
             Mode::Detail(d) => Some(&d.id),
-            Mode::List => None,
+            Mode::List | Mode::Prompt(_) => None,
+        }
+    }
+
+    /// What the next reload reads: the open issue's comments, and the
+    /// search.
+    pub fn request(&self) -> Request {
+        Request {
+            open: self.open().cloned(),
+            search: self.search.clone(),
         }
     }
 
@@ -329,36 +467,69 @@ impl App {
         self.selected = id;
     }
 
-    /// The issues the filter lets through, in list order.
+    /// The issues the status and project filters let through: in list
+    /// order, or under a search, the ones it found, best first.
     pub fn visible(&self) -> Vec<&Issue> {
-        self.snapshot
-            .issues
-            .iter()
-            .filter(|i| self.filter.is_none_or(|s| i.status == s))
-            .collect()
+        let keep = |i: &&Issue| {
+            self.filter.is_none_or(|s| i.status == s)
+                && self
+                    .project
+                    .as_ref()
+                    .is_none_or(|p| i.project_id.as_deref() == Some(p.id.as_str()))
+        };
+        match &self.snapshot.search {
+            None => self.snapshot.issues.iter().filter(keep).collect(),
+            Some(found) => {
+                let by_id: HashMap<&IssueId, &Issue> =
+                    self.snapshot.issues.iter().map(|i| (&i.id, i)).collect();
+                found
+                    .issues
+                    .iter()
+                    .filter_map(|id| by_id.get(id).copied())
+                    .filter(keep)
+                    .collect()
+            }
+        }
     }
 
-    /// Handles one key. Only presses count. Everywhere, q and Ctrl-C quit
-    /// and r asks for a reload. In the list, j/k (or the arrows) move
-    /// within the filtered list, 1-7 filter by status and 0 clears the
-    /// filter (each selecting the first row), and Enter opens the selected
-    /// issue's detail, asking for a reload to read its comments. In the
-    /// detail, keys scroll (`Detail::scroll`), and Esc goes back to the
-    /// list, as it was.
+    /// Handles one key. Only presses count, and Ctrl-C quits everywhere.
+    ///
+    /// At the prompt, keys edit its line (`Prompt::key`); Enter searches
+    /// and Esc goes back to the list as it was. Elsewhere q quits and r asks
+    /// for a reload. In the list, j/k (or the arrows) move within it; 1-7
+    /// filter by status and 0 clears that filter, p goes to the next
+    /// project, and `/` opens the prompt with the search in it; and Enter
+    /// opens the selected issue's detail, asking for a reload to read its
+    /// comments. A new filter selects the first row. In the detail, keys
+    /// scroll (`Detail::scroll`), and Esc goes back to the list, as it was.
     pub fn key(&mut self, key: KeyEvent) -> Action {
         if key.kind != KeyEventKind::Press {
             return Action::Stay;
         }
+        if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            return Action::Quit;
+        }
+        if let Mode::Prompt(p) = &mut self.mode {
+            p.error = None;
+            return match key.code {
+                KeyCode::Esc => {
+                    self.mode = Mode::List;
+                    Action::Stay
+                }
+                KeyCode::Enter => self.submit(),
+                _ => {
+                    p.key(key);
+                    Action::Stay
+                }
+            };
+        }
         match key.code {
-            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                return Action::Quit;
-            }
             KeyCode::Char('q') => return Action::Quit,
             KeyCode::Char('r') => return Action::Reload,
             _ => {}
         }
         match &mut self.mode {
-            Mode::List => self.list_key(key.code),
+            Mode::List | Mode::Prompt(_) => self.list_key(key.code),
             Mode::Detail(_) if key.code == KeyCode::Esc => {
                 self.mode = Mode::List;
                 Action::Stay
@@ -392,20 +563,111 @@ impl App {
                 self.select_row(0);
                 Action::Stay
             }
+            KeyCode::Char('p') => {
+                self.next_project();
+                Action::Stay
+            }
+            KeyCode::Char('/') => {
+                let text = self.search.as_ref().map_or("", |q| q.raw());
+                self.mode = Mode::Prompt(Prompt::new(text));
+                Action::Stay
+            }
             _ => Action::Stay,
         }
     }
 
-    /// Takes a fresh read of the workspace, keeping the filter and the selected
-    /// issue, whatever row it is on now. If that issue is no longer in the
-    /// filtered list, the selection goes to the row it was on (else the last).
-    /// The detail stays on its issue, or goes back to the list if the
-    /// workspace no longer has it (deleted, or purged).
+    /// Pasted text goes into the prompt; elsewhere it does nothing.
+    pub fn paste(&mut self, text: &str) -> Action {
+        if let Mode::Prompt(p) = &mut self.mode {
+            p.error = None;
+            p.insert(text);
+        }
+        Action::Stay
+    }
+
+    /// Enter at the prompt. A query `lcl search` takes becomes the search,
+    /// and a reload runs it. An empty line takes the search away. A query
+    /// with nothing to search for leaves the prompt open, and says so.
+    fn submit(&mut self) -> Action {
+        let Mode::Prompt(p) = &mut self.mode else {
+            return Action::Stay;
+        };
+        if p.text.trim().is_empty() {
+            self.mode = Mode::List;
+            self.search = None;
+            self.snapshot.search = None;
+            // The list only grows; the selection is still in it.
+            if self.selected.is_none() {
+                self.select_row(0);
+            }
+            return Action::Stay;
+        }
+        match SearchQuery::parse(&p.text) {
+            Ok(query) => {
+                self.mode = Mode::List;
+                self.search = Some(query);
+                Action::Reload
+            }
+            Err(e) => {
+                p.error = Some(e.to_string());
+                Action::Stay
+            }
+        }
+    }
+
+    /// The projects the issues read are in, by name, then none, in turn.
+    fn next_project(&mut self) {
+        let mut projects: Vec<(String, &str, &str)> = self
+            .snapshot
+            .issues
+            .iter()
+            .filter_map(|i| {
+                let (id, name) = (i.project_id.as_deref()?, i.project.as_deref()?);
+                Some((name.to_lowercase(), name, id))
+            })
+            .collect();
+        projects.sort();
+        projects.dedup();
+        let at = self
+            .project
+            .as_ref()
+            .and_then(|p| projects.iter().position(|(_, _, id)| *id == p.id));
+        let next = match at {
+            None => projects.first(),
+            Some(n) => projects.get(n + 1),
+        };
+        self.project = next.map(|(_, name, id)| ProjectFilter {
+            id: id.to_string(),
+            name: name.to_string(),
+        });
+        self.select_row(0);
+    }
+
+    /// Takes a fresh read of the workspace, keeping the filters and the
+    /// selected issue, whatever row it is on now. If that issue is no longer
+    /// in the filtered list, the selection goes to the row it was on (else
+    /// the last). A search other than the last selects its best hit. The
+    /// detail stays on its issue, or goes back to the list if the workspace
+    /// no longer has it (deleted, or purged).
     pub fn reloaded(&mut self, snapshot: Snapshot) {
         let row = self.row();
+        let query = |s: &Snapshot| s.search.as_ref().map(|f| f.query.clone());
+        let new_search = query(&snapshot) != query(&self.snapshot);
         self.widths = Widths::of(&snapshot.issues);
         self.snapshot = snapshot;
-        if !self
+        if let Some(p) = &mut self.project
+            && let Some(name) = self
+                .snapshot
+                .issues
+                .iter()
+                .find(|i| i.project_id.as_deref() == Some(p.id.as_str()))
+                .and_then(|i| i.project.clone())
+        {
+            p.name = name;
+        }
+        if new_search {
+            self.select_row(0);
+        } else if !self
             .visible()
             .iter()
             .any(|i| Some(&i.id) == self.selected.as_ref())
@@ -420,21 +682,34 @@ impl App {
     }
 
     /// The header line: the workspace's name, with its key in brackets if it
-    /// has one; how many issues it has; and under a filter, how many of them
-    /// are listed and what the filter is. `demo (D) · 2 of 5 issues · status: Done`.
+    /// has one; how many issues it has; and when the list is narrowed, how
+    /// many of them are listed, and by what status, project and search.
+    /// `demo (D) · 2 of 5 issues · status: Done · project: tui · search: login`.
+    /// At the prompt, after an Enter that didn't search, it says why.
     fn header(&self) -> String {
+        if let Mode::Prompt(Prompt { error: Some(e), .. }) = &self.mode {
+            return clean(e).into_owned();
+        }
         let mut out = self.snapshot.workspace.clone();
         if !self.snapshot.key.is_empty() {
             out.push_str(&format!(" ({})", self.snapshot.key));
         }
         let total = self.snapshot.issues.len();
         let issues = if total == 1 { "issue" } else { "issues" };
-        match self.filter {
-            None => out.push_str(&format!(" · {total} {issues}")),
-            Some(status) => out.push_str(&format!(
-                " · {} of {total} {issues} · status: {status}",
-                self.visible().len()
-            )),
+        let search = self.snapshot.search.as_ref();
+        if self.filter.is_none() && self.project.is_none() && search.is_none() {
+            out.push_str(&format!(" · {total} {issues}"));
+        } else {
+            out.push_str(&format!(" · {} of {total} {issues}", self.visible().len()));
+        }
+        if let Some(status) = self.filter {
+            out.push_str(&format!(" · status: {status}"));
+        }
+        if let Some(p) = &self.project {
+            out.push_str(&format!(" · project: {}", clean(&p.name)));
+        }
+        if let Some(found) = search {
+            out.push_str(&format!(" · search: {}", found.query));
         }
         out
     }
@@ -556,6 +831,11 @@ impl App {
                 self.draw_detail(f, chunks[1], d);
                 DETAIL_HELP
             }
+            Mode::Prompt(p) => {
+                self.draw_list(f, chunks[1]);
+                draw_prompt(f, chunks[2], p);
+                return;
+            }
         };
         f.render_widget(
             Paragraph::new(help).style(Style::default().add_modifier(Modifier::DIM)),
@@ -604,6 +884,31 @@ impl App {
     }
 }
 
+/// The prompt's line, `/` and its text, with the cursor on it. While the
+/// line is wider than `area`, its start is left out, so the cursor stays on
+/// screen with a cell for it.
+fn draw_prompt(f: &mut Frame, area: Rect, p: &Prompt) {
+    let width = usize::from(area.width);
+    if width == 0 {
+        return;
+    }
+    let line = format!("/{}", p.text);
+    let cursor = 1 + cells(&p.text[..p.cursor]);
+    let over = (cursor + 1).saturating_sub(width);
+    let (mut start, mut dropped) = (line.len(), 0);
+    for (i, g) in line.grapheme_indices(true) {
+        if dropped >= over {
+            start = i;
+            break;
+        }
+        dropped += cells(g);
+    }
+    f.render_widget(Paragraph::new(&line[start..]), area);
+    // `cursor - dropped` is under `width`, which is a u16.
+    let x = u16::try_from(cursor - dropped).unwrap_or(area.width - 1);
+    f.set_cursor_position((area.x + x, area.y));
+}
+
 /// The status a number key filters by: 1 Backlog … 7 Duplicate; 0 none.
 fn status_key(c: char) -> Option<Status> {
     match c {
@@ -623,7 +928,7 @@ fn status_key(c: char) -> Option<Status> {
 /// lcl with that error, as one on a reload does; the terminal is restored
 /// first (see `guarded`).
 pub fn run(store: Store) -> Result<()> {
-    let mut app = App::new(load(&store, None)?);
+    let mut app = App::new(load(&store, &Request::default())?);
     // Said here, in words: raw mode on something that isn't a terminal
     // fails with the system's "No such device or address".
     if !(std::io::stdin().is_terminal() && stdout().is_terminal()) {
@@ -631,55 +936,76 @@ pub fn run(store: Store) -> Result<()> {
     }
     guarded(enter_terminal, leave_terminal, || {
         let mut terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
-        run_app(&mut terminal, &mut app, |open| load(&store, open), next_key)
+        run_app(&mut terminal, &mut app, |r| load(&store, r), next_input)
     })
 }
 
-/// The workspace's name and key, every issue by number, and the comments of
-/// issue `open`, if one is open, oldest first. Read-only.
-fn load(store: &Store, open: Option<&IssueId>) -> Result<Snapshot> {
+/// The workspace's name and key, and every issue by number; then what
+/// `request` asks for: the open issue's comments, oldest first, and the
+/// issues the search finds, as `lcl search` finds and ranks them. Read-only.
+fn load(store: &Store, request: &Request) -> Result<Snapshot> {
+    let issues = store
+        .list_issues(&IssueFilter::default(), IssueSort::Number, Page::ALL)?
+        .issues;
+    let search = match &request.search {
+        Some(query) => Some(Found {
+            query: query.raw().to_string(),
+            issues: store
+                .search(query, issues.len())?
+                .issues
+                .into_iter()
+                .map(|hit| hit.issue.id)
+                .collect(),
+        }),
+        None => None,
+    };
     Ok(Snapshot {
         workspace: store.get_meta("name")?.unwrap_or_default(),
         key: store.get_meta("key")?.unwrap_or_default(),
-        issues: store
-            .list_issues(&IssueFilter::default(), IssueSort::Number, Page::ALL)?
-            .issues,
-        comments: match open {
+        issues,
+        comments: match &request.open {
             Some(id) => store.list_comments(id.as_str(), false)?,
             None => Vec::new(),
         },
+        search,
     })
 }
 
-/// The next key event, or None if none comes within a quarter second.
-fn next_key() -> Result<Option<KeyEvent>> {
-    if event::poll(Duration::from_millis(250))?
-        && let Event::Key(key) = event::read()?
-    {
-        return Ok(Some(key));
+/// The next key or paste, or None if none comes within a quarter second.
+fn next_input() -> Result<Option<Input>> {
+    if event::poll(Duration::from_millis(250))? {
+        return Ok(match event::read()? {
+            Event::Key(key) => Some(Input::Key(key)),
+            Event::Paste(text) => Some(Input::Paste(text)),
+            _ => None,
+        });
     }
     Ok(None)
 }
 
-/// Draws, then acts on the next key, until a quit. A reload is given the
-/// open issue, whose comments it reads. An error drawing, reading a key or
-/// reloading ends the loop with that error.
+/// Draws, then acts on the next key or paste, until a quit. A reload is
+/// given what the app asks for (`App::request`). An error drawing, reading
+/// a key or reloading ends the loop with that error.
 fn run_app<B: Backend>(
     terminal: &mut Terminal<B>,
     app: &mut App,
-    mut reload: impl FnMut(Option<&IssueId>) -> Result<Snapshot>,
-    mut next_key: impl FnMut() -> Result<Option<KeyEvent>>,
+    mut reload: impl FnMut(&Request) -> Result<Snapshot>,
+    mut next_input: impl FnMut() -> Result<Option<Input>>,
 ) -> Result<()>
 where
     B::Error: Send + Sync + 'static,
 {
     loop {
         terminal.draw(|f| app.draw(f))?;
-        let Some(key) = next_key()? else { continue };
-        match app.key(key) {
+        let action = match next_input()? {
+            Some(Input::Key(key)) => app.key(key),
+            Some(Input::Paste(text)) => app.paste(&text),
+            None => continue,
+        };
+        match action {
             Action::Quit => return Ok(()),
             Action::Reload => {
-                let snapshot = reload(app.open())?;
+                let snapshot = reload(&app.request())?;
                 app.reloaded(snapshot);
             }
             Action::Stay => {}
@@ -708,19 +1034,23 @@ fn guarded<T>(
     body()
 }
 
-/// Raw mode, then the alternate screen; raw mode is undone if the second fails.
+/// Raw mode, then the alternate screen; raw mode is undone if the second
+/// fails. Then bracketed paste, so a paste comes as one piece, not as keys
+/// (a newline in it would be Enter); a terminal without it still works.
 fn enter_terminal() -> Result<()> {
     enable_raw_mode()?;
     if let Err(e) = stdout().execute(EnterAlternateScreen) {
         let _ = disable_raw_mode();
         return Err(e.into());
     }
+    let _ = stdout().execute(EnableBracketedPaste);
     Ok(())
 }
 
-/// Leaves the alternate screen and raw mode. Best effort: on the way out
-/// there is nowhere to report a failure.
+/// Leaves bracketed paste, the alternate screen and raw mode. Best effort:
+/// on the way out there is nowhere to report a failure.
 fn leave_terminal() {
+    let _ = stdout().execute(DisableBracketedPaste);
     let _ = stdout().execute(LeaveAlternateScreen);
     let _ = disable_raw_mode();
 }
@@ -771,6 +1101,7 @@ mod tests {
             key: "W".into(),
             issues,
             comments: vec![],
+            search: None,
         }
     }
 
@@ -881,26 +1212,31 @@ mod tests {
         assert_eq!(selected(&app), "W-2");
     }
 
-    /// Every sequence of up to five keys and reloads, from three starting
-    /// lists. After each one: the selection is None exactly when the filtered
-    /// list is empty, else an issue in it; a reload that keeps the selected
+    /// Every sequence of up to four keys and reloads, from three starting
+    /// lists, among them a search and a project filter. After each one: the
+    /// selection is None exactly when the filtered list is empty, else an
+    /// issue in it; a reload with the same search that keeps the selected
     /// issue in the filtered list leaves it selected; and an open issue is
     /// one the workspace has.
     #[test]
     fn the_selection_is_always_an_issue_in_the_filtered_list() {
-        let reloads = [
-            work(vec![]),
-            five(),
-            numbered(&[6, 5, 4, 3, 2, 1]),
-            work(five().issues.into_iter().skip(2).collect()),
-        ];
+        // A search that found two issues, and one this read doesn't have.
+        let mut found = four();
+        found.search = Some(Found {
+            query: "x".into(),
+            issues: ["id-112", "id-1", "id-999"]
+                .map(|id| IssueId::from_stored(id.to_string()))
+                .to_vec(),
+        });
+        let reloads = [work(vec![]), found, numbered(&[6, 5, 4, 3, 2, 1])];
         let keys = [
             press('j'),
             press('k'),
             press('1'),
-            press('5'),
             press('7'),
             press('0'),
+            press('p'),
+            press('/'),
             code(KeyCode::Enter),
             code(KeyCode::Esc),
         ];
@@ -910,8 +1246,12 @@ mod tests {
                 app.key(keys[op]);
             } else {
                 let before = app.selected.clone();
+                let query = |s: &Snapshot| s.search.as_ref().map(|f| f.query.clone());
+                let same_search = query(&app.snapshot) == query(&reloads[op - keys.len()]);
                 app.reloaded(reloads[op - keys.len()].clone());
-                if before.is_some() && app.visible().iter().any(|i| Some(&i.id) == before.as_ref())
+                if same_search
+                    && before.is_some()
+                    && app.visible().iter().any(|i| Some(&i.id) == before.as_ref())
                 {
                     assert_eq!(
                         app.selected, before,
@@ -939,8 +1279,8 @@ mod tests {
             }
         };
         let mut sequences = 0;
-        for start in [work(vec![]), five(), numbered(&[1])] {
-            for len in 0..=5u32 {
+        for start in [work(vec![]), five(), four()] {
+            for len in 0..=4u32 {
                 for mut n in 0..ops.pow(len) {
                     let mut app = App::new(start.clone());
                     assert_eq!(app.selected.is_none(), start.issues.is_empty());
@@ -952,8 +1292,8 @@ mod tests {
                 }
             }
         }
-        // 1 + 12 + 12^2 + ... + 12^5 sequences from each start.
-        assert_eq!(sequences, 3 * 271_453);
+        // 1 + 12 + 12^2 + 12^3 + 12^4 sequences from each start.
+        assert_eq!(sequences, 3 * 22_621);
     }
 
     #[test]
@@ -994,6 +1334,7 @@ mod tests {
         Issue {
             priority,
             title: title.into(),
+            project_id: project.map(|p| format!("p-{p}")),
             project: project.map(String::from),
             assignee: assignee.map(String::from),
             ..issue(number, status)
@@ -1058,7 +1399,7 @@ mod tests {
                 "   W-4  Backlog     None    issue 4                         ",
                 "   W-5  Backlog     None    issue 5                         ",
                 "                                                            ",
-                "j/k: move  Enter: open  r: reload  q: quit  1-7: filter stat",
+                "j/k: move  Enter: open  /: search  p: project  1-7: status  ",
             ]
             .map(String::from)
         );
@@ -1075,7 +1416,7 @@ mod tests {
                 "work (W) · 2 of 5 issues · status: Done                     ",
                 "   W-1  Done        None    issue 1                         ",
                 ">> W-3  Done        None    issue 3                         ",
-                "j/k: move  Enter: open  r: reload  q: quit  1-7: filter stat",
+                "j/k: move  Enter: open  /: search  p: project  1-7: status  ",
             ]
             .map(String::from)
         );
@@ -1104,6 +1445,7 @@ mod tests {
             key: String::new(),
             issues: vec![issue(1, Status::Todo)],
             comments: vec![],
+            search: None,
         });
         assert_eq!(app.header(), "solo · 1 issue");
         app.key(press('2'));
@@ -1125,7 +1467,7 @@ mod tests {
                 "   W-10   InProgress  High    Tabs and newlines                       ",
                 "   W-112  Todo        Low     Short               a very long…        ",
                 "                                                                      ",
-                "j/k: move  Enter: open  r: reload  q: quit  1-7: filter status  0: all",
+                "j/k: move  Enter: open  /: search  p: project  1-7: status  0: all  r:",
             ]
             .map(String::from)
         );
@@ -1311,7 +1653,7 @@ mod tests {
     #[test]
     fn load_reads_the_name_the_key_and_every_issue() {
         let mut store = Store::open_in_memory().unwrap();
-        let empty = load(&store, None).unwrap();
+        let empty = load(&store, &Request::default()).unwrap();
         assert_eq!(
             (
                 empty.workspace.as_str(),
@@ -1333,7 +1675,7 @@ mod tests {
                 )
                 .unwrap();
         }
-        let snapshot = load(&store, None).unwrap();
+        let snapshot = load(&store, &Request::default()).unwrap();
         let rows: Vec<(&str, &str)> = snapshot
             .issues
             .iter()
@@ -1351,7 +1693,7 @@ mod tests {
         };
         store.delete_issue(&two).unwrap();
         let ids = |store: &Store| -> Vec<String> {
-            load(store, None)
+            load(store, &Request::default())
                 .unwrap()
                 .issues
                 .iter()
@@ -1364,11 +1706,11 @@ mod tests {
     }
 
     /// Keys from a list, then an error if the loop asks for more.
-    fn keys(list: &[KeyEvent]) -> impl FnMut() -> Result<Option<KeyEvent>> + '_ {
+    fn keys(list: &[KeyEvent]) -> impl FnMut() -> Result<Option<Input>> + '_ {
         let mut it = list.iter();
         move || {
             it.next()
-                .map(|k| Some(*k))
+                .map(|k| Some(Input::Key(*k)))
                 .ok_or_else(|| anyhow::anyhow!("out of keys"))
         }
     }
@@ -1378,7 +1720,7 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(48, 9)).unwrap();
         let mut app = App::new(five());
         let reloads = RefCell::new(0);
-        let reload = |_: Option<&IssueId>| {
+        let reload = |_: &Request| {
             *reloads.borrow_mut() += 1;
             Ok(five())
         };
@@ -1391,7 +1733,7 @@ mod tests {
         .unwrap();
         assert_eq!((*reloads.borrow(), app.row()), (1, 1));
 
-        let failing = |_: Option<&IssueId>| Err(anyhow::anyhow!("database is locked"));
+        let failing = |_: &Request| Err(anyhow::anyhow!("database is locked"));
         let e = run_app(&mut terminal, &mut app, failing, keys(&[press('r')])).unwrap_err();
         assert_eq!(e.to_string(), "database is locked");
     }
@@ -1601,7 +1943,7 @@ mod tests {
         assert_eq!((opened(&app), selected(&app)), (None, "W-2"));
         assert_eq!(
             frame(&app, 30, 4)[3].trim_end(),
-            "j/k: move  Enter: open  r: rel"
+            "j/k: move  Enter: open  /: sea"
         );
     }
 
@@ -1673,10 +2015,10 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(48, 9)).unwrap();
         let mut app = App::new(five());
         let asked = RefCell::new(Vec::new());
-        let reload = |open: Option<&IssueId>| {
+        let reload = |r: &Request| {
             asked
                 .borrow_mut()
-                .push(open.map(|id| id.as_str().to_string()));
+                .push(r.open.as_ref().map(|id| id.as_str().to_string()));
             Ok(five())
         };
         let pressed = [
@@ -1722,8 +2064,12 @@ mod tests {
             .id
             .clone();
         store.delete_comment(&gone).unwrap();
-        let bodies = |open| -> Vec<String> {
-            load(&store, open)
+        let bodies = |open: Option<&IssueId>| -> Vec<String> {
+            let request = Request {
+                open: open.cloned(),
+                search: None,
+            };
+            load(&store, &request)
                 .unwrap()
                 .comments
                 .into_iter()
@@ -1732,6 +2078,313 @@ mod tests {
         };
         assert_eq!(bodies(Some(&issue.id)), ["first", "second"]);
         assert!(bodies(None).is_empty());
+    }
+
+    fn ids(app: &App) -> Vec<&str> {
+        app.visible()
+            .iter()
+            .map(|i| i.identifier.as_str())
+            .collect()
+    }
+
+    fn issue_ids(ids: &[&str]) -> Vec<IssueId> {
+        ids.iter()
+            .map(|id| IssueId::from_stored(id.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn the_prompt_edits_whole_graphemes_and_takes_wide_characters_and_paste() {
+        let mut p = Prompt::new("");
+        p.key(press('日'));
+        p.key(press('本'));
+        p.insert("e\u{301}");
+        assert_eq!((p.text.as_str(), p.cursor), ("日本e\u{301}", 9));
+        // Backspace takes the letter and its accent together.
+        p.key(code(KeyCode::Backspace));
+        assert_eq!((p.text.as_str(), p.cursor), ("日本", 6));
+        p.key(code(KeyCode::Left));
+        p.key(press('x'));
+        assert_eq!((p.text.as_str(), p.cursor), ("日x本", 4));
+        p.key(code(KeyCode::Delete));
+        p.key(code(KeyCode::Home));
+        p.key(code(KeyCode::Delete));
+        assert_eq!((p.text.as_str(), p.cursor), ("x", 0));
+        p.key(code(KeyCode::Left));
+        p.key(code(KeyCode::End));
+        p.key(code(KeyCode::Right));
+        assert_eq!(p.cursor, 1);
+        // A paste goes in at the cursor, its newlines as spaces.
+        p.key(code(KeyCode::Home));
+        p.insert("a\nb\r\n");
+        assert_eq!((p.text.as_str(), p.cursor), ("a b  x", 5));
+        // A chord with Ctrl or Alt types nothing.
+        p.key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL));
+        p.key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::ALT));
+        assert_eq!(p.text, "a b  x");
+        // A character that joins the one after the cursor: the cursor goes
+        // past the grapheme they make.
+        let mut flag = Prompt::new("🇸");
+        flag.key(code(KeyCode::Home));
+        flag.insert("🇺");
+        assert_eq!((flag.text.as_str(), flag.cursor), ("🇺🇸", 8));
+        flag.key(code(KeyCode::Backspace));
+        assert_eq!(flag.text, "");
+    }
+
+    #[test]
+    fn slash_opens_the_prompt_and_esc_leaves_the_list_as_it_was() {
+        let mut app = App::new(five());
+        app.key(press('1'));
+        app.key(press('j'));
+        assert_eq!(app.key(press('/')), Action::Stay);
+        // At the prompt, q, r and j are typed.
+        for c in "qrj".chars() {
+            assert_eq!(app.key(press(c)), Action::Stay);
+        }
+        assert_eq!(frame(&app, 20, 3)[2], "/qrj                ");
+        assert_eq!(app.key(code(KeyCode::Esc)), Action::Stay);
+        assert!(matches!(app.mode, Mode::List));
+        assert_eq!(
+            (app.filter, selected(&app), app.search.is_none()),
+            (Some(Status::Backlog), "W-4", true)
+        );
+        // Ctrl-C quits from the prompt too.
+        app.key(press('/'));
+        assert_eq!(
+            app.key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            Action::Quit
+        );
+    }
+
+    #[test]
+    fn enter_at_the_prompt_searches_and_the_list_shows_the_hits_best_first() {
+        let mut app = App::new(four());
+        app.key(press('/'));
+        app.paste("login redirect");
+        assert_eq!(app.key(code(KeyCode::Enter)), Action::Reload);
+        let asked = app.request().search.map(|q| q.raw().to_string());
+        assert_eq!(asked.as_deref(), Some("login redirect"));
+        // The reload brings what the search found, best first, and selects
+        // the best.
+        let mut found = four();
+        found.search = Some(Found {
+            query: "login redirect".into(),
+            issues: issue_ids(&["id-10", "id-1"]),
+        });
+        app.reloaded(found);
+        assert_eq!(
+            frame(&app, 70, 5)[..3],
+            [
+                "work (W) · 2 of 4 issues · search: login redirect                     ",
+                ">> W-10   InProgress  High    Tabs and newlines                       ",
+                "   W-1    Done        Urgent  Fix the login red…  tui           austin",
+            ]
+            .map(String::from)
+        );
+        // The status filter narrows the hits.
+        app.key(press('5'));
+        assert_eq!(ids(&app), ["W-1"]);
+        assert_eq!(
+            app.header(),
+            "work (W) · 1 of 4 issues · status: Done · search: login redirect"
+        );
+        // A reload with the same search keeps the selection.
+        app.key(press('0'));
+        app.key(press('j'));
+        let mut again = four();
+        again.search = Some(Found {
+            query: "login redirect".into(),
+            issues: issue_ids(&["id-10", "id-1"]),
+        });
+        app.reloaded(again);
+        assert_eq!(selected(&app), "W-1");
+        // `/` opens the prompt with the search in it; an empty line takes
+        // the search away, with no reload.
+        app.key(press('/'));
+        assert_eq!(frame(&app, 30, 3)[2], "/login redirect               ");
+        for _ in 0.."login redirect".len() {
+            app.key(code(KeyCode::Backspace));
+        }
+        assert_eq!(app.key(code(KeyCode::Enter)), Action::Stay);
+        assert_eq!(
+            (app.header(), selected(&app)),
+            ("work (W) · 4 issues".to_string(), "W-1")
+        );
+        assert!(app.request().search.is_none());
+    }
+
+    #[test]
+    fn enter_with_nothing_to_search_for_says_so_and_stays_at_the_prompt() {
+        let mut app = App::new(five());
+        app.key(press('/'));
+        app.key(press('-'));
+        app.key(press('-'));
+        assert_eq!(app.key(code(KeyCode::Enter)), Action::Stay);
+        let lines = frame(&app, 60, 3);
+        assert_eq!(
+            lines[0].trim_end(),
+            "the search query \"--\" has no words to search for"
+        );
+        assert_eq!(lines[2].trim_end(), "/--");
+        // The next key takes the message away.
+        app.key(code(KeyCode::Backspace));
+        assert_eq!(frame(&app, 60, 3)[0].trim_end(), "work (W) · 5 issues");
+    }
+
+    #[test]
+    fn the_prompt_line_keeps_the_cursor_on_screen() {
+        let mut app = App::new(five());
+        app.key(press('/'));
+        app.paste("日本語 search");
+        let mut terminal = Terminal::new(TestBackend::new(10, 3)).unwrap();
+        // The last line as it reads: the cell a wide character spills
+        // into is left out.
+        let mut drawn = |app: &App| {
+            terminal.draw(|f| app.draw(f)).unwrap();
+            let cursor = terminal.backend_mut().get_cursor_position().unwrap();
+            let buf = terminal.backend().buffer();
+            let (mut line, mut x) = (String::new(), 0);
+            while x < buf.area.width {
+                let symbol = buf[(x, 2)].symbol();
+                line.push_str(symbol);
+                x += u16::try_from(cells(symbol).max(1)).unwrap();
+            }
+            (line, (cursor.x, cursor.y))
+        };
+        // `/日本語 search` is 14 cells: its first 5 are left out, so the
+        // cursor gets the last cell.
+        assert_eq!(drawn(&app), ("語 search ".to_string(), (9, 2)));
+        // At the start the whole line is drawn from `/`, cut at the edge.
+        app.key(code(KeyCode::Home));
+        assert_eq!(drawn(&app), ("/日本語 se".to_string(), (1, 2)));
+        app.key(code(KeyCode::Right));
+        assert_eq!(drawn(&app).1, (3, 2));
+        app.key(code(KeyCode::Right));
+        assert_eq!(drawn(&app).1, (5, 2));
+    }
+
+    #[test]
+    fn p_goes_through_the_projects_by_name_then_back_to_all() {
+        let mut app = App::new(four());
+        app.key(press('j'));
+        app.key(press('p'));
+        assert_eq!(
+            (app.header(), ids(&app), app.row()),
+            (
+                "work (W) · 1 of 4 issues · project: a very long project name".to_string(),
+                vec!["W-112"],
+                0
+            )
+        );
+        app.key(press('p'));
+        assert_eq!(ids(&app), ["W-2"]);
+        app.key(press('p'));
+        assert_eq!(ids(&app), ["W-1"]);
+        // It combines with the status filter.
+        app.key(press('2'));
+        assert_eq!(
+            (app.header(), ids(&app).len()),
+            (
+                "work (W) · 0 of 4 issues · status: Todo · project: tui".to_string(),
+                0
+            )
+        );
+        app.key(press('0'));
+        // A reload brings the project's new name.
+        let mut renamed = four();
+        renamed.issues[0].project = Some("terminal".into());
+        app.reloaded(renamed);
+        assert!(
+            app.header().ends_with("project: terminal"),
+            "{}",
+            app.header()
+        );
+        // After the last project, every project again.
+        app.key(press('p'));
+        assert_eq!(app.header(), "work (W) · 4 issues");
+        // A workspace with no projects: p does nothing.
+        let mut plain = App::new(five());
+        plain.key(press('p'));
+        assert_eq!(plain.header(), "work (W) · 5 issues");
+    }
+
+    /// `load` searches as `lcl search` does: an issue's own text or its
+    /// comments, and the issue a query names first.
+    #[test]
+    fn load_searches_as_lcl_search_does() {
+        let mut store = Store::open_in_memory().unwrap();
+        store.set_meta(&[("name", "demo"), ("key", "D")]).unwrap();
+        for title in ["Fix the login redirect", "Write the docs", "Unrelated"] {
+            store
+                .create_issue(
+                    NewIssue {
+                        title: title.into(),
+                        status: Status::Todo,
+                        ..Default::default()
+                    },
+                    &Default::default(),
+                )
+                .unwrap();
+        }
+        let two = lcl_core::models::IssueRef::Number {
+            key: None,
+            number: 2,
+        };
+        store
+            .add_comment(&two, "the login page is slow".into(), None)
+            .unwrap();
+        let search = |q: &str| -> Vec<String> {
+            let request = Request {
+                open: None,
+                search: Some(SearchQuery::parse(q).unwrap()),
+            };
+            let snapshot = load(&store, &request).unwrap();
+            let found = snapshot.search.unwrap();
+            assert_eq!(found.query, q);
+            found
+                .issues
+                .iter()
+                .map(|id| {
+                    let issue = snapshot.issues.iter().find(|i| &i.id == id).unwrap();
+                    issue.identifier.clone()
+                })
+                .collect()
+        };
+        let mut login = search("login");
+        login.sort();
+        assert_eq!(login, ["D-1", "D-2"]);
+        assert_eq!(search("D-3")[0], "D-3");
+        assert!(search("nowhere").is_empty());
+    }
+
+    #[test]
+    fn the_loop_puts_a_paste_in_the_prompt_and_reloads_with_its_search() {
+        let mut terminal = Terminal::new(TestBackend::new(48, 9)).unwrap();
+        let mut app = App::new(five());
+        let asked = RefCell::new(Vec::new());
+        let reload = |r: &Request| {
+            asked
+                .borrow_mut()
+                .push(r.search.as_ref().map(|q| q.raw().to_string()));
+            Ok(five())
+        };
+        let mut inputs = [
+            Input::Key(press('/')),
+            Input::Paste("login\n".into()),
+            Input::Key(code(KeyCode::Enter)),
+            Input::Paste("ignored".into()),
+            Input::Key(press('q')),
+        ]
+        .into_iter();
+        let next = move || {
+            inputs
+                .next()
+                .map(Some)
+                .ok_or_else(|| anyhow::anyhow!("out of input"))
+        };
+        run_app(&mut terminal, &mut app, reload, next).unwrap();
+        assert_eq!(asked.take(), [Some("login ".to_string())]);
     }
 
     /// `leave` runs once `enter` has, on every way out of `body`.

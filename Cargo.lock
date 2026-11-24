@@ -1000,6 +1000,7 @@ dependencies = [
  "crossterm",
  "lcl-core",
  "ratatui",
+ "unicode-segmentation",
 ]
 
 [[package]]
