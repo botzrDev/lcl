@@ -202,6 +202,36 @@ enum Commands {
     },
     /// Open this workspace in a terminal UI.
     Tui,
+    /// Keep this workspace in step with a sync service: send this
+    /// machine's changes, and top up its issue numbers.
+    ///
+    /// Opt in first with lcl sync start URL. The token for the service is
+    /// read from LCL_SYNC_TOKEN, and never stored. Only the sync commands
+    /// reach the network; a workspace that never opted in makes no call.
+    /// With the service out of reach, the file still opens and takes edits:
+    /// they go at the next lcl sync. See docs/sync-protocol.md.
+    Sync {
+        #[command(subcommand)]
+        cmd: Option<SyncCmd>,
+    },
+}
+
+#[derive(Subcommand)]
+enum SyncCmd {
+    /// Opt this workspace in: the service at URL makes a replica of it from
+    /// this machine's whole history, and gives it its first issue numbers.
+    ///
+    /// From then on this machine numbers the issues it creates from blocks
+    /// of 100 the service gives it, offline or not.
+    Start {
+        /// The service's address: https://HOST (http:// only for localhost).
+        #[arg(value_name = "URL")]
+        url: String,
+    },
+    /// Forget the sync service. The file keeps everything, the replica is
+    /// left as it is, and issues are numbered from the file's counter
+    /// again.
+    Stop,
 }
 
 /// An import file's bytes, read as the arguments are parsed.
@@ -2204,11 +2234,20 @@ fn run(cli: Cli) -> Result<()> {
                     .and_then(|t| t.parse::<i64>().ok());
                 let description = store.get_meta("description")?.unwrap_or_default();
                 let schema_version = store.schema_version()?;
-                let v = serde_json::json!({"name": name, "key": key, "description": description, "path": path, "schema_version": schema_version, "created_at": created_at});
+                let sync = store.sync_status()?;
+                let v = serde_json::json!({"name": name, "key": key, "description": description, "path": path, "schema_version": schema_version, "created_at": created_at, "sync": sync});
                 if cli.json {
                     print_json(&v)?;
                 } else {
                     outln!("{} [{}] {}", name, key, path.display());
+                    if let Some(s) = &sync {
+                        outln!(
+                            "Syncs with {} as workspace {}; {} issue numbers held",
+                            s.server,
+                            s.workspace,
+                            s.numbers_left
+                        );
+                    }
                 }
             }
         },
@@ -2959,6 +2998,66 @@ fn run(cli: Cli) -> Result<()> {
                         print_json(&v)?;
                     } else {
                         outln!("Exported {} to {path}", export.counts.phrase());
+                    }
+                }
+            }
+        }
+        Commands::Sync { cmd } => {
+            let mut store = resolve_store(&cli.workspace)?;
+            let token = || std::env::var(lcl_core::sync::TOKEN_VAR).ok();
+            match cmd {
+                Some(SyncCmd::Start { url }) => {
+                    let service = lcl_core::sync::Http::new(&url, token())?;
+                    let s = store.sync_start(&service)?;
+                    if cli.json {
+                        print_json(&s)?;
+                    } else {
+                        outln!(
+                            "Syncing with {} as workspace {}: sent {}; {} issue numbers held",
+                            s.server,
+                            s.workspace,
+                            counted_list(&[(s.sent as i64, "change", "changes")]),
+                            s.numbers_left
+                        );
+                    }
+                }
+                Some(SyncCmd::Stop) => {
+                    let s = store.sync_stop()?;
+                    if cli.json {
+                        print_json(&s)?;
+                    } else {
+                        outln!(
+                            "Stopped syncing with {}; its replica {} is left as it is",
+                            s.server,
+                            s.workspace
+                        );
+                    }
+                }
+                None => {
+                    let Some(status) = store.sync_status()? else {
+                        return Err(LclError::NotSyncing.into());
+                    };
+                    let service = lcl_core::sync::Http::new(&status.server, token())?;
+                    let r = store.sync(&service)?;
+                    if cli.json {
+                        print_json(&r)?;
+                    } else {
+                        outln!(
+                            "Sent {}; {} issue numbers held",
+                            counted_list(&[(r.sent as i64, "change", "changes")]),
+                            r.numbers_left
+                        );
+                        for c in &r.not_applied {
+                            let what = match &c.identifier {
+                                Some(id) if c.kind == "issue" => id.clone(),
+                                Some(id) => format!("{} {} on {id}", c.kind, c.record),
+                                None => format!("{} {}", c.kind, c.record),
+                            };
+                            outln!(
+                                "Not applied by the service (purged there, or in conflict): {what} {}",
+                                c.field
+                            );
+                        }
                     }
                 }
             }

@@ -21,10 +21,12 @@
 //! A slice that adds or changes a command changes the note, then this file.
 
 mod common;
+mod sync_service;
 
 use common::{Env, Out};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
+use sync_service::{Service, TOKEN};
 
 const NOTE: &str = include_str!("../../../docs/json-contract.md");
 
@@ -515,6 +517,9 @@ pinned! {
     backup => "backup",
     export => "export",
     import => "import",
+    sync_start => "sync start",
+    sync => "sync",
+    sync_stop => "sync stop",
 }
 
 /// What each command prints, for `pinned!`: enough samples to show every
@@ -547,8 +552,73 @@ mod cases {
         vec![j(&env, &["workspace", "list"])]
     }
 
+    /// Not syncing; syncing; and opted in, but the first push failed, so
+    /// not yet synced.
     pub fn workspace_show() -> Vec<Value> {
-        vec![j(&rich().env, &["workspace", "show"])]
+        let svc = Service::start();
+        let synced = Env::new();
+        j(&synced, &["init", "demo", "--key", "DEMO"]);
+        with_token(&synced, &["sync", "start", &svc.url]);
+        let unfinished = Env::new();
+        j(&unfinished, &["init", "demo", "--key", "DEMO"]);
+        j(&unfinished, &["issue", "create", "--title", "one"]);
+        svc.state().lose_next_push_answer = true;
+        let out = unfinished.lcl_env(
+            &[("LCL_SYNC_TOKEN", TOKEN)],
+            &["sync", "start", &svc.url, "--json"],
+        );
+        assert_eq!(out.code, 1, "{out:#?}");
+        vec![
+            j(&rich().env, &["workspace", "show"]),
+            j(&synced, &["workspace", "show"]),
+            j(&unfinished, &["workspace", "show"]),
+        ]
+    }
+
+    /// `lcl ARGS --json` with the reference service's token.
+    fn with_token(env: &Env, args: &[&str]) -> Value {
+        let mut argv = args.to_vec();
+        argv.push("--json");
+        env.lcl_env(&[("LCL_SYNC_TOKEN", TOKEN)], &argv)
+            .assert_ok()
+            .json()
+    }
+
+    pub fn sync_start() -> Vec<Value> {
+        let svc = Service::start();
+        vec![with_token(&rich().env, &["sync", "start", &svc.url])]
+    }
+
+    /// Nothing not applied; then an issue's change, a comment's and a
+    /// label's, each on a record the service purged.
+    pub fn sync() -> Vec<Value> {
+        let svc = Service::start();
+        let env = rich().env;
+        j(&env, &["label", "create", "gone-there"]);
+        let started = with_token(&env, &["sync", "start", &svc.url]);
+        let ws = started["workspace"].as_str().unwrap().to_string();
+        let quiet = with_token(&env, &["sync"]);
+        let issue = id(&j(&env, &["issue", "show", "1"])["issue"]);
+        let label = j(&env, &["label", "list"])
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|l| l["name"] == "gone-there")
+            .map(id)
+            .unwrap();
+        svc.state().purge(&ws, "issue", &issue);
+        svc.state().purge(&ws, "label", &label);
+        j(&env, &["issue", "update", "1", "--title", "edited"]);
+        j(&env, &["issue", "comment", "1", "late"]);
+        j(&env, &["label", "delete", "gone-there"]);
+        vec![quiet, with_token(&env, &["sync"])]
+    }
+
+    pub fn sync_stop() -> Vec<Value> {
+        let svc = Service::start();
+        let env = rich().env;
+        with_token(&env, &["sync", "start", &svc.url]);
+        vec![j(&env, &["sync", "stop"])]
     }
 
     pub fn issue_create() -> Vec<Value> {
@@ -992,6 +1062,21 @@ mod objects {
     }
 
     #[test]
+    fn object_sync_status() {
+        let shown = super::cases::workspace_show();
+        let statuses: Vec<Value> = shown.iter().skip(1).map(|s| s["sync"].clone()).collect();
+        pin_object("SyncStatus", &statuses);
+    }
+
+    #[test]
+    fn object_sync_conflict() {
+        let synced = super::cases::sync();
+        let conflicts = synced[1]["not_applied"].as_array().unwrap().clone();
+        assert_eq!(conflicts.len(), 3, "{conflicts:#?}");
+        pin_object("SyncConflict", &conflicts);
+    }
+
+    #[test]
     fn object_skipped_records() {
         let out = super::cases::import_with_unknown_types();
         pin_object("SkippedRecords", &[out["skipped"][0].clone()]);
@@ -1020,6 +1105,8 @@ mod objects {
                 "RelatedIssue",
                 "SkippedRecords",
                 "Status",
+                "SyncConflict",
+                "SyncStatus",
             ]
         );
     }
@@ -1042,10 +1129,18 @@ fn subcommands(env: &Env, path: &[&str]) -> Vec<String> {
         .collect()
 }
 
-/// Every command that runs something: the leaves under `lcl --help`.
+/// Every command that runs something: the leaves under `lcl --help`, and
+/// a command whose subcommand is optional (`lcl sync [COMMAND]`).
 fn leaf_commands(env: &Env, path: &[&str], into: &mut BTreeSet<String>) {
     let subs = subcommands(env, path);
-    if subs.is_empty() {
+    let mut args = path.to_vec();
+    args.push("--help");
+    let optional = env
+        .lcl(&args)
+        .stdout
+        .lines()
+        .any(|l| l.starts_with("Usage:") && l.ends_with("[COMMAND]"));
+    if subs.is_empty() || optional && !path.is_empty() {
         into.insert(path.join(" "));
     }
     for sub in subs {
@@ -1163,6 +1258,11 @@ fn each_kind_of_error_has_its_exit_status() {
             "io",
         ),
         (&["backup", missing_dir.to_str().unwrap()], 1, "io"),
+        // Sync, which this workspace doesn't: the address is checked
+        // first, then the token (LCL_SYNC_TOKEN, unset here).
+        (&["sync"], 1, "conflict"),
+        (&["sync", "start", "http://sync.example"], 2, "usage"),
+        (&["sync", "start", "https://sync.example"], 1, "auth"),
     ];
     for (args, code, kind) in cases {
         let mut argv = args.to_vec();

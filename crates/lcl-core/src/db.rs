@@ -506,7 +506,13 @@ impl Store {
             if let Some(r) = &issue.r#ref {
                 check_ref(tx, &key, r, None)?;
             }
-            let next = next_issue_number(tx)?;
+            // Opted in to sync: from this machine's blocks, and the file's
+            // counter stays as it is (crate::sync).
+            let from_block = crate::sync::take_number(tx)?;
+            let next = match from_block {
+                Some(n) => n,
+                None => next_issue_number(tx)?,
+            };
             issue.number = next;
             let now = crate::models::now();
             issue.created_at = now;
@@ -520,7 +526,9 @@ impl Store {
             )?;
             set_labels(tx, issue.id.as_str(), &issue.labels)?;
             place_cycle(tx, issue.id.as_str(), &placement.cycle)?;
-            put_meta(tx, NEXT_ISSUE_NUMBER, &next.saturating_add(1).to_string())?;
+            if from_block.is_none() {
+                put_meta(tx, NEXT_ISSUE_NUMBER, &next.saturating_add(1).to_string())?;
+            }
             reread(tx, &key, issue.id.as_str())
         })
     }

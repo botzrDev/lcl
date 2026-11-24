@@ -1,6 +1,6 @@
 # Sync protocol (design note)
 
-Status: approved by the project's owner on 2026-11-24 (LOCL-30). Nothing built yet. It is the contract between the open client in this repository and the sync service, which lives in a separate closed repository. [sync.md](sync.md) says what sync does: number blocks, the change log, the later change wins per field, purge wins. This note says how the client and the service talk, and what each relies on the other for. Accounts, billing and the browser are the service's business, and not here.
+Status: approved by the project's owner on 2026-11-24 (LOCL-30). Built so far: `lcl sync start`, `lcl sync` pushing and topping up numbers, `lcl sync stop`, and numbers from blocks. Not built yet: join, pull and applying what is pulled. It is the contract between the open client in this repository and the sync service, which lives in a separate closed repository. [sync.md](sync.md) says what sync does: number blocks, the change log, the later change wins per field, purge wins. This note says how the client and the service talk, and what each relies on the other for. Accounts, billing and the browser are the service's business, and not here.
 
 ## Transport
 
@@ -80,7 +80,7 @@ The machine then pulls from the start, into an empty workspace with that key.
 {"machine": "string", "changes": ["Change"]}
 ```
 
-At most 500 changes, in `id` order. A write's rows (one clock) all go in one push. `200`:
+In `id` order, and in whole writes: a write's rows (one clock) all go in one push. At most 500 changes, unless one write has more; then that write goes alone. (An import is one write, and so is the upgrade that started the log, so a push can hold every record of a workspace.) `200`:
 
 ```json
 {"accepted": [{"id": 8812, "seq": 1041, "applied": true}]}

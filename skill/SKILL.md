@@ -33,7 +33,7 @@ lcl init --key DEMO                    # here: ./.lcl/data.sqlite, named after t
   - Exit 2 means the command can't succeed as typed. Fix the arguments.
   - Exit 1 means it could succeed with other stored data, for example once a label exists.
 - With `--json`, an error is the last line of stderr, and the only one starting with `{`:
-  `{"error":{"kind":"usage|not_found|conflict|schema|io|other","message":"..."}}`. Other stderr lines are notices starting with `lcl:`.
+  `{"error":{"kind":"usage|not_found|conflict|schema|io|network|auth|other","message":"..."}}`. Other stderr lines are notices starting with `lcl:`.
   - `conflict` includes naming something in the trash. The message names the `restore` command that brings it back.
 - Writes are safe to run concurrently; each one is a single transaction. A write waits up to 30 s for another one; reads don't wait.
 - For long or multi-line text, use `--description-file -`, `--content-file -` or `--body-file -` and pipe the text in. It is stored byte for byte, with no shell quoting to get wrong.
@@ -211,6 +211,16 @@ lcl --json backup demo-copy.sqlite
 - `lcl -w NAME import FILE` restores such a file into an empty workspace that has the file's key (make one with `workspace create NAME --key KEY`). `--dry-run` checks everything and writes nothing. With `--json` it prints the same counts, `next_issue_number`, `dry_run` and `skipped`. A workspace that isn't empty is refused with exit 1, kind `conflict`.
 - A record whose `type` this lcl doesn't know (from a later lcl) is skipped, not refused: `skipped` lists each such type with its count (`[{"type": "attachment", "records": 2}]`), and the text output names them. An unknown key in a known record is still refused, exit 2.
 - `lcl backup PATH` copies the workspace's SQLite file to PATH, safely while other lcl commands run. PATH must not exist; its directory must. With `--json` it prints `path`, `bytes` and `schema_version`. To restore it, put the copy where the workspace's file is (`lcl workspace show` prints that path) while no lcl is running.
+
+## Sync
+
+```bash
+lcl --json sync
+```
+
+- Sync is opt-in, per workspace, and only the owner opts in: `lcl sync start URL` (it needs `LCL_SYNC_TOKEN`). Don't run it unless asked. `lcl workspace show` has `sync`: null for a workspace that doesn't sync.
+- In a workspace that syncs, `lcl sync` sends this machine's changes and prints `sent`, `numbers_left` and `not_applied` (changes the service didn't apply). Exit 1, kind `network`: the service is out of reach; the edits are kept and go next time. Kind `auth`: no token, or a refused one.
+- A synced workspace numbers new issues from blocks the service hands out. When they run out, `issue create` exits 1, kind `conflict`, until `lcl sync` gets more. Every other write works offline.
 
 ## TUI
 

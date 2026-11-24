@@ -20,6 +20,12 @@ allow = [
     "Unicode-3.0",
     "Zlib",
     "Unlicense",
+    # The HTTPS client for lcl sync (ureq on rustls): ring, rustls-webpki
+    # and untrusted are ISC, subtle is BSD-3-Clause, and webpki-roots,
+    # Mozilla's root certificates as data, is CDLA-Permissive-2.0.
+    "ISC",
+    "BSD-3-Clause",
+    "CDLA-Permissive-2.0",
 ]
 confidence-threshold = 0.8
 

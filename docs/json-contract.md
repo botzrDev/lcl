@@ -27,7 +27,7 @@ With `--json`, an error is one line: the last line of stderr, and the only one t
 ### `Error`
 
 ```json
-{"error": {"kind": "'usage'|'not_found'|'conflict'|'schema'|'io'|'other'", "message": "string"}}
+{"error": {"kind": "'usage'|'not_found'|'conflict'|'schema'|'io'|'network'|'auth'|'other'", "message": "string"}}
 ```
 
 - `usage` comes with exit 2. Every other kind comes with exit 1.
@@ -35,6 +35,8 @@ With `--json`, an error is one line: the last line of stderr, and the only one t
 - `conflict`: the change is refused because of what is stored, as deleting a project that still has issues. A command that names an issue, a doc, a comment or a label in the trash is a conflict, and its message names the `restore` command.
 - `schema`: the file's schema is newer than this build reads, or is not a schema lcl wrote.
 - `io`: a file could not be read or written.
+- `network`: the sync service could not be reached, or answered outside [the protocol](sync-protocol.md). Edits stay in the file and go at the next `lcl sync`.
+- `auth`: `LCL_SYNC_TOKEN` is not set, or the sync service refused the token.
 
 Other stderr lines are notices. Each starts with `lcl:`. Without `--json`, an error is `Error: MESSAGE`.
 
@@ -207,6 +209,22 @@ The records of one type an import didn't know, in type order. A later `lcl-expor
 {"id": "string", "title": "string", "content": "string", "parent_id": "string|null", "created_at": "integer", "updated_at": "integer", "deleted_at": "integer|null"}
 ```
 
+### `SyncStatus`
+
+A workspace's place in sync. `workspace` is the service's id for its replica, and `machine` this machine's. `last_sync` is when the last `lcl sync` (or `lcl sync start`) finished, null until one has. `numbers_left` counts the issue numbers this machine holds.
+
+```json
+{"server": "string", "workspace": "string", "machine": "string", "last_sync": "integer|null", "numbers_left": "integer"}
+```
+
+### `SyncConflict`
+
+A change of this machine's that the service did not apply: its record was purged there, or the change conflicted with another. `kind` and `record` name the record, `field` the field (`*` for a create). `identifier` is the issue's `KEY-N`, for an issue or one of its comments.
+
+```json
+{"kind": "string", "record": "string", "identifier": "string|null", "field": "string"}
+```
+
 ## Workspaces
 
 ### `lcl init`
@@ -233,8 +251,10 @@ The records of one type an import didn't know, in type order. A later `lcl-expor
 
 ### `lcl workspace show`
 
+`sync` is null when the workspace doesn't sync.
+
 ```json
-{"name": "string", "key": "string", "description": "string", "path": "string", "schema_version": "integer", "created_at": "integer"}
+{"name": "string", "key": "string", "description": "string", "path": "string", "schema_version": "integer", "created_at": "integer", "sync": "SyncStatus|null"}
 ```
 
 ## Issues
@@ -622,6 +642,34 @@ What the file holds, as counts, and the number the next new issue gets. With `--
   "dry_run": "boolean",
   "skipped": ["SkippedRecords"]
 }
+```
+
+## Sync
+
+See [the protocol](sync-protocol.md). The token is read from `LCL_SYNC_TOKEN`.
+
+### `lcl sync start`
+
+`workspace` is the service's id for the new replica, and `machine` this machine's. `sent` counts the changes pushed: the workspace's whole history.
+
+```json
+{"server": "string", "workspace": "string", "machine": "string", "sent": "integer", "numbers_left": "integer"}
+```
+
+### `lcl sync`
+
+`sent` counts the changes pushed. `not_applied` lists those the service accepted but did not apply.
+
+```json
+{"sent": "integer", "numbers_left": "integer", "not_applied": ["SyncConflict"]}
+```
+
+### `lcl sync stop`
+
+The service and the replica the workspace synced with, which is left as it is.
+
+```json
+{"server": "string", "workspace": "string"}
 ```
 
 ## The terminal UI

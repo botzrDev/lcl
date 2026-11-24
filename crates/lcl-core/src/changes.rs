@@ -38,7 +38,7 @@ pub fn now_ms() -> i64 {
 /// as text orders them. It never goes back: when the wall clock is not past
 /// `prev`, the counter goes up instead, and past `MAX_COUNTER` the
 /// milliseconds do.
-pub fn next_clock(prev: Option<&str>, now_ms: i64) -> String {
+pub fn next_clock(prev: Option<&str>, now_ms: i64, machine: &str) -> String {
     let (ms, counter) = prev.and_then(parse_clock).unwrap_or((0, 0));
     let (ms, counter) = if now_ms > ms {
         (now_ms, 0)
@@ -47,7 +47,7 @@ pub fn next_clock(prev: Option<&str>, now_ms: i64) -> String {
     } else {
         (ms + 1, 0)
     };
-    format!("{ms:013}-{counter:04}-{LOCAL_MACHINE}")
+    format!("{ms:013}-{counter:04}-{machine}")
 }
 
 /// A clock's milliseconds and counter.
@@ -73,10 +73,11 @@ pub(crate) struct Pending {
 /// the triggers read them. Runs first in every write transaction.
 pub(crate) fn begin(conn: &Connection, author: Option<&str>) -> Result<Pending> {
     let clock_before = read_meta(conn, "clock")?;
+    let machine = crate::sync::machine(conn)?;
     put_meta(
         conn,
         "clock",
-        &next_clock(clock_before.as_deref(), now_ms()),
+        &next_clock(clock_before.as_deref(), now_ms(), &machine),
     )?;
     match author {
         Some(author) => put_meta(conn, "author", author)?,
@@ -442,26 +443,26 @@ mod tests {
     #[test]
     fn a_clock_follows_the_wall_clock_and_never_goes_back() {
         assert_eq!(
-            next_clock(None, 1_795_523_737_123),
+            next_clock(None, 1_795_523_737_123, "local"),
             "1795523737123-0000-local"
         );
-        let a = next_clock(None, 5);
+        let a = next_clock(None, 5, "local");
         assert_eq!(a, "0000000000005-0000-local");
         // The wall clock moves on: the counter starts again.
-        assert_eq!(next_clock(Some(&a), 6), "0000000000006-0000-local");
+        assert_eq!(next_clock(Some(&a), 6, "local"), "0000000000006-0000-local");
         // It stands still or goes back: the counter goes up.
-        let b = next_clock(Some(&a), 5);
+        let b = next_clock(Some(&a), 5, "local");
         assert_eq!(b, "0000000000005-0001-local");
-        assert_eq!(next_clock(Some(&b), 1), "0000000000005-0002-local");
+        assert_eq!(next_clock(Some(&b), 1, "local"), "0000000000005-0002-local");
         // Past the counter's last value, the milliseconds go up.
         assert_eq!(
-            next_clock(Some("0000000000005-9999-local"), 1),
+            next_clock(Some("0000000000005-9999-local"), 1, "local"),
             "0000000000006-0000-local"
         );
         // Text order is clock order.
         let mut clocks = vec![a.clone(), b.clone()];
-        clocks.push(next_clock(Some(&b), 5));
-        clocks.push(next_clock(Some(&b), 1_000_000));
+        clocks.push(next_clock(Some(&b), 5, "local"));
+        clocks.push(next_clock(Some(&b), 1_000_000, "local"));
         let mut sorted = clocks.clone();
         sorted.sort();
         assert_eq!(sorted, clocks);

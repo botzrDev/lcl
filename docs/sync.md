@@ -1,6 +1,6 @@
 # Sync (design note)
 
-Status: approved by the project's owner on 2026-11-24 (LOCL-22). The change log is built (LOCL-34, schema 14), and import skips unknown record types (LOCL-48); sync itself is not built yet. The service lives in a separate closed repository; this note says what it needs from the data, and what the client changes. LOCL-30 builds sync from it.
+Status: approved by the project's owner on 2026-11-24 (LOCL-22). The change log is built (LOCL-34, schema 14), and import skips unknown record types (LOCL-48). Sync is being built (LOCL-30), from [the protocol note](sync-protocol.md): opting in, pushing and numbers from blocks so far. The service lives in a separate closed repository; this note says what it needs from the data, and what the client changes. LOCL-30 builds sync from it.
 
 ## What sync is
 

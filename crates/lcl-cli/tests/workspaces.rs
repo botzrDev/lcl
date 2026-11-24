@@ -892,7 +892,8 @@ fn workspace_show_json() {
             "key",
             "name",
             "path",
-            "schema_version"
+            "schema_version",
+            "sync"
         ]
     );
     let created = shown["created_at"]
@@ -908,7 +909,7 @@ fn workspace_show_json() {
         .join("dreamd.sqlite")
         .display()
         .to_string();
-    let exact = |description: &str| json!({"created_at": created, "description": description, "key": "DRM", "name": "dreamd", "path": path, "schema_version": SCHEMA_VERSION});
+    let exact = |description: &str| json!({"created_at": created, "description": description, "key": "DRM", "name": "dreamd", "path": path, "schema_version": SCHEMA_VERSION, "sync": null});
     assert_eq!(shown, exact(""));
     // A description that is set is shown as it is; here an import's header sets it.
     let header = "{\"type\":\"workspace\",\"format\":\"lcl-export/1\",\"key\":\"DRM\",\"description\":\"dreamd's tracker\"}\n";

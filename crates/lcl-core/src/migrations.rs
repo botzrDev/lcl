@@ -124,7 +124,11 @@ fn v14(tx: &Transaction<'_>) -> Result<Vec<String>> {
     for m in V14_MEMBERSHIPS {
         tx.execute_batch(&v14_membership_triggers(m))?;
     }
-    let clock = crate::changes::next_clock(None, crate::changes::now_ms());
+    let clock = crate::changes::next_clock(
+        None,
+        crate::changes::now_ms(),
+        crate::changes::LOCAL_MACHINE,
+    );
     crate::db::put_meta(tx, "clock", &clock)?;
     for t in V14_RECORDS {
         tx.execute(

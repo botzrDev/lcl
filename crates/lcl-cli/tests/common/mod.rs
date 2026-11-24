@@ -231,6 +231,8 @@ impl Env {
             // comment authors either. USER is left as it is; a test that
             // checks an author sets or removes it.
             .env_remove("LCL_AUTHOR")
+            // Nor may a real token for a sync service reach one.
+            .env_remove("LCL_SYNC_TOKEN")
             // Human output shows timestamps in local time; tests read them
             // in UTC unless they set TZ themselves. Windows doesn't read TZ:
             // there the tests need the system zone to be UTC, as it is on CI.

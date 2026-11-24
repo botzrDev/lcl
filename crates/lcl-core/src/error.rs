@@ -392,6 +392,35 @@ pub enum LclError {
     BadRegistryVersionNumber(i64),
     #[error("lcl made an export that it would refuse to import ({0}); this is a bug in lcl")]
     ExportRoundTrip(String),
+    #[error("{0:?} is not a sync service address: give https://HOST (http:// only for localhost)")]
+    SyncAddress(String),
+    #[error("set LCL_SYNC_TOKEN to your token for the sync service")]
+    SyncNoToken,
+    #[error("the sync service at {server} refused the token: {message}")]
+    SyncAuth { server: String, message: String },
+    #[error(
+        "can't reach the sync service at {server}: {detail}; edits stay in this file, and go at the next lcl sync"
+    )]
+    SyncNetwork { server: String, detail: String },
+    #[error("the sync service at {server} has no replica of this workspace")]
+    ReplicaNotFound { server: String },
+    #[error("the sync service at {server} refused the request ({status}): {message}")]
+    SyncRefused {
+        server: String,
+        status: u16,
+        message: String,
+    },
+    #[error("{}", match seconds {
+        Some(s) => format!("this machine's clock is {s} seconds ahead of the sync service's; set it right, then run lcl sync again"),
+        None => "this machine's clock is ahead of the sync service's; set it right, then run lcl sync again".to_string(),
+    })]
+    ClockAhead { seconds: Option<i64> },
+    #[error("this workspace syncs with {server} already; lcl sync sends and receives changes")]
+    SyncsAlready { server: String },
+    #[error("this workspace doesn't sync; lcl sync start URL opts it in")]
+    NotSyncing,
+    #[error("this machine has used the issue numbers it holds; run lcl sync to get more")]
+    NumbersUsed,
 }
 pub type Result<T> = std::result::Result<T, LclError>;
 
@@ -401,6 +430,11 @@ pub type Result<T> = std::result::Result<T, LclError>;
 pub enum ErrorKind {
     /// The command line is wrong, whatever is stored: exit 2.
     Usage,
+    /// The sync service couldn't be reached, or answered outside the
+    /// protocol: try again later.
+    Network,
+    /// There is no token for the sync service, or it refused the one given.
+    Auth,
     /// Something named isn't there.
     NotFound,
     /// The request conflicts with what is stored.
@@ -415,6 +449,8 @@ impl ErrorKind {
     pub fn as_str(self) -> &'static str {
         match self {
             ErrorKind::Usage => "usage",
+            ErrorKind::Network => "network",
+            ErrorKind::Auth => "auth",
             ErrorKind::NotFound => "not_found",
             ErrorKind::Conflict => "conflict",
             ErrorKind::Schema => "schema",
@@ -448,7 +484,16 @@ impl LclError {
             | LclError::BadRegistryVersion(_)
             | LclError::BadRegistryVersionNumber(_)
             | LclError::ExportRoundTrip(_)
+            | LclError::SyncRefused { .. }
             | LclError::BackupLocked { .. } => Other,
+            LclError::SyncNetwork { .. } => Network,
+            LclError::SyncNoToken | LclError::SyncAuth { .. } => Auth,
+            LclError::SyncAddress(_) => Usage,
+            LclError::ReplicaNotFound { .. } => NotFound,
+            LclError::ClockAhead { .. }
+            | LclError::SyncsAlready { .. }
+            | LclError::NotSyncing
+            | LclError::NumbersUsed => Conflict,
             LclError::Io(_)
             | LclError::BackupFailed { .. }
             | LclError::SnapshotFailed { .. }
