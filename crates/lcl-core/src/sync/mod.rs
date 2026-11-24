@@ -4,6 +4,8 @@
 //! never opted in has none of the `meta` keys below, and nothing here is
 //! called for it: only the sync commands reach the network.
 
+mod apply;
+
 use crate::db::{next_issue_number, put_meta, read_meta};
 use crate::error::{LclError, Result};
 use crate::models::now;
@@ -19,6 +21,8 @@ pub const TOKEN_VAR: &str = "LCL_SYNC_TOKEN";
 /// The most changes a push carries, unless one write has more: a write
 /// goes whole, alone if it must.
 const PUSH_MAX: usize = 500;
+/// The most changes a pull asks for at once.
+const PULL_MAX: usize = 500;
 /// The fewest numbers a machine holds before it asks for another block.
 const LOW_WATER: i64 = 50;
 /// The most blocks a machine holds.
@@ -96,6 +100,29 @@ struct PushReply {
     accepted: Vec<Accepted>,
 }
 
+/// The replica a machine joins, as the service describes it.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ReplicaInfo {
+    pub key: String,
+    pub name: String,
+    pub description: String,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct Joined {
+    pub machine: String,
+    pub block: Block,
+    pub workspace: ReplicaInfo,
+}
+
+/// A page of the replica's log.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct Page {
+    pub changes: Vec<Change>,
+    pub more: bool,
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct MachineBody<'a> {
     machine: &'a str,
@@ -111,7 +138,10 @@ pub trait Service {
     /// Its address, as the workspace keeps it.
     fn server(&self) -> &str;
     fn create(&self, replica: &NewReplica) -> Result<Created>;
+    fn join(&self, workspace: &str) -> Result<Joined>;
     fn push(&self, workspace: &str, machine: &str, changes: &[Change]) -> Result<Vec<Accepted>>;
+    /// The accepted changes after `after`, at most `limit`, in `seq` order.
+    fn pull(&self, workspace: &str, after: i64, limit: usize) -> Result<Page>;
     fn block(&self, workspace: &str, machine: &str) -> Result<Block>;
 }
 
@@ -232,6 +262,28 @@ impl Service for Http {
         self.post("/workspaces", replica)
     }
 
+    fn join(&self, workspace: &str) -> Result<Joined> {
+        self.reply(
+            self.agent
+                .post(self.url(&format!("/workspaces/{workspace}/machines")))
+                .header("Authorization", format!("Bearer {}", self.token))
+                .header("User-Agent", user_agent())
+                .send_empty(),
+        )
+    }
+
+    fn pull(&self, workspace: &str, after: i64, limit: usize) -> Result<Page> {
+        self.reply(
+            self.agent
+                .get(self.url(&format!(
+                    "/workspaces/{workspace}/changes?after={after}&limit={limit}"
+                )))
+                .header("Authorization", format!("Bearer {}", self.token))
+                .header("User-Agent", user_agent())
+                .call(),
+        )
+    }
+
     fn push(&self, workspace: &str, machine: &str, changes: &[Change]) -> Result<Vec<Accepted>> {
         let reply: PushReply = self.post(
             &format!("/workspaces/{workspace}/changes"),
@@ -282,12 +334,24 @@ pub struct SyncConflict {
     pub field: String,
 }
 
+/// What `lcl sync join` did.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct SyncJoined {
+    pub server: String,
+    pub workspace: String,
+    pub machine: String,
+    pub received: usize,
+    pub numbers_left: i64,
+}
+
 /// What `lcl sync` did.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct SyncReport {
     pub sent: usize,
+    pub received: usize,
     pub numbers_left: i64,
     pub not_applied: Vec<SyncConflict>,
+    pub overwritten: Vec<SyncConflict>,
 }
 
 /// What `lcl sync stop` forgot.
@@ -475,6 +539,19 @@ impl Store {
             Ok(())
         })?;
         let (sent, _) = self.push_pending(svc, &created.workspace, &created.machine)?;
+        // When the replica holds this machine's changes and no one else's,
+        // the next pull starts after them.
+        self.write(|tx| {
+            let (count, max): (i64, Option<i64>) = tx.query_row(
+                "SELECT COUNT(*), MAX(synced) FROM changes WHERE synced IS NOT NULL",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?;
+            if max == Some(count) {
+                put_meta(tx, SEQ, &count.to_string())?;
+            }
+            Ok(())
+        })?;
         let numbers_left = self.top_up(svc, &created.workspace, &created.machine)?;
         Ok(SyncStarted {
             server: svc.server().to_string(),
@@ -485,18 +562,132 @@ impl Store {
         })
     }
 
-    /// Sends this machine's changes the service doesn't have, and tops up
-    /// its numbers. Refused for a workspace that never opted in.
+    /// Joins the replica `workspace` from this machine, into this
+    /// workspace, which must be empty and have the replica's key: it pulls
+    /// everything, and gets a block of numbers.
+    pub fn sync_join(&mut self, svc: &dyn Service, workspace: &str) -> Result<SyncJoined> {
+        if workspace.is_empty()
+            || workspace
+                .chars()
+                .any(|c| c.is_whitespace() || "/?#%".contains(c))
+        {
+            return Err(LclError::SyncBadId(workspace.to_string()));
+        }
+        if let Some(s) = self.sync_status()? {
+            return Err(LclError::SyncsAlready { server: s.server });
+        }
+        let key = self.read(|conn| {
+            let mut has = crate::transfer::contents(conn)?;
+            let logged: i64 = conn.query_row("SELECT COUNT(*) FROM changes", [], |r| r.get(0))?;
+            if has.is_empty() && logged > 0 {
+                has = "a history of records since purged".into();
+            }
+            if !has.is_empty() {
+                return Err(LclError::SyncJoinNotEmpty {
+                    workspace: read_meta(conn, "name")?.unwrap_or_default(),
+                    has,
+                });
+            }
+            crate::db::read_key(conn)
+        })?;
+        let joined = svc.join(workspace)?;
+        if !joined.workspace.key.eq_ignore_ascii_case(&key) {
+            return Err(LclError::SyncKeyMismatch {
+                replica: joined.workspace.key,
+                workspace: key,
+            });
+        }
+        self.write(|tx| {
+            put_meta(tx, SERVER, svc.server())?;
+            put_meta(tx, WORKSPACE, workspace)?;
+            put_meta(tx, MACHINE, &joined.machine)?;
+            put_meta(tx, SEQ, "0")?;
+            put_blocks(tx, &[joined.block])?;
+            if read_meta(tx, "description")?.unwrap_or_default().is_empty() {
+                put_meta(tx, "description", &joined.workspace.description)?;
+            }
+            Ok(())
+        })?;
+        let applied = self.pull_and_apply(svc, workspace, &joined.machine)?;
+        let numbers_left = self.top_up(svc, workspace, &joined.machine)?;
+        Ok(SyncJoined {
+            server: svc.server().to_string(),
+            workspace: workspace.to_string(),
+            machine: joined.machine,
+            received: applied.received,
+            numbers_left,
+        })
+    }
+
+    /// Sends this machine's changes the service doesn't have, applies the
+    /// others', and tops up its numbers. Refused for a workspace that never
+    /// opted in.
     pub fn sync(&mut self, svc: &dyn Service) -> Result<SyncReport> {
         let Some(s) = self.sync_status()? else {
             return Err(LclError::NotSyncing);
         };
         let (sent, not_applied) = self.push_pending(svc, &s.workspace, &s.machine)?;
+        let applied = self.pull_and_apply(svc, &s.workspace, &s.machine)?;
         let numbers_left = self.top_up(svc, &s.workspace, &s.machine)?;
         Ok(SyncReport {
             sent,
+            received: applied.received,
             numbers_left,
             not_applied,
+            overwritten: applied.overwritten,
+        })
+    }
+
+    /// Pulls every change after the last one applied, then applies them in
+    /// one transaction: all or none.
+    fn pull_and_apply(
+        &mut self,
+        svc: &dyn Service,
+        workspace: &str,
+        machine: &str,
+    ) -> Result<apply::Applied> {
+        let start: i64 = self
+            .read(|conn| read_meta(conn, SEQ))?
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        let mut pulled: Vec<Change> = Vec::new();
+        let mut after = start;
+        loop {
+            let page = svc.pull(workspace, after, PULL_MAX)?;
+            for c in &page.changes {
+                match c.seq {
+                    Some(seq) if seq > after => after = seq,
+                    _ => {
+                        return Err(LclError::SyncNetwork {
+                            server: svc.server().to_string(),
+                            detail: "it sent changes out of order".into(),
+                        });
+                    }
+                }
+            }
+            let done = !page.more || page.changes.is_empty();
+            pulled.extend(page.changes);
+            if done {
+                break;
+            }
+        }
+        if after == start {
+            return Ok(apply::Applied::default());
+        }
+        self.write(|tx| {
+            let applied = apply::apply(tx, &pulled, machine)?;
+            put_meta(tx, SEQ, &after.to_string())?;
+            Ok(applied)
+        })
+        .map_err(|e| match e {
+            // Checked at the commit: what the pull left names a record
+            // that isn't here.
+            LclError::Db(rusqlite::Error::SqliteFailure(f, _))
+                if f.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_FOREIGNKEY =>
+            {
+                LclError::SyncDangling
+            }
+            e => e,
         })
     }
 
@@ -552,7 +743,6 @@ impl Store {
                         refused.push(conflict(tx, c)?);
                     }
                 }
-                put_meta(tx, AT, &now().to_string())?;
                 Ok(refused)
             })?);
             sent += batch.len();

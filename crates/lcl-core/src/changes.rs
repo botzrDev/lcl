@@ -59,7 +59,7 @@ fn parse_clock(clock: &str) -> Option<(i64, i64)> {
 }
 
 /// The epoch seconds a clock was read at.
-fn clock_seconds(clock: &str) -> i64 {
+pub(crate) fn clock_seconds(clock: &str) -> i64 {
     parse_clock(clock).map_or(0, |(ms, _)| ms.div_euclid(1000))
 }
 
@@ -108,7 +108,7 @@ pub(crate) fn finish(conn: &Connection, pending: Pending) -> Result<()> {
     Ok(())
 }
 
-fn last_seq(conn: &Connection) -> Result<i64> {
+pub(crate) fn last_seq(conn: &Connection) -> Result<i64> {
     Ok(
         conn.query_row("SELECT COALESCE(MAX(seq), 0) FROM changes", [], |r| {
             r.get(0)

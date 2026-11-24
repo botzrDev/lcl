@@ -4,100 +4,10 @@
 mod common;
 mod sync_service;
 
-use common::{Env, Out, error_text};
+use common::Env;
 use serde_json::{Value, json};
-use std::path::Path;
+use sync_service::client::*;
 use sync_service::{Service, TOKEN};
-
-/// `lcl ARGS` with the service's token in LCL_SYNC_TOKEN.
-fn with_token(env: &Env, args: &[&str]) -> Out {
-    env.lcl_env(&[("LCL_SYNC_TOKEN", TOKEN)], args)
-}
-
-#[track_caller]
-fn ok(env: &Env, args: &[&str]) -> Value {
-    let mut argv = args.to_vec();
-    argv.push("--json");
-    with_token(env, &argv).assert_ok().json()
-}
-
-/// A workspace DEMO with issue DEMO-1.
-fn demo() -> Env {
-    let env = Env::new();
-    env.lcl(&["init", "demo", "--key", "DEMO"]).assert_ok();
-    env.create("one");
-    env
-}
-
-/// The file's change log, each row as it travels, with its `synced`.
-fn local_log(db: &Path) -> Vec<(Value, Option<i64>)> {
-    let conn = rusqlite::Connection::open(db).unwrap();
-    let mut stmt = conn
-        .prepare(
-            "SELECT seq, clock, kind, record, field, old, new, author, synced
-             FROM changes ORDER BY seq",
-        )
-        .unwrap();
-    let json = |t: Option<String>| {
-        t.map(|t| serde_json::from_str::<Value>(&t).unwrap())
-            .unwrap_or(Value::Null)
-    };
-    stmt.query_map([], |r| {
-        Ok((
-            json!({
-                "id": r.get::<_, i64>(0)?,
-                "clock": r.get::<_, String>(1)?,
-                "kind": r.get::<_, String>(2)?,
-                "record": r.get::<_, String>(3)?,
-                "field": r.get::<_, String>(4)?,
-                "old": json(r.get(5)?),
-                "new": json(r.get(6)?),
-                "author": r.get::<_, Option<String>>(7)?,
-            }),
-            r.get::<_, Option<i64>>(8)?,
-        ))
-    })
-    .unwrap()
-    .collect::<Result<_, _>>()
-    .unwrap()
-}
-
-fn meta(db: &Path, key: &str) -> Option<String> {
-    let conn = rusqlite::Connection::open(db).unwrap();
-    conn.query_row("SELECT value FROM meta WHERE key = ?1", [key], |r| r.get(0))
-        .ok()
-}
-
-fn unsynced(db: &Path) -> Vec<Value> {
-    local_log(db)
-        .into_iter()
-        .filter(|(_, s)| s.is_none())
-        .map(|(c, _)| c)
-        .collect()
-}
-
-/// The issue's id, from `issue show`.
-fn issue_id(env: &Env, n: i64) -> String {
-    let shown = ok(env, &["issue", "show", &n.to_string()]);
-    shown["issue"]["id"].as_str().unwrap().to_string()
-}
-
-/// The kind and message of a `--json` failure, after checking it exits
-/// `code`. (contract.rs checks that the exit is the same without `--json`.)
-#[track_caller]
-fn fails(env: &Env, token: Option<&str>, args: &[&str], code: i32) -> (String, String) {
-    let vars: Vec<(&str, &str)> = token.map(|t| ("LCL_SYNC_TOKEN", t)).into_iter().collect();
-    let mut argv = args.to_vec();
-    argv.push("--json");
-    let out = env.lcl_env(&vars, &argv);
-    assert_eq!(out.code, code, "{argv:?}\n{out:#?}");
-    assert_eq!(out.stdout, "", "{out:#?}");
-    let error: Value = serde_json::from_str(out.stderr.lines().last().unwrap()).unwrap();
-    let kind = error["error"]["kind"].as_str().unwrap().to_string();
-    let message = error["error"]["message"].as_str().unwrap().to_string();
-    assert_eq!(out.stderr, error_text(&argv, &kind, &message));
-    (kind, message)
-}
 
 #[test]
 fn start_makes_the_replica_from_this_machines_whole_log() {
@@ -227,14 +137,17 @@ fn sync_sends_what_the_service_lacks_once() {
     assert!(new.len() >= 3, "{new:#?}");
     assert_eq!(
         ok(&env, &["sync"]),
-        json!({"sent": new.len(), "numbers_left": 100, "not_applied": []})
+        json!({"sent": new.len(), "received": 0, "numbers_left": 100, "not_applied": [], "overwritten": []})
     );
     assert_eq!(
         ok(&env, &["sync"]),
-        json!({"sent": 0, "numbers_left": 100, "not_applied": []})
+        json!({"sent": 0, "received": 0, "numbers_left": 100, "not_applied": [], "overwritten": []})
     );
     let text = with_token(&env, &["sync"]).assert_ok().stdout.clone();
-    assert_eq!(text, "Sent 0 changes; 100 issue numbers held\n");
+    assert_eq!(
+        text,
+        "Sent 0 changes, received 0 changes; 100 issue numbers held\n"
+    );
 
     // Writes before opting in carry `local`, after it the machine's id.
     let log = local_log(&env.db_path());
@@ -440,23 +353,21 @@ fn a_clock_far_ahead_of_the_services_is_refused_whole() {
 }
 
 #[test]
-fn changes_the_service_did_not_apply_are_reported() {
+fn changes_the_service_did_not_apply_are_reported_and_its_purges_win() {
     let svc = Service::start();
     let env = demo();
+    env.create("two");
     env.lcl(&["label", "create", "bug"]).assert_ok();
-    ok(&env, &["sync", "start", &svc.url]);
+    let started = ok(&env, &["sync", "start", &svc.url]);
+    let ws = started["workspace"].as_str().unwrap().to_string();
     let issue = issue_id(&env, 1);
     let label = ok(&env, &["label", "list"])[0]["id"]
         .as_str()
         .unwrap()
         .to_string();
     // Purged there, as from a browser, before this machine heard of it.
-    {
-        let mut s = svc.state();
-        let ws = s.replicas.keys().next().unwrap().clone();
-        s.purge(&ws, "issue", &issue);
-        s.purge(&ws, "label", &label);
-    }
+    svc.state().purge(&ws, "issue", &issue);
+    svc.state().purge(&ws, "label", &label);
     env.lcl(&["issue", "update", "1", "--title", "edited"])
         .assert_ok();
     let comment = ok(&env, &["issue", "comment", "1", "too late"])["id"]
@@ -473,12 +384,30 @@ fn changes_the_service_did_not_apply_are_reported() {
             {"kind": "label", "record": label, "identifier": null, "field": "deleted_at"},
         ])
     );
-    env.lcl(&["issue", "update", "1", "--priority", "low"])
+    // Then the purges came, and won: the issue went with its comment.
+    assert_eq!(report["received"], 2);
+    assert_eq!(fails(&env, None, &["issue", "show", "1"], 1).0, "not_found");
+    assert_eq!(ok(&env, &["label", "list"]), json!([]));
+    assert!(unsynced(&env.db_path()).is_empty(), "nothing to send back");
+    let conn = rusqlite::Connection::open(env.db_path()).unwrap();
+    let rows: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM changes WHERE record IN (?1, ?2, ?3) AND field <> '*'",
+            [&issue, &comment, &label],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(rows, 0, "a purge takes the history with it");
+    drop(conn);
+
+    let two = issue_id(&env, 2);
+    svc.state().purge(&ws, "issue", &two);
+    env.lcl(&["issue", "update", "2", "--priority", "low"])
         .assert_ok();
     let text = with_token(&env, &["sync"]).assert_ok().stdout.clone();
     assert_eq!(
         text,
-        "Sent 1 change; 100 issue numbers held\nNot applied by the service (purged there, or in conflict): DEMO-1 priority\n"
+        "Sent 1 change, received 1 change; 100 issue numbers held\nNot applied by the service (purged there, or in conflict): DEMO-2 priority\n"
     );
 }
 

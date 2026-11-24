@@ -203,7 +203,8 @@ enum Commands {
     /// Open this workspace in a terminal UI.
     Tui,
     /// Keep this workspace in step with a sync service: send this
-    /// machine's changes, and top up its issue numbers.
+    /// machine's changes, receive the others', and top up its issue
+    /// numbers.
     ///
     /// Opt in first with lcl sync start URL. The token for the service is
     /// read from LCL_SYNC_TOKEN, and never stored. Only the sync commands
@@ -227,6 +228,17 @@ enum SyncCmd {
         /// The service's address: https://HOST (http:// only for localhost).
         #[arg(value_name = "URL")]
         url: String,
+    },
+    /// Join a replica from another machine, into this workspace: it must be
+    /// empty and have the replica's key (make one with lcl workspace create
+    /// NAME --key KEY). It receives everything, and its own issue numbers.
+    Join {
+        /// The service's address, as lcl sync start was given it.
+        #[arg(value_name = "URL")]
+        url: String,
+        /// The replica's id, as lcl sync start printed it.
+        #[arg(value_name = "ID")]
+        id: String,
     },
     /// Forget the sync service. The file keeps everything, the replica is
     /// left as it is, and issues are numbered from the file's counter
@@ -3019,6 +3031,26 @@ fn run(cli: Cli) -> Result<()> {
                             counted_list(&[(s.sent as i64, "change", "changes")]),
                             s.numbers_left
                         );
+                        outln!(
+                            "Join from another machine with: lcl sync join {} {}",
+                            s.server,
+                            s.workspace
+                        );
+                    }
+                }
+                Some(SyncCmd::Join { url, id }) => {
+                    let service = lcl_core::sync::Http::new(&url, token())?;
+                    let s = store.sync_join(&service, &id)?;
+                    if cli.json {
+                        print_json(&s)?;
+                    } else {
+                        outln!(
+                            "Joined workspace {} at {}: received {}; {} issue numbers held",
+                            s.workspace,
+                            s.server,
+                            counted_list(&[(s.received as i64, "change", "changes")]),
+                            s.numbers_left
+                        );
                     }
                 }
                 Some(SyncCmd::Stop) => {
@@ -3043,20 +3075,24 @@ fn run(cli: Cli) -> Result<()> {
                         print_json(&r)?;
                     } else {
                         outln!(
-                            "Sent {}; {} issue numbers held",
+                            "Sent {}, received {}; {} issue numbers held",
                             counted_list(&[(r.sent as i64, "change", "changes")]),
+                            counted_list(&[(r.received as i64, "change", "changes")]),
                             r.numbers_left
                         );
+                        let what = |c: &lcl_core::sync::SyncConflict| match &c.identifier {
+                            Some(id) if c.kind == "issue" => format!("{id} {}", c.field),
+                            Some(id) => format!("{} {} on {id} {}", c.kind, c.record, c.field),
+                            None => format!("{} {} {}", c.kind, c.record, c.field),
+                        };
                         for c in &r.not_applied {
-                            let what = match &c.identifier {
-                                Some(id) if c.kind == "issue" => id.clone(),
-                                Some(id) => format!("{} {} on {id}", c.kind, c.record),
-                                None => format!("{} {}", c.kind, c.record),
-                            };
                             outln!(
-                                "Not applied by the service (purged there, or in conflict): {what} {}",
-                                c.field
+                                "Not applied by the service (purged there, or in conflict): {}",
+                                what(c)
                             );
+                        }
+                        for c in &r.overwritten {
+                            outln!("Overwritten by a later change from elsewhere: {}", what(c));
                         }
                     }
                 }

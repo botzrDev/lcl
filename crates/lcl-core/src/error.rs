@@ -421,6 +421,34 @@ pub enum LclError {
     NotSyncing,
     #[error("this machine has used the issue numbers it holds; run lcl sync to get more")]
     NumbersUsed,
+    #[error("{0:?} is not a replica's id: give the id lcl sync start printed")]
+    SyncBadId(String),
+    #[error(
+        "workspace {workspace:?} is not empty: it has {has}; join into an empty workspace (make one with lcl workspace create NAME --key KEY)"
+    )]
+    SyncJoinNotEmpty { workspace: String, has: String },
+    #[error(
+        "the replica is for key {replica} but this workspace's key is {workspace}; join from a workspace with key {replica}"
+    )]
+    SyncKeyMismatch { replica: String, workspace: String },
+    #[error(
+        "the sync service sent a change this lcl doesn't know ({kind} {field}); upgrade lcl, then run lcl sync again"
+    )]
+    SyncUnknownChange { kind: String, field: String },
+    #[error(
+        "can't apply change {seq} from the sync service ({kind} {record} {field}): {detail}; nothing was applied"
+    )]
+    SyncCantApply {
+        seq: i64,
+        kind: String,
+        record: String,
+        field: String,
+        detail: String,
+    },
+    #[error(
+        "the changes from the sync service would leave a record naming one that isn't here (a parent, a project, a milestone, a cycle); nothing was applied"
+    )]
+    SyncDangling,
 }
 pub type Result<T> = std::result::Result<T, LclError>;
 
@@ -488,12 +516,16 @@ impl LclError {
             | LclError::BackupLocked { .. } => Other,
             LclError::SyncNetwork { .. } => Network,
             LclError::SyncNoToken | LclError::SyncAuth { .. } => Auth,
-            LclError::SyncAddress(_) => Usage,
+            LclError::SyncAddress(_) | LclError::SyncBadId(_) => Usage,
+            LclError::SyncUnknownChange { .. } => Schema,
+            LclError::SyncCantApply { .. } | LclError::SyncDangling => Other,
             LclError::ReplicaNotFound { .. } => NotFound,
             LclError::ClockAhead { .. }
             | LclError::SyncsAlready { .. }
             | LclError::NotSyncing
-            | LclError::NumbersUsed => Conflict,
+            | LclError::NumbersUsed
+            | LclError::SyncJoinNotEmpty { .. }
+            | LclError::SyncKeyMismatch { .. } => Conflict,
             LclError::Io(_)
             | LclError::BackupFailed { .. }
             | LclError::SnapshotFailed { .. }

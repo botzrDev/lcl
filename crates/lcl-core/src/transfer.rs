@@ -1668,7 +1668,7 @@ impl Store {
 }
 
 /// What the workspace holds, as "1 issue and 2 labels"; "" when nothing.
-fn contents(conn: &Connection) -> Result<String> {
+pub(crate) fn contents(conn: &Connection) -> Result<String> {
     let mut parts = vec![];
     for (table, one, many) in [
         ("issues", "issue", "issues"),

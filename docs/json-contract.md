@@ -219,7 +219,7 @@ A workspace's place in sync. `workspace` is the service's id for its replica, an
 
 ### `SyncConflict`
 
-A change of this machine's that the service did not apply: its record was purged there, or the change conflicted with another. `kind` and `record` name the record, `field` the field (`*` for a create). `identifier` is the issue's `KEY-N`, for an issue or one of its comments.
+A change of this machine's that the service did not apply (its record was purged there, or the change conflicted with another), or that a later change from elsewhere overwrote. `kind` and `record` name the record, `field` the field (`*` for a create). `identifier` is the issue's `KEY-N`, for an issue or one of its comments.
 
 ```json
 {"kind": "string", "record": "string", "identifier": "string|null", "field": "string"}
@@ -656,12 +656,20 @@ See [the protocol](sync-protocol.md). The token is read from `LCL_SYNC_TOKEN`.
 {"server": "string", "workspace": "string", "machine": "string", "sent": "integer", "numbers_left": "integer"}
 ```
 
-### `lcl sync`
+### `lcl sync join`
 
-`sent` counts the changes pushed. `not_applied` lists those the service accepted but did not apply.
+`machine` is this machine's id. `received` counts the changes pulled: the replica's whole history.
 
 ```json
-{"sent": "integer", "numbers_left": "integer", "not_applied": ["SyncConflict"]}
+{"server": "string", "workspace": "string", "machine": "string", "received": "integer", "numbers_left": "integer"}
+```
+
+### `lcl sync`
+
+`sent` counts the changes pushed and `received` those pulled from elsewhere. `not_applied` lists this machine's changes that the service accepted but did not apply, and `overwritten` the fields where a change made here gave way to a later one.
+
+```json
+{"sent": "integer", "received": "integer", "numbers_left": "integer", "not_applied": ["SyncConflict"], "overwritten": ["SyncConflict"]}
 ```
 
 ### `lcl sync stop`

@@ -7,6 +7,8 @@
 //! can.
 #![allow(dead_code)]
 
+pub mod client;
+
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -124,6 +126,25 @@ impl State {
     pub fn inject(&mut self, workspace: &str, change: Value) -> i64 {
         let r = self.replicas.get_mut(workspace).expect("the replica");
         accept(r, "service", &change)
+    }
+
+    /// A change of the service's own to one field, made at `ms`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn change(
+        &mut self,
+        workspace: &str,
+        kind: &str,
+        record: &str,
+        field: &str,
+        old: Value,
+        new: Value,
+        ms: i64,
+    ) -> i64 {
+        let n = self.replicas[workspace].log.len() as i64 + 1;
+        self.inject(
+            workspace,
+            json!({"id": n, "clock": format!("{ms:013}-0000-service"), "kind": kind, "record": record, "field": field, "old": old, "new": new, "author": "web"}),
+        )
     }
 
     /// The service purges a record itself, as a browser edit would.

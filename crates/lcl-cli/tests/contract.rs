@@ -518,6 +518,7 @@ pinned! {
     export => "export",
     import => "import",
     sync_start => "sync start",
+    sync_join => "sync join",
     sync => "sync",
     sync_stop => "sync stop",
 }
@@ -589,8 +590,18 @@ mod cases {
         vec![with_token(&rich().env, &["sync", "start", &svc.url])]
     }
 
-    /// Nothing not applied; then an issue's change, a comment's and a
-    /// label's, each on a record the service purged.
+    pub fn sync_join() -> Vec<Value> {
+        let svc = Service::start();
+        let started = with_token(&rich().env, &["sync", "start", &svc.url]);
+        let env = Env::new();
+        j(&env, &["init", "demo", "--key", "DEMO"]);
+        let ws = started["workspace"].as_str().unwrap();
+        vec![with_token(&env, &["sync", "join", &svc.url, ws])]
+    }
+
+    /// Nothing to report; then an issue's change, a comment's and a
+    /// label's, each on a record the service purged; then a field this
+    /// machine changed, overwritten by another's later change.
     pub fn sync() -> Vec<Value> {
         let svc = Service::start();
         let env = rich().env;
@@ -598,7 +609,7 @@ mod cases {
         let started = with_token(&env, &["sync", "start", &svc.url]);
         let ws = started["workspace"].as_str().unwrap().to_string();
         let quiet = with_token(&env, &["sync"]);
-        let issue = id(&j(&env, &["issue", "show", "1"])["issue"]);
+        let issue = id(&j(&env, &["issue", "show", "4"])["issue"]);
         let label = j(&env, &["label", "list"])
             .as_array()
             .unwrap()
@@ -608,10 +619,20 @@ mod cases {
             .unwrap();
         svc.state().purge(&ws, "issue", &issue);
         svc.state().purge(&ws, "label", &label);
-        j(&env, &["issue", "update", "1", "--title", "edited"]);
-        j(&env, &["issue", "comment", "1", "late"]);
+        j(&env, &["issue", "update", "4", "--title", "edited"]);
+        j(&env, &["issue", "comment", "4", "late"]);
         j(&env, &["label", "delete", "gone-there"]);
-        vec![quiet, with_token(&env, &["sync"])]
+        let refused = with_token(&env, &["sync"]);
+
+        let other = Env::new();
+        j(&other, &["init", "demo", "--key", "DEMO"]);
+        with_token(&other, &["sync", "join", &svc.url, &ws]);
+        j(&env, &["issue", "update", "2", "--title", "here"]);
+        j(&other, &["issue", "update", "2", "--title", "there, later"]);
+        with_token(&other, &["sync"]);
+        let overwritten = with_token(&env, &["sync"]);
+        assert_eq!(overwritten["overwritten"][0]["identifier"], "DEMO-2");
+        vec![quiet, refused, overwritten]
     }
 
     pub fn sync_stop() -> Vec<Value> {
@@ -1071,8 +1092,9 @@ mod objects {
     #[test]
     fn object_sync_conflict() {
         let synced = super::cases::sync();
-        let conflicts = synced[1]["not_applied"].as_array().unwrap().clone();
+        let mut conflicts = synced[1]["not_applied"].as_array().unwrap().clone();
         assert_eq!(conflicts.len(), 3, "{conflicts:#?}");
+        conflicts.extend(synced[2]["overwritten"].as_array().unwrap().clone());
         pin_object("SyncConflict", &conflicts);
     }
 

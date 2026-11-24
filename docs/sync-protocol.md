@@ -1,6 +1,6 @@
 # Sync protocol (design note)
 
-Status: approved by the project's owner on 2026-11-24 (LOCL-30). Built so far: `lcl sync start`, `lcl sync` pushing and topping up numbers, `lcl sync stop`, and numbers from blocks. Not built yet: join, pull and applying what is pulled. It is the contract between the open client in this repository and the sync service, which lives in a separate closed repository. [sync.md](sync.md) says what sync does: number blocks, the change log, the later change wins per field, purge wins. This note says how the client and the service talk, and what each relies on the other for. Accounts, billing and the browser are the service's business, and not here.
+Status: approved by the project's owner on 2026-11-24 (LOCL-30). Built: every command, push, pull and applying what is pulled, and numbers from blocks. The tests run the client against a reference service that scripts its corrections. It is the contract between the open client in this repository and the sync service, which lives in a separate closed repository. [sync.md](sync.md) says what sync does: number blocks, the change log, the later change wins per field, purge wins. This note says how the client and the service talk, and what each relies on the other for. Accounts, billing and the browser are the service's business, and not here.
 
 ## Transport
 
@@ -116,7 +116,7 @@ For LOCL-40. `204`. Every machine's next request about it is `404`. Local files 
 - **Pushing twice.** A change it has already accepted, by machine id and `id`, is accepted again with the same `seq`, and not added twice. A client that lost a push's response pushes again.
 - **Clocks.** It refuses a push with a change whose clock is more than a minute ahead of its own, and never sends a clock that goes back on a machine's.
 - **The rules of sync.md**, applied to its replica in `seq` order: the later change wins per field; purge wins, and a later change to a purged record is accepted with `applied` false.
-- **Corrections.** When a change it accepts conflicts with a rule that two changes, each fine alone, can break together, it does not apply the later one (`applied` false). Then it adds the changes that make the replica whole again, from machine `service`, with clocks later than both, right after it in `seq`. The rules: a ref given to two issues, two duplicate marks on one issue, a parent loop (an issue's or a doc's), two labels (projects, cycles, milestones in a project) with one name, an issue's milestone outside its project, and an issue's `started_at`, `completed_at` and `canceled_at` not matching its status (they follow the status that won, sync.md). Those are ordinary changes, so every machine applies them by the rules below. After a machine has applied every change up to a `seq`, its records are the replica's at that `seq`, with its own unpushed changes on top.
+- **Corrections.** When a change it accepts conflicts with a rule that two changes, each fine alone, can break together, it does not apply the later one (`applied` false). Then it adds the changes that make the replica whole again, from machine `service`, with clocks later than both, right after it in `seq`. The rules: a ref given to two issues, two duplicate marks on one issue, a parent loop (an issue's or a doc's), a blocks loop or a duplicate loop, two labels (projects, cycles, milestones in a project) with one name, an issue's milestone outside its project, a record that names a purged one (an issue's parent, project, milestone or cycle, a doc's parent, a milestone's project), and an issue's `started_at`, `completed_at` and `canceled_at` not matching its status (they follow the status that won, sync.md). Those are ordinary changes, so every machine applies them by the rules below. After a machine has applied every change up to a `seq`, its records are the replica's at that `seq`, with its own unpushed changes on top.
 - **Numbers.** Blocks never overlap one another or the browser's numbers. A number handed out is never handed out again.
 
 ## The client
@@ -136,15 +136,17 @@ Only these commands touch the network. A workspace that never ran `lcl sync star
 
 ### Applying what it pulls
 
-A sync pulls every page first, then applies them all in one transaction, with foreign keys deferred to the commit. So no reader sees a state between two changes that the service corrects together, as a parent loop, and an interrupted sync applies nothing; the next one pulls the same changes again.
+A sync pushes first, then pulls every page, then applies them all in one transaction, with foreign keys checked at the commit. So no reader sees part of a pull, and an interrupted sync applies nothing; the next one pulls the same changes again. A change the file has already, by its `seq` (its own, or one applied before), is skipped.
 
-1. Every change goes in the log as it came, with its `seq` in `synced`, applied or not, so that `lcl issue history` shows both sides of a conflict.
-2. A change is applied only if `applied` is true, its record isn't purged here, and no row in the log for the same record and field has a later clock. (Rows of one write share a clock, and arrive in their order.)
-3. A change that a rule of the file refuses (a unique label or project name, a ref, one duplicate mark per issue, a milestone in the issue's project) is tried again after the rest, by rule 2 again. A correction after it makes room for it, or makes it lose.
-4. A create of a record that exists, or an add of a member already there, does nothing. A purge removes the record as `issue purge` does, and leaves its tombstone.
+What it applies is the pull's net effect: what applying the changes one at a time in `seq` order by these rules would leave, without the states between, where two fields of one write (an issue's project and milestone) or a change and its correction can break a rule of the file for a moment.
+
+1. A change counts only if `applied` is true, and its record (for a membership, also the record at the other end) isn't purged, here or by the pull.
+2. For each field of each record, the change with the latest clock is applied, unless the file has a change to that field with a later clock. Clocks compare as strings.
+3. Creates go first (a record that is here already is left as it is), then each record's fields in one write, then memberships (one that is there already is left), then purges, each as `issue purge` purges, leaving its tombstone. Then what a rule of the file refused (a unique label or project name, a ref, one duplicate mark per issue, a milestone in the issue's project), again, until it all went.
+4. Every change goes in the log as it came, with its `seq` in `synced`, applied or not, so that `lcl issue history` shows both sides of a conflict. A change to a purged record doesn't: the purge took the record's history.
 5. The machine's clock moves past the latest clock it received.
 
-A change that still can't be applied after its retry stops the sync, rolled back whole, and names the change. That means the service broke its guarantee.
+When something still can't be applied (a rule still refuses it, its record isn't here, or a record names one that isn't), the sync stops, nothing is applied, and the error says what. That means the service broke its guarantee.
 
 ### Numbers
 

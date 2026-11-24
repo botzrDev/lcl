@@ -262,6 +262,22 @@ const V14_RECORDS: &[V14Record] = &[
     },
 ];
 
+/// The table of a kind of record, the fields its changes name, and the
+/// membership fields that name one of its records: what sync applies a
+/// change to (crate::sync).
+pub(crate) fn logged_record(
+    kind: &str,
+) -> Option<(
+    &'static str,
+    &'static [&'static str],
+    &'static [&'static str],
+)> {
+    V14_RECORDS
+        .iter()
+        .find(|r| r.kind == kind)
+        .map(|r| (r.table, r.fields, r.named_by))
+}
+
 /// A link table whose rows are memberships, logged as fields of the issue.
 /// In `field` and `value`, `{row}` stands for `NEW.` or `OLD.`.
 struct V14Membership {
