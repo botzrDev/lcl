@@ -1625,6 +1625,21 @@ impl Store {
     /// the file's next_issue_number and one past the largest number
     /// imported: it never goes down. The workspace keeps its name; its
     /// description and created_at come from the file when given.
+    /// This workspace's key, when an import can go into it; else why not.
+    /// For a caller that builds the file first (from Linear, say) and
+    /// shouldn't fetch for a workspace that won't take it. The import
+    /// checks again.
+    pub fn importable_key(&self) -> Result<String> {
+        let has = contents(&self.conn)?;
+        if !has.is_empty() {
+            return Err(LclError::ImportNotEmpty {
+                workspace: read_meta(&self.conn, "name")?.unwrap_or_default(),
+                has,
+            });
+        }
+        read_key(&self.conn)
+    }
+
     pub fn import(&mut self, input: &[u8], dry_run: bool) -> Result<ImportSummary> {
         let at = now();
         let file = read_file(input, at)?;

@@ -149,13 +149,21 @@ enum Commands {
     /// prints that path).
     Backup(BackupArgs),
     /// Restore a file written by lcl export (or a converter) into this
-    /// workspace, which must be empty and have the file's key.
+    /// workspace, which must be empty and have the file's key; or, with
+    /// --linear, bring in a Linear team's issues.
     ///
     /// Numbers, refs, creators, comment authors and timestamps are kept as
     /// the file gives them; no status rules run. Every value must pass the
     /// rules the commands apply, and the file is checked whole before
     /// anything is written: a problem exits 2 naming its line and field,
     /// and the workspace is left as it was. The import is one transaction.
+    ///
+    /// --linear TEAM reads the team's issues from Linear's API with the
+    /// personal API key in LINEAR_API_KEY (never stored), converts them and
+    /// imports them the same way. Linear's KEY-N becomes issue number N,
+    /// also kept as the ref when the workspace has another key. A value lcl
+    /// would refuse exits 2 naming the Linear issue. Cycles, documents and
+    /// issues in Linear's trash are left out, and the notes say so.
     Import(ImportArgs),
     /// Open this workspace in a terminal UI.
     Tui,
@@ -296,8 +304,18 @@ struct BackupArgs {
 #[derive(Args)]
 struct ImportArgs {
     /// The file, or `-` for stdin.
-    #[arg(value_name = "PATH", value_parser = read_import)]
-    input: ImportInput,
+    #[arg(
+        value_name = "PATH",
+        value_parser = read_import,
+        required_unless_present = "linear",
+        conflicts_with = "linear"
+    )]
+    input: Option<ImportInput>,
+    /// Import Linear team TEAM's issues (by its key, as ENG in ENG-123)
+    /// from Linear's API instead of a file. The key is read from
+    /// LINEAR_API_KEY.
+    #[arg(long, value_name = "TEAM")]
+    linear: Option<String>,
     /// Check and count everything, then roll back: nothing is written.
     #[arg(long)]
     dry_run: bool,
@@ -365,6 +383,31 @@ struct SyncLeaveArgs {
 /// An import file's bytes, read as the arguments are parsed.
 #[derive(Clone)]
 struct ImportInput(Vec<u8>);
+
+/// What `lcl import` prints with --json: what was imported, and what the
+/// conversion from Linear left out or changed (empty for a file).
+#[derive(serde::Serialize)]
+struct Imported<'a> {
+    #[serde(flatten)]
+    summary: &'a lcl_core::transfer::ImportSummary,
+    notes: &'a [String],
+}
+
+/// Linear team `team`'s issues as a file this workspace can import. The
+/// workspace is checked first, so nothing is fetched for one that is not
+/// empty.
+fn from_linear(store: &Store, team: &str) -> Result<lcl_core::linear::Conversion> {
+    use lcl_core::linear::{api, convert};
+    let key = store.importable_key()?;
+    let endpoint = std::env::var(api::ENDPOINT_VAR).unwrap_or_else(|_| api::ENDPOINT.to_string());
+    let client = api::Client::new(&endpoint, std::env::var(api::KEY_VAR).ok())?;
+    let export = client.fetch(team)?;
+    Ok(
+        convert(&export, &key).map_err(|problems| LclError::LinearProblems {
+            problems: problems.iter().map(|p| p.to_string()).collect(),
+        })?,
+    )
+}
 
 /// `import PATH`: the file, or stdin for `-`, as bytes (import reports a
 /// line that isn't UTF-8 itself).
@@ -3673,12 +3716,28 @@ fn run(cli: Cli) -> Result<()> {
                 );
             }
         }
-        Commands::Import(ImportArgs { input, dry_run }) => {
+        Commands::Import(ImportArgs {
+            input,
+            linear,
+            dry_run,
+        }) => {
             let mut store = resolve_store(&cli.workspace)?;
-            let s = store.import(&input.0, dry_run)?;
+            let (input, notes) = match (input, linear) {
+                (Some(input), _) => (input.0, Vec::new()),
+                (None, Some(team)) => {
+                    let c = from_linear(&store, &team)?;
+                    (c.text.into_bytes(), c.notes)
+                }
+                (None, None) => unreachable!("clap requires PATH or --linear"),
+            };
+            let summary = store.import(&input, dry_run)?;
             if cli.json {
-                print_json(&s)?;
+                print_json(&Imported {
+                    summary: &summary,
+                    notes: &notes,
+                })?;
             } else {
+                let s = &summary;
                 let next = identifier(&s.key, s.next_issue_number);
                 let what = format!(
                     "{} into workspace {} (key {}); next number {next}",
@@ -3704,6 +3763,12 @@ fn run(cli: Cli) -> Result<()> {
                         if total == 1 { "" } else { "s" },
                         types.join(", ")
                     );
+                }
+                if !notes.is_empty() {
+                    outln!("Notes:");
+                    for n in &notes {
+                        outln!("  {n}");
+                    }
                 }
             }
         }

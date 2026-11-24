@@ -38,7 +38,7 @@ The builds are for Linux (x86_64 and arm64, glibc 2.28 or later), macOS (Apple s
 
 ## Moving a workspace
 
-`lcl export` and `lcl import` move a workspace to another machine, or hand it to another person. They need no account and no network; lcl itself makes no network call, shows no banner and asks for no license.
+`lcl export` and `lcl import` move a workspace to another machine, or hand it to another person. They need no account and no network; lcl shows no banner and asks for no license. It reaches the network only when told to: `lcl sync`, and `lcl import --linear` (below).
 
     lcl export --output issues.jsonl
 
@@ -50,6 +50,16 @@ The file is text, one JSON record per line: the workspace's labels, projects, mi
 The other person then sees the same issues, under the same numbers, with the same comments: MP-12 is MP-12 there too. The next issue either of you creates gets the same number.
 
 An import fills an empty workspace; it doesn't merge. Changes made on two machines after the hand-over stay apart. To read a newer export, import it into a new workspace, as `lcl workspace create mp-next --key MP` then `lcl -w mp-next import issues.jsonl`. `lcl export --output` refuses a file that exists; `--force` replaces it.
+
+### Coming from Linear
+
+`lcl import --linear TEAM` brings a Linear team's issues into an empty workspace: titles, descriptions, statuses, priorities, estimates, due dates, labels, assignees, projects and milestones, parents, comments and relations. It reads them from Linear's API with a personal API key, made in Linear's settings, which lcl never stores:
+
+    lcl init --key ENG
+    LINEAR_API_KEY=lin_api_... lcl import --linear ENG --dry-run
+    LINEAR_API_KEY=lin_api_... lcl import --linear ENG
+
+ENG-123 stays ENG-123. Under another key, issue 123 keeps ENG-123 as its ref. Cycles, documents and issues in Linear's trash are not brought in, and the import says so. A value lcl can't take, such as an estimate of 0.5, stops the import before anything is written, naming the Linear issue.
 
 ### Not in a synced folder
 

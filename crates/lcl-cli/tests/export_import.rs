@@ -1012,7 +1012,7 @@ fn dry_run_counts_and_writes_nothing() {
     let out = env.lcl_stdin(&["--json", "import", "-", "--dry-run"], file.as_bytes());
     assert_eq!(
         out.assert_ok().json(),
-        json!({"issues": 9, "comments": 4, "relations": 5, "labels": 3, "projects": 2, "milestones": 2, "cycles": 1, "docs": 3, "next_issue_number": 10, "dry_run": true, "skipped": []})
+        json!({"issues": 9, "comments": 4, "relations": 5, "labels": 3, "projects": 2, "milestones": 2, "cycles": 1, "docs": 3, "next_issue_number": 10, "dry_run": true, "skipped": [], "notes": []})
     );
     assert!(dump(&env.db_path()) == before, "--dry-run wrote");
     let real = env

@@ -21,6 +21,7 @@
 //! A slice that adds or changes a command changes the note, then this file.
 
 mod common;
+mod linear_service;
 mod sync_service;
 
 use common::{Env, Out};
@@ -989,7 +990,30 @@ mod cases {
             j(&empty, &["import", file]),
         ];
         samples.push(import_with_unknown_types());
+        samples.push(import_from_linear());
         samples
+    }
+
+    /// `import --linear`: a team with an issue in the trash, so `notes`
+    /// has an entry.
+    pub fn import_from_linear() -> Value {
+        use linear_service::{Linear, issue};
+        let linear = Linear::start(
+            "DEMO",
+            vec![
+                issue("DEMO-1", serde_json::json!({})),
+                issue("DEMO-2", serde_json::json!({"trashed": true})),
+            ],
+            50,
+        );
+        let env = Env::new();
+        j(&env, &["init", "demo", "--key", "DEMO"]);
+        let out = linear
+            .lcl(&env, &["import", "--linear", "DEMO", "--json"])
+            .assert_ok()
+            .json();
+        assert_eq!(out["notes"].as_array().map(Vec::len), Some(1), "{out}");
+        out
     }
 
     /// An import of a file with records of a type lcl doesn't know.

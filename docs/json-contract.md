@@ -688,6 +688,8 @@ With `--output PATH`, what was written, as counts. Without it, stdout is the exp
 
 What the file holds, as counts, and the number the next new issue gets. With `--dry-run` nothing was written and `dry_run` is true. `skipped` lists the records whose type this lcl doesn't know, which it left out: empty when there were none.
 
+With `--linear TEAM` the file is the Linear team's issues, read from Linear's API with the key in `LINEAR_API_KEY` and converted. `notes` says what the conversion left out or changed, one sentence each (issues in Linear's trash, cycles, documents, comment threads, links to other teams' issues, names trimmed of whitespace): empty for a file. A value lcl would refuse is a `usage` error naming the Linear issue, and nothing is written. A missing or refused key is `auth`; an unknown team `not_found`; Linear out of reach or limiting the rate, `network`.
+
 ```json
 {
   "labels": "integer",
@@ -700,7 +702,8 @@ What the file holds, as counts, and the number the next new issue gets. With `--
   "docs": "integer",
   "next_issue_number": "integer",
   "dry_run": "boolean",
-  "skipped": ["SkippedRecords"]
+  "skipped": ["SkippedRecords"],
+  "notes": ["string"]
 }
 ```
 

@@ -101,6 +101,30 @@ pub enum LclError {
     ExportBlocked { problems: Vec<String> },
     #[error("{0} already exists; pass --force to replace it")]
     OutputExists(String),
+    /// `lcl import --linear` with no API key in LINEAR_API_KEY.
+    #[error("set LINEAR_API_KEY to a personal API key from Linear's settings")]
+    LinearNoKey,
+    #[error(
+        "{0:?} is not a Linear API address: give https://HOST/PATH (http:// only for localhost)"
+    )]
+    LinearAddress(String),
+    #[error("Linear refused the API key in LINEAR_API_KEY: {message}")]
+    LinearAuth { message: String },
+    #[error("can't reach Linear: {detail}; nothing was imported")]
+    LinearNetwork { detail: String },
+    #[error("{}", match seconds {
+        Some(s) => format!("Linear's rate limit for this API key is used up; try again in {s} seconds. Nothing was imported"),
+        None => "Linear's rate limit for this API key is used up; try again later. Nothing was imported".to_string(),
+    })]
+    LinearRateLimited { seconds: Option<u64> },
+    #[error("Linear refused the request: {message}")]
+    LinearRefused { message: String },
+    #[error("Linear has no team with key {0:?} that this API key can see")]
+    LinearTeamNotFound(String),
+    /// Every value from Linear that lcl would refuse, each naming the Linear
+    /// issue it came from.
+    #[error("can't import from Linear: {}; nothing was imported:\n{}", counted(&[(problems.len() as i64, "problem")]), problems.iter().map(|p| format!("  {p}")).collect::<Vec<_>>().join("\n"))]
+    LinearProblems { problems: Vec<String> },
     /// `lcl backup PATH` with something at PATH. It is never replaced.
     #[error("{0} already exists; a backup never replaces a file")]
     BackupExists(String),
@@ -458,10 +482,11 @@ pub type Result<T> = std::result::Result<T, LclError>;
 pub enum ErrorKind {
     /// The command line is wrong, whatever is stored: exit 2.
     Usage,
-    /// The sync service couldn't be reached, or answered outside the
-    /// protocol: try again later.
+    /// The sync service or Linear couldn't be reached, answered outside the
+    /// protocol, or limits the rate: try again later.
     Network,
-    /// There is no token for the sync service, or it refused the one given.
+    /// There is no token for the sync service or key for Linear, or it
+    /// refused the one given.
     Auth,
     /// Something named isn't there.
     NotFound,
@@ -514,7 +539,13 @@ impl LclError {
             | LclError::ExportRoundTrip(_)
             | LclError::SyncRefused { .. }
             | LclError::BackupLocked { .. } => Other,
-            LclError::SyncNetwork { .. } => Network,
+            LclError::SyncNetwork { .. }
+            | LclError::LinearNetwork { .. }
+            | LclError::LinearRateLimited { .. } => Network,
+            LclError::LinearNoKey | LclError::LinearAuth { .. } => Auth,
+            LclError::LinearRefused { .. } => Other,
+            LclError::LinearTeamNotFound(_) => NotFound,
+            LclError::LinearAddress(_) | LclError::LinearProblems { .. } => Usage,
             LclError::SyncNoToken | LclError::SyncAuth { .. } => Auth,
             LclError::SyncAddress(_) | LclError::SyncBadId(_) => Usage,
             LclError::SyncUnknownChange { .. } => Schema,

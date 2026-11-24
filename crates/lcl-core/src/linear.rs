@@ -22,6 +22,8 @@
 //!   documents, issues in Linear's trash, links to issues of another team,
 //!   and comment threads (a reply becomes a plain comment, in time order).
 
+pub mod api;
+
 use crate::models::{Priority, Status};
 use crate::parse;
 use serde::Deserialize;
@@ -44,21 +46,40 @@ pub struct Team {
     pub key: String,
 }
 
-/// A connection's nodes: `{ "nodes": [...] }`.
+/// A connection's nodes: `{ "nodes": [...] }`. `pageInfo`, when the API
+/// sent it, says whether there are more (`api` fetches them).
 #[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Nodes<T> {
     pub nodes: Vec<T>,
+    #[serde(default)]
+    pub page_info: Option<PageInfo>,
 }
 
 impl<T> Default for Nodes<T> {
     fn default() -> Self {
-        Nodes { nodes: Vec::new() }
+        Nodes {
+            nodes: Vec::new(),
+            page_info: None,
+        }
     }
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct PageInfo {
+    pub has_next_page: bool,
+    #[serde(default)]
+    pub end_cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Issue {
+    /// Linear's id for the issue, when the API sent it: `api` uses it to
+    /// fetch the rest of a long connection. Not converted.
+    #[serde(default)]
+    pub id: Option<String>,
     pub identifier: String,
     pub title: String,
     #[serde(default)]
@@ -548,29 +569,39 @@ pub fn convert(input: &Export, workspace_key: &str) -> Result<Conversion, Vec<Pr
     }
 
     let mut notes = r.notes;
-    if trashed > 0 {
-        notes.push(format!("{trashed} issues in Linear's trash are left out"));
-    }
-    if in_cycles > 0 {
-        notes.push(format!(
-            "{in_cycles} issues are in Linear cycles: cycles are not converted"
-        ));
-    }
-    if !input.documents.is_empty() {
-        notes.push(format!(
-            "{} documents are not converted",
-            input.documents.len()
-        ));
-    }
-    if replies > 0 {
-        notes.push(format!(
-            "{replies} replies in comment threads become plain comments, in time order"
-        ));
-    }
-    if elsewhere > 0 {
-        notes.push(format!(
-            "{elsewhere} links to issues that are not among these are left out"
-        ));
+    let documents = input.documents.len();
+    for (n, one, many) in [
+        (
+            trashed,
+            "1 issue in Linear's trash is left out",
+            "issues in Linear's trash are left out",
+        ),
+        (
+            in_cycles,
+            "1 issue is in a Linear cycle: cycles are not converted",
+            "issues are in Linear cycles: cycles are not converted",
+        ),
+        (
+            documents,
+            "1 document is not converted",
+            "documents are not converted",
+        ),
+        (
+            replies,
+            "1 reply in a comment thread becomes a plain comment, in time order",
+            "replies in comment threads become plain comments, in time order",
+        ),
+        (
+            elsewhere,
+            "1 link to an issue that is not among these is left out",
+            "links to issues that are not among these are left out",
+        ),
+    ] {
+        match n {
+            0 => {}
+            1 => notes.push(one.to_string()),
+            n => notes.push(format!("{n} {many}")),
+        }
     }
     Ok(Conversion { text, notes })
 }
@@ -744,10 +775,10 @@ mod tests {
             c.notes,
             [
                 "SMM-5: its similar relation to JOB-1 is left out: that issue is not one of these",
-                "1 issues in Linear's trash are left out",
-                "1 issues are in Linear cycles: cycles are not converted",
-                "1 replies in comment threads become plain comments, in time order",
-                "1 links to issues that are not among these are left out",
+                "1 issue in Linear's trash is left out",
+                "1 issue is in a Linear cycle: cycles are not converted",
+                "1 reply in a comment thread becomes a plain comment, in time order",
+                "1 link to an issue that is not among these is left out",
             ]
         );
     }
@@ -878,7 +909,7 @@ mod tests {
             c.text,
             "{\"format\":\"lcl-export/1\",\"key\":\"SMM\",\"type\":\"workspace\"}\n"
         );
-        assert_eq!(c.notes, ["1 documents are not converted"]);
+        assert_eq!(c.notes, ["1 document is not converted"]);
     }
 
     #[test]
