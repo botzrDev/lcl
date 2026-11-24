@@ -222,6 +222,7 @@ impl<'a> Checker<'a> {
             "null" => actual.is_null(),
             "string" => actual.is_string(),
             "integer" => actual.is_i64() || actual.is_u64(),
+            "number" => actual.is_number(),
             "boolean" => actual.is_boolean(),
             alt if is_object_name(alt) => false,
             alt => {
@@ -514,6 +515,7 @@ pinned! {
     doc_restore => "doc restore",
     doc_purge => "doc purge",
     search => "search",
+    insights => "insights",
     backup => "backup",
     export => "export",
     import => "import",
@@ -923,6 +925,25 @@ mod cases {
             j(&env, &["search", "words"]),
             j(&env, &["search", "nowhere"]),
         ]
+    }
+
+    pub fn insights() -> Vec<Value> {
+        let env = Env::new();
+        j(&env, &["init", "demo", "--key", "DEMO"]);
+        j(&env, &["issue", "create", "--title", "One"]);
+        j(
+            &env,
+            &["issue", "update", "DEMO-1", "--status", "InProgress"],
+        );
+        j(&env, &["issue", "update", "DEMO-1", "--status", "Done"]);
+        let done = j(&env, &["insights"]);
+        assert_eq!(done["completed"], 1);
+        let empty = j(
+            &env,
+            &["insights", "--since", "2000-01-03", "--until", "2000-01-09"],
+        );
+        assert_eq!(empty["lead_time"]["median"], Value::Null);
+        vec![done, empty]
     }
 
     pub fn backup() -> Vec<Value> {

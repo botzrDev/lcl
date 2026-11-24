@@ -44,7 +44,7 @@ Other stderr lines are notices. Each starts with `lcl:`. Without `--json`, an er
 
 A shape is JSON. A string in it names what stands at that place:
 
-- `"string"`, `"integer"`, `"boolean"` and `"null"` are JSON types.
+- `"string"`, `"integer"`, `"boolean"` and `"null"` are JSON types. `"number"` is any JSON number: an integer, or one with a fraction.
 - `"'cwd'|'global'"` is a string with one of the quoted values.
 - `"string|null"` is either of the two.
 - A capitalised name, as `"Issue"`, is the object of that name under [Objects](#objects).
@@ -591,6 +591,25 @@ What was removed for good: `purged` holds the ids.
   "doc_total": "integer",
   "limit": "integer",
   "truncated": "boolean"
+}
+```
+
+## Insights
+
+### `lcl insights`
+
+The range is `since` to `until`, both included, as YYYY-MM-DD; with neither flag, the four weeks to today. Days are in the machine's local time. Of the issues completed in the range: `completed` counts them, `per_week` is `completed` over the range's days, times 7, to two decimals, and `weeks` has each week (Monday to Sunday, `week` its Monday) the range touches, oldest first, with those completed in it and in the range. Lead time is from `created_at` to `completed_at`, cycle time from `started_at` to `completed_at`, in whole seconds: `median` and `p90` (the 90th percentile, interpolated as a spreadsheet's PERCENTILE.INC does) are null when `issues` is 0. Canceled, Duplicate and trashed issues are in nothing. `left_out.not_completed` counts the other issues made by the range's end that aren't Done, or are Done with no `completed_at`; `left_out.not_started` counts the issues completed in the range with no `started_at`, which are in lead time only. A range with nothing in it exits 0 with zero counts; one that ends before it starts is refused with exit 2.
+
+```json
+{
+  "since": "string",
+  "until": "string",
+  "completed": "integer",
+  "per_week": "number",
+  "weeks": [{"week": "string", "completed": "integer"}],
+  "lead_time": {"issues": "integer", "median": "integer|null", "p90": "integer|null"},
+  "cycle_time": {"issues": "integer", "median": "integer|null", "p90": "integer|null"},
+  "left_out": {"not_completed": "integer", "not_started": "integer"}
 }
 ```
 

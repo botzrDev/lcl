@@ -199,6 +199,18 @@ lcl --json search -- -x
 - A query that is exactly an issue's `KEY-N` or `#N` lists that issue first.
 - Put `--` before any word that starts with `-`.
 
+## Insights
+
+```bash
+lcl --json insights
+lcl --json insights --since 2026-10-01 --until 2026-10-31 --project api --label bug
+```
+
+- Of the issues completed (moved to Done) in the range: lead time (created to completed) and cycle time (started to completed), each as `median` and `p90` in seconds, and throughput: `completed`, `per_week`, and `weeks` (each Monday with its count). With no `--since`/`--until`, the range is the four weeks to today, in local time.
+- `--project` (or `none`), `--cycle` and `--label` (repeatable) narrow it, as `issue list`'s do.
+- Canceled, Duplicate and trashed issues are left out. `left_out` counts the rest it couldn't use: `not_completed` (in neither time) and `not_started` (completed with no start time, so in lead time only).
+- A range with nothing in it exits 0 with zero counts, and `median` and `p90` null. A range that ends before it starts exits 2.
+
 ## Export, import and backup
 
 ```bash

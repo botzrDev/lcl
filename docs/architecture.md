@@ -102,6 +102,10 @@ Search matches issues by identifier, ref, title, description, and comments, and 
 
 An issue matches when every word is in its title and description together, or every word is in one comment. Words split between the issue and a comment, or across two comments, do not match.
 
+## Insights
+
+`lcl insights` reports lead time, cycle time and throughput from the times the status rules already stamp on each issue (`Issue::apply_lifecycle`): `created_at`, `started_at`, `completed_at`. Nothing new is stored. The store lists the issues its filters pick (project, cycle, labels, through the same `IssueFilter` as `issue list`); `lcl_core::insights::report` is a pure function of those issues, the range's days and a time zone, so its tests need no database. An issue is completed on the local day of its `completed_at`, when it is Done; leaving Done clears that time, so a reopened issue no longer counts. Percentiles interpolate as PERCENTILE.INC does.
+
 ## Export
 
 `lcl export` writes the whole workspace as `lcl-export/1`: one JSON object per line. The workspace header is first, then labels, projects, milestones, cycles, issues, comments, relations, and docs. The same workspace exports to the same bytes. Issues are named by number in the file, not by the UUID stored on disk. Cycles and docs keep their ids, because a name is not unique for them.

@@ -110,6 +110,20 @@ enum Commands {
     /// Quoting the query is optional. Words that start with - go after --,
     /// e.g. lcl search -- --no-commit.
     Search(SearchArgs),
+    /// Lead time, cycle time and throughput, from the times lcl stamps on
+    /// each issue as its status changes.
+    ///
+    /// Of the issues completed (moved to Done) in the range: the median and
+    /// the 90th percentile of their lead time, from creation to completion,
+    /// and of their cycle time, from start (the move to InProgress or
+    /// InReview) to completion; and how many were completed, in each week
+    /// (Monday to Sunday) and on average a week. Days are in local time.
+    ///
+    /// Canceled, Duplicate and trashed issues are left out. An issue with no
+    /// start time counts toward lead time only. One that isn't completed, or
+    /// was completed before lcl stamped the time, counts toward neither; the
+    /// report says how many of each there were.
+    Insights(InsightsArgs),
     /// Write the whole workspace as a text file (format lcl-export/1).
     ///
     /// One JSON record per line: the workspace, then labels, projects,
@@ -224,6 +238,40 @@ struct SearchArgs {
     /// Show at most N issues and N docs.
     #[arg(long, value_name = "N", default_value_t = 50, value_parser = clap::value_parser!(u32).range(1..))]
     limit: u32,
+}
+
+#[derive(Args)]
+struct InsightsArgs {
+    /// The range's first day, as YYYY-MM-DD. Default: 27 days before
+    /// --until, so the range is four weeks.
+    #[arg(long, value_name = "DATE", value_parser = parse_date)]
+    since: Option<NaiveDate>,
+    /// The range's last day, as YYYY-MM-DD. Default: today.
+    #[arg(long, value_name = "DATE", value_parser = parse_date)]
+    until: Option<NaiveDate>,
+    /// Only issues in this project, by name (ignoring case) or id; `none`
+    /// (any case) for issues in no project. A project named "none" is
+    /// selected by its id.
+    #[arg(long, value_name = "PROJECT", value_parser = parse_project_filter)]
+    project: Option<ProjectFilter>,
+    /// Only issues in this cycle, by name (trimmed, ignoring case) or id.
+    #[arg(long, value_name = "CYCLE", value_parser = parse_cycle_name)]
+    cycle: Option<String>,
+    /// Only issues with this label; repeat to require several.
+    #[arg(long, value_name = "LABEL", value_parser = parse_label_name)]
+    label: Vec<String>,
+}
+
+/// The days `lcl insights` reports on, both included: --since to --until,
+/// by default the four weeks to `today`.
+fn insights_range(a: &InsightsArgs, today: NaiveDate) -> (NaiveDate, NaiveDate) {
+    let until = a.until.unwrap_or(today);
+    let since = a.since.unwrap_or_else(|| {
+        until
+            .checked_sub_days(chrono::Days::new(27))
+            .unwrap_or(until)
+    });
+    (since, until)
 }
 
 #[derive(Args)]
@@ -1571,6 +1619,17 @@ fn honour_lcl_project(cli: &mut Cli) {
 /// the usage of the subcommand at `path` (as clap's own errors have).
 fn validate(cli: &Cli) {
     let fail = |path: &[&str], msg: String| -> ! { clap_exit(subcommand_error(path, msg)) };
+    if let Commands::Insights(a) = &cli.cmd {
+        let (since, until) = insights_range(a, chrono::Local::now().date_naive());
+        if until < since {
+            let msg = if a.until.is_some() {
+                format!("--until {until} is before --since {since}")
+            } else {
+                format!("--since {since} is after today, {until}")
+            };
+            fail(&["insights"], msg);
+        }
+    }
     if let Commands::Cycle(CycleArgs {
         cmd:
             CycleCmd::Create(CycleCreateArgs {
@@ -1679,6 +1738,66 @@ fn placement(
         milestone: change(milestone, no_milestone),
         cycle: change(cycle, no_cycle),
     }
+}
+
+/// A length of time in seconds, to two units: 45s, 12m, 3h 5m, 2d 4h. A
+/// unit that is zero after the first is left off (3h, not 3h 0m).
+fn span(secs: i64) -> String {
+    let (d, h, m, s) = (secs / 86_400, secs / 3600 % 24, secs / 60 % 60, secs % 60);
+    let two = |a: i64, ua: &str, b: i64, ub: &str| {
+        if b == 0 {
+            format!("{a}{ua}")
+        } else {
+            format!("{a}{ua} {b}{ub}")
+        }
+    };
+    if d > 0 {
+        two(d, "d", h, "h")
+    } else if h > 0 {
+        two(h, "h", m, "m")
+    } else if m > 0 {
+        format!("{m}m")
+    } else {
+        format!("{s}s")
+    }
+}
+
+/// `lcl insights` as people read it.
+fn insights_text(r: &lcl_core::insights::Insights) -> Vec<String> {
+    let days = (r.until - r.since).num_days() + 1;
+    let spread = |s: &lcl_core::insights::Spread| match (s.median, s.p90) {
+        (Some(median), Some(p90)) => format!(
+            "median {}, 90th percentile {}, of {} {}",
+            span(median),
+            span(p90),
+            s.issues,
+            if s.issues == 1 { "issue" } else { "issues" }
+        ),
+        _ => "no issue to measure".to_string(),
+    };
+    let mut out = vec![
+        format!(
+            "{} to {}, {days} {}",
+            r.since,
+            r.until,
+            if days == 1 { "day" } else { "days" }
+        ),
+        format!("Completed   {}, {:.2} a week", r.completed, r.per_week),
+        format!("Lead time   {}", spread(&r.lead_time)),
+        format!("Cycle time  {}", spread(&r.cycle_time)),
+        format!(
+            "Left out    {} not completed; {} completed with no start time, in lead time only",
+            r.left_out.not_completed, r.left_out.not_started
+        ),
+        String::new(),
+        "Week of     Completed".to_string(),
+    ];
+    out.extend(
+        r.weeks
+            .iter()
+            .map(|w| format!("{}  {}", w.week, w.completed)),
+    );
+    out
 }
 
 /// Epoch seconds as local time, YYYY-MM-DD HH:MM; the number itself if
@@ -3161,6 +3280,30 @@ fn run(cli: Cli) -> Result<()> {
                 }
             }
         }
+        Commands::Insights(a) => {
+            let store = resolve_store(&cli.workspace)?;
+            let (since, until) = insights_range(&a, chrono::Local::now().date_naive());
+            let flag = match &a.project {
+                Some(ProjectFilter::Is(p)) => Some(p.clone()),
+                _ => None,
+            };
+            let filter = IssueFilter {
+                labels: a.label,
+                project: a.project,
+                cycle: a.cycle,
+                ..IssueFilter::default()
+            };
+            let list = store.list_issues(&filter, IssueSort::Number, Page::ALL);
+            let issues = project_hint(list, flag.as_deref())?.issues;
+            let report = lcl_core::insights::report(&issues, since, until, &chrono::Local);
+            if cli.json {
+                print_json(&report)?;
+            } else {
+                for line in insights_text(&report) {
+                    outln!("{line}");
+                }
+            }
+        }
         Commands::Search(SearchArgs { words, limit }) => {
             let query = search_query(&words);
             let store = resolve_store(&cli.workspace)?;
@@ -3399,6 +3542,23 @@ mod tests {
     /// slot, so a command with many arguments has a large frame: before the
     /// big ones got `Args` structs of their own, `lcl --version` needed about
     /// 900 KB of stack, near the 1 MiB a Windows main thread gets.
+    #[test]
+    fn a_span_is_two_units_at_most() {
+        let cases = [
+            (0, "0s"),
+            (45, "45s"),
+            (60, "1m"),
+            (12 * 60 + 59, "12m"),
+            (3 * 3600, "3h"),
+            (3 * 3600 + 5 * 60 + 9, "3h 5m"),
+            (86_400, "1d"),
+            (2 * 86_400 + 4 * 3600 + 59 * 60, "2d 4h"),
+        ];
+        for (secs, text) in cases {
+            assert_eq!(span(secs), text, "{secs}");
+        }
+    }
+
     #[test]
     fn the_command_builds_on_a_small_stack() {
         // A Linux debug build needs about 370 KB here; main's code before
