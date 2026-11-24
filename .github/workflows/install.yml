@@ -142,7 +142,8 @@ jobs:
           $printed = lcl --version
           if ($printed -ne "lcl $($env:TAG.Substring(1))") { throw "lcl --version printed $printed" }
           Set-Location (New-Item -ItemType Directory -Path (Join-Path $env:RUNNER_TEMP 'ps51-ws'))
-          lcl init demo --key DEMO
+          # The step before registered "demo" in the same home directory.
+          lcl init demo51 --key DEMB
           if ($LASTEXITCODE) { throw "lcl init exited $LASTEXITCODE" }
           lcl --json issue create --title "installed with the install line"
           if ($LASTEXITCODE) { throw "lcl issue create exited $LASTEXITCODE" }
