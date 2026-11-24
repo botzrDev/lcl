@@ -996,6 +996,7 @@ name = "lcl-tui"
 version = "0.3.0-alpha.2"
 dependencies = [
  "anyhow",
+ "chrono",
  "crossterm",
  "lcl-core",
  "ratatui",
