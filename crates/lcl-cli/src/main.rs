@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use chrono::NaiveDate;
 use clap::parser::ValueSource;
-use clap::{ArgGroup, CommandFactory, FromArgMatches, Parser, Subcommand};
+use clap::{ArgGroup, Args, CommandFactory, FromArgMatches, Parser, Subcommand};
 use lcl_core::db::{
     AssigneeFilter, Change, CycleUpdate, IssueFilter, IssueSort, IssueUpdate, LabelUpdate,
     MilestoneUpdate, NewIssue, Page, Placement, ProjectFilter, ProjectUpdate, Store,
@@ -74,57 +74,25 @@ enum Commands {
     /// Run again with the same name and key, it does nothing. It never
     /// renames or re-keys a workspace, and a name another workspace has
     /// (compared by slug, as workspace create compares them) is refused.
-    Init {
-        /// Its name; the current directory's name if left out.
-        #[arg(value_parser = parse_workspace_name)]
-        name: Option<String>,
-        /// The prefix of its issue identifiers, as DRM in DRM-12: a letter,
-        /// then up to 9 letters or digits. Uppercased.
-        #[arg(long, value_name = "KEY")]
-        key: WorkspaceKey,
-    },
+    Init(InitArgs),
     /// Create, list and show workspaces.
-    Workspace {
-        #[command(subcommand)]
-        cmd: WorkspaceCmd,
-    },
+    Workspace(WorkspaceArgs),
     /// Projects in this workspace: create, list, show, update, delete.
-    Project {
-        #[command(subcommand)]
-        cmd: ProjectCmd,
-    },
+    Project(ProjectArgs),
     /// Milestones, each in one project for good: create, list, show, update, delete.
-    Milestone {
-        #[command(subcommand)]
-        cmd: MilestoneCmd,
-    },
+    Milestone(MilestoneArgs),
     /// Issues in this workspace: create, list, show, update, delete, restore, purge, relate,
     /// unrelate, comment, comments, history.
-    Issue {
-        #[command(subcommand)]
-        cmd: IssueCmd,
-    },
+    Issue(IssueArgs),
     /// Comments, by id: edit, delete, restore, purge. Add and list them with issue comment and
     /// issue comments.
-    Comment {
-        #[command(subcommand)]
-        cmd: CommentCmd,
-    },
+    Comment(CommentArgs),
     /// Docs in this workspace: create, list, show, update, delete, restore, purge.
-    Doc {
-        #[command(subcommand)]
-        cmd: DocCmd,
-    },
+    Doc(DocArgs),
     /// Labels in this workspace: create, list, delete, restore, purge.
-    Label {
-        #[command(subcommand)]
-        cmd: LabelCmd,
-    },
+    Label(LabelArgs),
     /// Cycles in this workspace: create, list, update, delete.
-    Cycle {
-        #[command(subcommand)]
-        cmd: CycleCmd,
-    },
+    Cycle(CycleArgs),
     /// Search issues (with their comments) and docs.
     ///
     /// The query is split on whitespace, and every word must match. Words are
@@ -141,14 +109,7 @@ enum Commands {
     ///
     /// Quoting the query is optional. Words that start with - go after --,
     /// e.g. lcl search -- --no-commit.
-    Search {
-        /// The words to search for.
-        #[arg(value_name = "WORD", required = true, num_args = 1..)]
-        words: Vec<String>,
-        /// Show at most N issues and N docs.
-        #[arg(long, value_name = "N", default_value_t = 50, value_parser = clap::value_parser!(u32).range(1..))]
-        limit: u32,
-    },
+    Search(SearchArgs),
     /// Write the whole workspace as a text file (format lcl-export/1).
     ///
     /// One JSON record per line: the workspace, then labels, projects,
@@ -160,15 +121,7 @@ enum Commands {
     /// A stored value import would refuse (from a hand edit, or an older
     /// lcl) stops the export: each is listed, with the command that fixes
     /// it where there is one, and nothing is written.
-    Export {
-        /// Write to PATH (through a temporary file in its directory, renamed
-        /// into place) instead of stdout. `-` is stdout.
-        #[arg(long, value_name = "PATH")]
-        output: Option<String>,
-        /// Replace PATH if it exists.
-        #[arg(long, requires = "output")]
-        force: bool,
-    },
+    Export(ExportArgs),
     /// Copy this workspace's file to PATH, safely while lcl is in use.
     ///
     /// The copy is one committed state of the workspace: a write that is
@@ -180,12 +133,7 @@ enum Commands {
     /// The copy is a workspace file: to restore it, put it where the
     /// workspace's file is while no lcl is running (lcl workspace show
     /// prints that path).
-    Backup {
-        /// Where to write the copy: a file that doesn't exist, in a
-        /// directory that does.
-        #[arg(value_name = "PATH")]
-        path: PathBuf,
-    },
+    Backup(BackupArgs),
     /// Restore a file written by lcl export (or a converter) into this
     /// workspace, which must be empty and have the file's key.
     ///
@@ -194,14 +142,7 @@ enum Commands {
     /// rules the commands apply, and the file is checked whole before
     /// anything is written: a problem exits 2 naming its line and field,
     /// and the workspace is left as it was. The import is one transaction.
-    Import {
-        /// The file, or `-` for stdin.
-        #[arg(value_name = "PATH", value_parser = read_import)]
-        input: ImportInput,
-        /// Check and count everything, then roll back: nothing is written.
-        #[arg(long)]
-        dry_run: bool,
-    },
+    Import(ImportArgs),
     /// Open this workspace in a terminal UI.
     Tui,
     /// Keep this workspace in step with a sync service: send this
@@ -213,10 +154,111 @@ enum Commands {
     /// reach the network; a workspace that never opted in makes no call.
     /// With the service out of reach, the file still opens and takes edits:
     /// they go at the next lcl sync. See docs/sync-protocol.md.
-    Sync {
-        #[command(subcommand)]
-        cmd: Option<SyncCmd>,
-    },
+    Sync(SyncArgs),
+}
+
+#[derive(Args)]
+struct InitArgs {
+    /// Its name; the current directory's name if left out.
+    #[arg(value_parser = parse_workspace_name)]
+    name: Option<String>,
+    /// The prefix of its issue identifiers, as DRM in DRM-12: a letter,
+    /// then up to 9 letters or digits. Uppercased.
+    #[arg(long, value_name = "KEY")]
+    key: WorkspaceKey,
+}
+
+#[derive(Args)]
+struct WorkspaceArgs {
+    #[command(subcommand)]
+    cmd: WorkspaceCmd,
+}
+
+#[derive(Args)]
+struct ProjectArgs {
+    #[command(subcommand)]
+    cmd: ProjectCmd,
+}
+
+#[derive(Args)]
+struct MilestoneArgs {
+    #[command(subcommand)]
+    cmd: MilestoneCmd,
+}
+
+#[derive(Args)]
+struct IssueArgs {
+    #[command(subcommand)]
+    cmd: IssueCmd,
+}
+
+#[derive(Args)]
+struct CommentArgs {
+    #[command(subcommand)]
+    cmd: CommentCmd,
+}
+
+#[derive(Args)]
+struct DocArgs {
+    #[command(subcommand)]
+    cmd: DocCmd,
+}
+
+#[derive(Args)]
+struct LabelArgs {
+    #[command(subcommand)]
+    cmd: LabelCmd,
+}
+
+#[derive(Args)]
+struct CycleArgs {
+    #[command(subcommand)]
+    cmd: CycleCmd,
+}
+
+#[derive(Args)]
+struct SearchArgs {
+    /// The words to search for.
+    #[arg(value_name = "WORD", required = true, num_args = 1..)]
+    words: Vec<String>,
+    /// Show at most N issues and N docs.
+    #[arg(long, value_name = "N", default_value_t = 50, value_parser = clap::value_parser!(u32).range(1..))]
+    limit: u32,
+}
+
+#[derive(Args)]
+struct ExportArgs {
+    /// Write to PATH (through a temporary file in its directory, renamed
+    /// into place) instead of stdout. `-` is stdout.
+    #[arg(long, value_name = "PATH")]
+    output: Option<String>,
+    /// Replace PATH if it exists.
+    #[arg(long, requires = "output")]
+    force: bool,
+}
+
+#[derive(Args)]
+struct BackupArgs {
+    /// Where to write the copy: a file that doesn't exist, in a
+    /// directory that does.
+    #[arg(value_name = "PATH")]
+    path: PathBuf,
+}
+
+#[derive(Args)]
+struct ImportArgs {
+    /// The file, or `-` for stdin.
+    #[arg(value_name = "PATH", value_parser = read_import)]
+    input: ImportInput,
+    /// Check and count everything, then roll back: nothing is written.
+    #[arg(long)]
+    dry_run: bool,
+}
+
+#[derive(Args)]
+struct SyncArgs {
+    #[command(subcommand)]
+    cmd: Option<SyncCmd>,
 }
 
 #[derive(Subcommand)]
@@ -226,22 +268,11 @@ enum SyncCmd {
     ///
     /// From then on this machine numbers the issues it creates from blocks
     /// of 100 the service gives it, offline or not.
-    Start {
-        /// The service's address: https://HOST (http:// only for localhost).
-        #[arg(value_name = "URL")]
-        url: String,
-    },
+    Start(SyncStartArgs),
     /// Join a replica from another machine, into this workspace: it must be
     /// empty and have the replica's key (make one with lcl workspace create
     /// NAME --key KEY). It receives everything, and its own issue numbers.
-    Join {
-        /// The service's address, as lcl sync start was given it.
-        #[arg(value_name = "URL")]
-        url: String,
-        /// The replica's id, as lcl sync start printed it.
-        #[arg(value_name = "ID")]
-        id: String,
-    },
+    Join(SyncJoinArgs),
     /// Forget the sync service. The file keeps everything, the replica is
     /// left as it is, and issues are numbered from the file's counter
     /// again.
@@ -252,15 +283,35 @@ enum SyncCmd {
     ///
     /// A replica already gone counts as deleted. In a workspace that
     /// doesn't sync, it writes the export and nothing else.
-    Leave {
-        /// Where to write the export (through a temporary file in its
-        /// directory, renamed into place).
-        #[arg(long, value_name = "PATH")]
-        output: String,
-        /// Replace PATH if it exists.
-        #[arg(long)]
-        force: bool,
-    },
+    Leave(SyncLeaveArgs),
+}
+
+#[derive(Args)]
+struct SyncStartArgs {
+    /// The service's address: https://HOST (http:// only for localhost).
+    #[arg(value_name = "URL")]
+    url: String,
+}
+
+#[derive(Args)]
+struct SyncJoinArgs {
+    /// The service's address, as lcl sync start was given it.
+    #[arg(value_name = "URL")]
+    url: String,
+    /// The replica's id, as lcl sync start printed it.
+    #[arg(value_name = "ID")]
+    id: String,
+}
+
+#[derive(Args)]
+struct SyncLeaveArgs {
+    /// Where to write the export (through a temporary file in its
+    /// directory, renamed into place).
+    #[arg(long, value_name = "PATH")]
+    output: String,
+    /// Replace PATH if it exists.
+    #[arg(long)]
+    force: bool,
 }
 
 /// An import file's bytes, read as the arguments are parsed.
@@ -338,21 +389,24 @@ enum WorkspaceCmd {
     /// and every character but letters and digits made -. Two names with the
     /// same slug can't both exist. For a workspace in the current directory,
     /// use lcl init.
-    Create {
-        /// Its name, trimmed: with a letter or digit, and a slug no other workspace has.
-        #[arg(value_parser = parse_workspace_name)]
-        name: String,
-        /// The prefix of its issue identifiers, as DRM in DRM-12: a letter,
-        /// then up to 9 letters or digits. Uppercased.
-        #[arg(long, value_name = "KEY")]
-        key: WorkspaceKey,
-    },
+    Create(WorkspaceCreateArgs),
     /// List registered workspaces: name, slug and path. One whose file is
     /// gone is marked missing.
     List,
     /// Show the current workspace: name, key, path, schema version and
     /// creation time.
     Show,
+}
+
+#[derive(Args)]
+struct WorkspaceCreateArgs {
+    /// Its name, trimmed: with a letter or digit, and a slug no other workspace has.
+    #[arg(value_parser = parse_workspace_name)]
+    name: String,
+    /// The prefix of its issue identifiers, as DRM in DRM-12: a letter,
+    /// then up to 9 letters or digits. Uppercased.
+    #[arg(long, value_name = "KEY")]
+    key: WorkspaceKey,
 }
 
 #[derive(Subcommand)]
@@ -363,221 +417,28 @@ enum IssueCmd {
     // a leading '-' so that "-3" reaches the IssueRef parser and is rejected
     // there, rather than being taken for a flag.
     /// Create an issue. It gets the next number: a number is never handed out twice.
-    Create {
-        /// The issue's title. Not blank.
-        #[arg(long, value_parser = parse_title)]
-        title: String,
-        /// The description inline. For long text, use --description-file.
-        #[arg(long, value_parser = inline_description, conflicts_with = "description_file")]
-        description: Option<String>,
-        /// Read the description from PATH, or from stdin if PATH is `-`. Stored byte for byte.
-        #[arg(long, value_name = "PATH", value_parser = read_description)]
-        description_file: Option<String>,
-        /// Backlog, Todo, In Progress, In Review, Done, Canceled or Duplicate; case, spaces, _ and - are ignored.
-        #[arg(long, default_value = "Backlog")]
-        status: Status,
-        /// 0-4, or none, urgent, high, medium or low (0 is none); case is ignored.
-        #[arg(long, default_value = "0")]
-        priority: Priority,
-        /// Who it is assigned to: a name, trimmed, not blank.
-        #[arg(long, value_parser = parse_assignee)]
-        assignee: Option<String>,
-        /// Its parent issue: KEY-N, #N, N or a UUID.
-        #[arg(long, allow_negative_numbers = true)]
-        parent: Option<IssueRef>,
-        /// A label name (ignoring case); repeat for more.
-        #[arg(long, value_parser = parse_label_name)]
-        label: Vec<String>,
-        /// Its estimate: a whole number, 0 or more.
-        #[arg(long, allow_negative_numbers = true, value_parser = parse_estimate)]
-        estimate: Option<i64>,
-        /// Its due date, as YYYY-MM-DD.
-        #[arg(long, value_parser = parse_date)]
-        due: Option<NaiveDate>,
-        /// The project to put it in, by name (ignoring case) or id.
-        #[arg(long, value_name = "PROJECT", value_parser = parse_project_name, conflicts_with = "no_project")]
-        project: Option<String>,
-        /// Put it in no project (the default).
-        #[arg(long, conflicts_with = "milestone")]
-        no_project: bool,
-        /// Its milestone, by name (ignoring case) or id: one in the --project project, which it needs.
-        #[arg(long, value_name = "MILESTONE", value_parser = parse_milestone_name, conflicts_with = "no_milestone", requires = "project")]
-        milestone: Option<String>,
-        /// Give it no milestone (the default).
-        #[arg(long)]
-        no_milestone: bool,
-        /// The cycle to put it in, by name (trimmed, ignoring case) or id.
-        #[arg(long, value_name = "CYCLE", value_parser = parse_cycle_name)]
-        cycle: Option<String>,
-        /// The id it has elsewhere, as BZR-1532 for a Linear issue: on no
-        /// other issue (ignoring case), and not shaped like a reference to one
-        /// of this workspace's issues (N, #N, its KEY-N, a UUID).
-        #[arg(long = "ref", value_name = "REF", value_parser = parse_ref)]
-        issue_ref: Option<String>,
-        /// Who is creating it. Without it: LCL_AUTHOR, else USER.
-        #[arg(long, value_name = "NAME", value_parser = parse_author)]
-        author: Option<String>,
-    },
+    Create(IssueCreateArgs),
     /// List issues: 50 at a time unless told otherwise, newest number first.
     ///
     /// Filters narrow the list together. A repeated --status matches any of
     /// them; a repeated --label requires all of them.
-    List {
-        /// Only issues with this status; repeat for any of several.
-        #[arg(long, value_name = "STATUS")]
-        status: Vec<Status>,
-        /// Only issues assigned to NAME, ignoring ASCII case; `none` for unassigned issues.
-        #[arg(long, value_name = "NAME", value_parser = parse_assignee_filter)]
-        assignee: Option<AssigneeFilter>,
-        /// Only issues with this label; repeat to require several.
-        #[arg(long, value_name = "LABEL", value_parser = parse_label_name)]
-        label: Vec<String>,
-        /// Only the direct sub-issues of this issue.
-        #[arg(long, allow_negative_numbers = true)]
-        parent: Option<IssueRef>,
-        /// Only issues with a blocker that isn't Done, Canceled or Duplicate.
-        #[arg(long, conflicts_with = "unblocked")]
-        blocked: bool,
-        /// Only issues with no such blocker.
-        #[arg(long)]
-        unblocked: bool,
-        /// Only issues in this project, by name (ignoring case) or id; `none`
-        /// (any case) for issues in no project. A project named "none" is
-        /// selected by its id.
-        #[arg(long, value_name = "PROJECT", value_parser = parse_project_filter)]
-        project: Option<ProjectFilter>,
-        /// Only issues with this milestone, by name (ignoring case) or id: in
-        /// the --project project if given, else in any project.
-        #[arg(long, value_name = "MILESTONE", value_parser = parse_milestone_name)]
-        milestone: Option<String>,
-        /// Only issues in this cycle, by name (trimmed, ignoring case) or id.
-        #[arg(long, value_name = "CYCLE", value_parser = parse_cycle_name)]
-        cycle: Option<String>,
-        /// number, created or updated (each newest first), or priority (Urgent first, None last).
-        #[arg(long, value_name = "ORDER", default_value = "number")]
-        sort: IssueSort,
-        /// Show at most N issues.
-        #[arg(long, value_name = "N", default_value_t = 50, value_parser = clap::value_parser!(u32).range(1..))]
-        limit: u32,
-        /// Skip the first N issues.
-        #[arg(long, value_name = "N", default_value_t = 0)]
-        offset: u32,
-        /// Show every matching issue.
-        #[arg(long, conflicts_with_all = ["limit", "offset"])]
-        all: bool,
-        /// List the trash: only the issues issue delete moved there.
-        #[arg(long)]
-        trashed: bool,
-    },
+    List(IssueListArgs),
     /// Show an issue: its fields, relations, sub-issues and comments.
-    Show {
-        /// The issue: KEY-N, #N, N or its UUID.
-        #[arg(allow_negative_numbers = true)]
-        id: IssueRef,
-    },
+    Show(IssueShowArgs),
     /// Change an issue: only what the flags name changes.
-    Update {
-        /// The issue: KEY-N, #N, N or its UUID.
-        #[arg(allow_negative_numbers = true)]
-        id: IssueRef,
-        /// Its new title. Not blank.
-        #[arg(long, value_parser = parse_title)]
-        title: Option<String>,
-        /// The description inline; "" clears it. For long text, use --description-file.
-        #[arg(long, value_parser = inline_description, conflicts_with = "description_file")]
-        description: Option<String>,
-        /// Read the description from PATH, or from stdin if PATH is `-`. Stored byte for byte.
-        #[arg(long, value_name = "PATH", value_parser = read_description)]
-        description_file: Option<String>,
-        /// Backlog, Todo, In Progress, In Review, Done, Canceled or Duplicate; case, spaces, _ and - are ignored.
-        #[arg(long)]
-        status: Option<Status>,
-        /// 0-4, or none, urgent, high, medium or low (0 is none); case is ignored.
-        #[arg(long)]
-        priority: Option<Priority>,
-        /// Assign it to this name: trimmed, not blank.
-        #[arg(long, value_parser = parse_assignee, conflicts_with = "no_assignee")]
-        assignee: Option<String>,
-        /// Unassign the issue.
-        #[arg(long)]
-        no_assignee: bool,
-        /// Its estimate: a whole number, 0 or more.
-        #[arg(long, allow_negative_numbers = true, value_parser = parse_estimate, conflicts_with = "no_estimate")]
-        estimate: Option<i64>,
-        /// Clear the estimate.
-        #[arg(long)]
-        no_estimate: bool,
-        /// Its due date, as YYYY-MM-DD.
-        #[arg(long, value_parser = parse_date, conflicts_with = "no_due")]
-        due: Option<NaiveDate>,
-        /// Clear the due date.
-        #[arg(long)]
-        no_due: bool,
-        /// Replace all labels with these (names, ignoring case); repeat for more.
-        #[arg(long, value_parser = parse_label_name, conflicts_with_all = ["add_label", "remove_label", "clear_labels"])]
-        label: Vec<String>,
-        /// Add a label, keeping the others; repeatable.
-        #[arg(long, value_parser = parse_label_name)]
-        add_label: Vec<String>,
-        /// Remove a label (a no-op if the issue doesn't have it); repeatable.
-        #[arg(long, value_parser = parse_label_name)]
-        remove_label: Vec<String>,
-        /// Remove every label.
-        #[arg(long, conflicts_with_all = ["add_label", "remove_label"])]
-        clear_labels: bool,
-        /// Move the issue under this one.
-        #[arg(long, allow_negative_numbers = true, conflicts_with = "no_parent")]
-        parent: Option<IssueRef>,
-        /// Make the issue top-level.
-        #[arg(long)]
-        no_parent: bool,
-        /// Move it to this project, by name (ignoring case) or id. A milestone
-        /// it has in another project is cleared, unless --milestone is given.
-        #[arg(long, value_name = "PROJECT", value_parser = parse_project_name, conflicts_with = "no_project")]
-        project: Option<String>,
-        /// Take it out of its project, and so off its milestone.
-        #[arg(long, conflicts_with = "milestone")]
-        no_project: bool,
-        /// Its milestone, by name (ignoring case) or id: one in the issue's
-        /// project (the --project one, or the one it is in).
-        #[arg(long, value_name = "MILESTONE", value_parser = parse_milestone_name, conflicts_with = "no_milestone")]
-        milestone: Option<String>,
-        /// Take it off its milestone, leaving its project.
-        #[arg(long)]
-        no_milestone: bool,
-        /// Put it in this cycle, by name (trimmed, ignoring case) or id, and in no other.
-        #[arg(long, value_name = "CYCLE", value_parser = parse_cycle_name, conflicts_with = "no_cycle")]
-        cycle: Option<String>,
-        /// Take it out of every cycle.
-        #[arg(long)]
-        no_cycle: bool,
-        /// Set the id it has elsewhere, as BZR-1532 (see issue create --ref).
-        #[arg(long = "ref", value_name = "REF", value_parser = parse_ref, conflicts_with = "no_ref")]
-        issue_ref: Option<String>,
-        /// Remove its ref.
-        #[arg(long)]
-        no_ref: bool,
-    },
+    Update(IssueUpdateArgs),
     /// Move an issue to the trash. Refused while it has sub-issues that aren't in the trash.
     ///
     /// The issue keeps its comments, labels, cycles and relations, and its
     /// number and ref stay taken. It is left out of every list, search and
     /// count, and a command that names it is refused, until issue restore
     /// brings it back. issue list --trashed shows the trash.
-    Delete {
-        /// The issue: KEY-N, #N, N or its UUID.
-        #[arg(allow_negative_numbers = true)]
-        id: IssueRef,
-    },
+    Delete(IssueDeleteArgs),
     /// Bring an issue back from the trash, as it was when it was deleted.
     ///
     /// Refused for an issue that isn't in the trash, and while its parent
     /// is: restore the parent first.
-    Restore {
-        /// The issue: KEY-N, #N, N or its UUID.
-        #[arg(allow_negative_numbers = true)]
-        id: IssueRef,
-    },
+    Restore(IssueRestoreArgs),
     /// Remove an issue in the trash for good, or with --all every one.
     ///
     /// This is the only command that removes an issue permanently, and it
@@ -603,29 +464,11 @@ enum IssueCmd {
     /// An issue is a duplicate of at most one issue, and duplicate-of sets its
     /// status to Duplicate. A relation that would make a cycle of blocks, or
     /// of duplicates, is refused.
-    Relate {
-        /// The first issue, A: KEY-N, #N, N or a UUID.
-        #[arg(allow_negative_numbers = true)]
-        a: IssueRef,
-        /// blocks, blocked-by, related or duplicate-of.
-        kind: RelationKind,
-        /// The second issue, B: KEY-N, #N, N or a UUID.
-        #[arg(allow_negative_numbers = true)]
-        b: IssueRef,
-    },
+    Relate(IssueRelateArgs),
     /// Remove a relation, given in either form (B blocks A removes A blocked-by B).
     ///
     /// Statuses stay as they are: unrelating duplicate-of leaves A Duplicate.
-    Unrelate {
-        /// The first issue, A: KEY-N, #N, N or a UUID.
-        #[arg(allow_negative_numbers = true)]
-        a: IssueRef,
-        /// blocks, blocked-by, related or duplicate-of.
-        kind: RelationKind,
-        /// The second issue, B: KEY-N, #N, N or a UUID.
-        #[arg(allow_negative_numbers = true)]
-        b: IssueRef,
-    },
+    Unrelate(IssueUnrelateArgs),
     /// Add a comment: BODY inline, or --body-file PATH. Exactly one.
     // clap would print the group (BODY) before ID; the arguments parse ID first.
     #[command(group(ArgGroup::new("body_source").required(true).args(["body", "body_file"])))]
@@ -645,14 +488,7 @@ enum IssueCmd {
         author: Option<String>,
     },
     /// List an issue's comments, oldest first.
-    Comments {
-        /// The issue: KEY-N, #N, N or its UUID.
-        #[arg(allow_negative_numbers = true)]
-        id: IssueRef,
-        /// List the issue's comments that are in the trash, and no others.
-        #[arg(long)]
-        trashed: bool,
-    },
+    Comments(IssueCommentsArgs),
     /// List what changed in an issue, oldest first: each write's time and
     /// author, and every field it changed, from what to what.
     ///
@@ -660,12 +496,278 @@ enum IssueCmd {
     /// is the issue's creation, or its fields when lcl started to record
     /// them: at an import, or for an issue made before lcl kept history, at
     /// the upgrade that started it. A purge takes its history with it.
-    History {
-        /// The issue: KEY-N, #N, N or its UUID. One in the trash has a
-        /// history too.
-        #[arg(allow_negative_numbers = true)]
-        id: IssueRef,
-    },
+    History(IssueHistoryArgs),
+}
+
+#[derive(Args)]
+struct IssueCreateArgs {
+    /// The issue's title. Not blank.
+    #[arg(long, value_parser = parse_title)]
+    title: String,
+    /// The description inline. For long text, use --description-file.
+    #[arg(long, value_parser = inline_description, conflicts_with = "description_file")]
+    description: Option<String>,
+    /// Read the description from PATH, or from stdin if PATH is `-`. Stored byte for byte.
+    #[arg(long, value_name = "PATH", value_parser = read_description)]
+    description_file: Option<String>,
+    /// Backlog, Todo, In Progress, In Review, Done, Canceled or Duplicate; case, spaces, _ and - are ignored.
+    #[arg(long, default_value = "Backlog")]
+    status: Status,
+    /// 0-4, or none, urgent, high, medium or low (0 is none); case is ignored.
+    #[arg(long, default_value = "0")]
+    priority: Priority,
+    /// Who it is assigned to: a name, trimmed, not blank.
+    #[arg(long, value_parser = parse_assignee)]
+    assignee: Option<String>,
+    /// Its parent issue: KEY-N, #N, N or a UUID.
+    #[arg(long, allow_negative_numbers = true)]
+    parent: Option<IssueRef>,
+    /// A label name (ignoring case); repeat for more.
+    #[arg(long, value_parser = parse_label_name)]
+    label: Vec<String>,
+    /// Its estimate: a whole number, 0 or more.
+    #[arg(long, allow_negative_numbers = true, value_parser = parse_estimate)]
+    estimate: Option<i64>,
+    /// Its due date, as YYYY-MM-DD.
+    #[arg(long, value_parser = parse_date)]
+    due: Option<NaiveDate>,
+    /// The project to put it in, by name (ignoring case) or id.
+    #[arg(long, value_name = "PROJECT", value_parser = parse_project_name, conflicts_with = "no_project")]
+    project: Option<String>,
+    /// Put it in no project (the default).
+    #[arg(long, conflicts_with = "milestone")]
+    no_project: bool,
+    /// Its milestone, by name (ignoring case) or id: one in the --project project, which it needs.
+    #[arg(long, value_name = "MILESTONE", value_parser = parse_milestone_name, conflicts_with = "no_milestone", requires = "project")]
+    milestone: Option<String>,
+    /// Give it no milestone (the default).
+    #[arg(long)]
+    no_milestone: bool,
+    /// The cycle to put it in, by name (trimmed, ignoring case) or id.
+    #[arg(long, value_name = "CYCLE", value_parser = parse_cycle_name)]
+    cycle: Option<String>,
+    /// The id it has elsewhere, as BZR-1532 for a Linear issue: on no
+    /// other issue (ignoring case), and not shaped like a reference to one
+    /// of this workspace's issues (N, #N, its KEY-N, a UUID).
+    #[arg(long = "ref", value_name = "REF", value_parser = parse_ref)]
+    issue_ref: Option<String>,
+    /// Who is creating it. Without it: LCL_AUTHOR, else USER.
+    #[arg(long, value_name = "NAME", value_parser = parse_author)]
+    author: Option<String>,
+}
+
+#[derive(Args)]
+struct IssueListArgs {
+    /// Only issues with this status; repeat for any of several.
+    #[arg(long, value_name = "STATUS")]
+    status: Vec<Status>,
+    /// Only issues assigned to NAME, ignoring ASCII case; `none` for unassigned issues.
+    #[arg(long, value_name = "NAME", value_parser = parse_assignee_filter)]
+    assignee: Option<AssigneeFilter>,
+    /// Only issues with this label; repeat to require several.
+    #[arg(long, value_name = "LABEL", value_parser = parse_label_name)]
+    label: Vec<String>,
+    /// Only the direct sub-issues of this issue.
+    #[arg(long, allow_negative_numbers = true)]
+    parent: Option<IssueRef>,
+    /// Only issues with a blocker that isn't Done, Canceled or Duplicate.
+    #[arg(long, conflicts_with = "unblocked")]
+    blocked: bool,
+    /// Only issues with no such blocker.
+    #[arg(long)]
+    unblocked: bool,
+    /// Only issues in this project, by name (ignoring case) or id; `none`
+    /// (any case) for issues in no project. A project named "none" is
+    /// selected by its id.
+    #[arg(long, value_name = "PROJECT", value_parser = parse_project_filter)]
+    project: Option<ProjectFilter>,
+    /// Only issues with this milestone, by name (ignoring case) or id: in
+    /// the --project project if given, else in any project.
+    #[arg(long, value_name = "MILESTONE", value_parser = parse_milestone_name)]
+    milestone: Option<String>,
+    /// Only issues in this cycle, by name (trimmed, ignoring case) or id.
+    #[arg(long, value_name = "CYCLE", value_parser = parse_cycle_name)]
+    cycle: Option<String>,
+    /// number, created or updated (each newest first), or priority (Urgent first, None last).
+    #[arg(long, value_name = "ORDER", default_value = "number")]
+    sort: IssueSort,
+    /// Show at most N issues.
+    #[arg(long, value_name = "N", default_value_t = 50, value_parser = clap::value_parser!(u32).range(1..))]
+    limit: u32,
+    /// Skip the first N issues.
+    #[arg(long, value_name = "N", default_value_t = 0)]
+    offset: u32,
+    /// Show every matching issue.
+    #[arg(long, conflicts_with_all = ["limit", "offset"])]
+    all: bool,
+    /// List the trash: only the issues issue delete moved there.
+    #[arg(long)]
+    trashed: bool,
+}
+
+#[derive(Args)]
+struct IssueShowArgs {
+    /// The issue: KEY-N, #N, N or its UUID.
+    #[arg(allow_negative_numbers = true)]
+    id: IssueRef,
+}
+
+#[derive(Args)]
+struct IssueUpdateArgs {
+    /// The issue: KEY-N, #N, N or its UUID.
+    #[arg(allow_negative_numbers = true)]
+    id: IssueRef,
+    #[command(flatten)]
+    fields: IssueUpdateFields,
+    #[command(flatten)]
+    labels: IssueUpdateLabels,
+    #[command(flatten)]
+    place: IssueUpdatePlace,
+}
+
+#[derive(Args)]
+struct IssueUpdateFields {
+    /// Its new title. Not blank.
+    #[arg(long, value_parser = parse_title)]
+    title: Option<String>,
+    /// The description inline; "" clears it. For long text, use --description-file.
+    #[arg(long, value_parser = inline_description, conflicts_with = "description_file")]
+    description: Option<String>,
+    /// Read the description from PATH, or from stdin if PATH is `-`. Stored byte for byte.
+    #[arg(long, value_name = "PATH", value_parser = read_description)]
+    description_file: Option<String>,
+    /// Backlog, Todo, In Progress, In Review, Done, Canceled or Duplicate; case, spaces, _ and - are ignored.
+    #[arg(long)]
+    status: Option<Status>,
+    /// 0-4, or none, urgent, high, medium or low (0 is none); case is ignored.
+    #[arg(long)]
+    priority: Option<Priority>,
+    /// Assign it to this name: trimmed, not blank.
+    #[arg(long, value_parser = parse_assignee, conflicts_with = "no_assignee")]
+    assignee: Option<String>,
+    /// Unassign the issue.
+    #[arg(long)]
+    no_assignee: bool,
+    /// Its estimate: a whole number, 0 or more.
+    #[arg(long, allow_negative_numbers = true, value_parser = parse_estimate, conflicts_with = "no_estimate")]
+    estimate: Option<i64>,
+    /// Clear the estimate.
+    #[arg(long)]
+    no_estimate: bool,
+    /// Its due date, as YYYY-MM-DD.
+    #[arg(long, value_parser = parse_date, conflicts_with = "no_due")]
+    due: Option<NaiveDate>,
+    /// Clear the due date.
+    #[arg(long)]
+    no_due: bool,
+}
+
+#[derive(Args)]
+struct IssueUpdateLabels {
+    /// Replace all labels with these (names, ignoring case); repeat for more.
+    #[arg(long, value_parser = parse_label_name, conflicts_with_all = ["add_label", "remove_label", "clear_labels"])]
+    label: Vec<String>,
+    /// Add a label, keeping the others; repeatable.
+    #[arg(long, value_parser = parse_label_name)]
+    add_label: Vec<String>,
+    /// Remove a label (a no-op if the issue doesn't have it); repeatable.
+    #[arg(long, value_parser = parse_label_name)]
+    remove_label: Vec<String>,
+    /// Remove every label.
+    #[arg(long, conflicts_with_all = ["add_label", "remove_label"])]
+    clear_labels: bool,
+    /// Move the issue under this one.
+    #[arg(long, allow_negative_numbers = true, conflicts_with = "no_parent")]
+    parent: Option<IssueRef>,
+    /// Make the issue top-level.
+    #[arg(long)]
+    no_parent: bool,
+}
+
+#[derive(Args)]
+struct IssueUpdatePlace {
+    /// Move it to this project, by name (ignoring case) or id. A milestone
+    /// it has in another project is cleared, unless --milestone is given.
+    #[arg(long, value_name = "PROJECT", value_parser = parse_project_name, conflicts_with = "no_project")]
+    project: Option<String>,
+    /// Take it out of its project, and so off its milestone.
+    #[arg(long, conflicts_with = "milestone")]
+    no_project: bool,
+    /// Its milestone, by name (ignoring case) or id: one in the issue's
+    /// project (the --project one, or the one it is in).
+    #[arg(long, value_name = "MILESTONE", value_parser = parse_milestone_name, conflicts_with = "no_milestone")]
+    milestone: Option<String>,
+    /// Take it off its milestone, leaving its project.
+    #[arg(long)]
+    no_milestone: bool,
+    /// Put it in this cycle, by name (trimmed, ignoring case) or id, and in no other.
+    #[arg(long, value_name = "CYCLE", value_parser = parse_cycle_name, conflicts_with = "no_cycle")]
+    cycle: Option<String>,
+    /// Take it out of every cycle.
+    #[arg(long)]
+    no_cycle: bool,
+    /// Set the id it has elsewhere, as BZR-1532 (see issue create --ref).
+    #[arg(long = "ref", value_name = "REF", value_parser = parse_ref, conflicts_with = "no_ref")]
+    issue_ref: Option<String>,
+    /// Remove its ref.
+    #[arg(long)]
+    no_ref: bool,
+}
+
+#[derive(Args)]
+struct IssueDeleteArgs {
+    /// The issue: KEY-N, #N, N or its UUID.
+    #[arg(allow_negative_numbers = true)]
+    id: IssueRef,
+}
+
+#[derive(Args)]
+struct IssueRestoreArgs {
+    /// The issue: KEY-N, #N, N or its UUID.
+    #[arg(allow_negative_numbers = true)]
+    id: IssueRef,
+}
+
+#[derive(Args)]
+struct IssueRelateArgs {
+    /// The first issue, A: KEY-N, #N, N or a UUID.
+    #[arg(allow_negative_numbers = true)]
+    a: IssueRef,
+    /// blocks, blocked-by, related or duplicate-of.
+    kind: RelationKind,
+    /// The second issue, B: KEY-N, #N, N or a UUID.
+    #[arg(allow_negative_numbers = true)]
+    b: IssueRef,
+}
+
+#[derive(Args)]
+struct IssueUnrelateArgs {
+    /// The first issue, A: KEY-N, #N, N or a UUID.
+    #[arg(allow_negative_numbers = true)]
+    a: IssueRef,
+    /// blocks, blocked-by, related or duplicate-of.
+    kind: RelationKind,
+    /// The second issue, B: KEY-N, #N, N or a UUID.
+    #[arg(allow_negative_numbers = true)]
+    b: IssueRef,
+}
+
+#[derive(Args)]
+struct IssueCommentsArgs {
+    /// The issue: KEY-N, #N, N or its UUID.
+    #[arg(allow_negative_numbers = true)]
+    id: IssueRef,
+    /// List the issue's comments that are in the trash, and no others.
+    #[arg(long)]
+    trashed: bool,
+}
+
+#[derive(Args)]
+struct IssueHistoryArgs {
+    /// The issue: KEY-N, #N, N or its UUID. One in the trash has a
+    /// history too.
+    #[arg(allow_negative_numbers = true)]
+    id: IssueRef,
 }
 
 #[derive(Subcommand)]
@@ -674,218 +776,203 @@ enum ProjectCmd {
     ///
     /// (lcl 0.1.0's project create --global made a workspace; that is now
     /// lcl workspace create.)
-    Create {
-        /// The project's name: unique in this workspace, ignoring case.
-        #[arg(value_name = "NAME", value_parser = parse_project_name)]
-        name: String,
-        /// The description inline. For long text, use --description-file.
-        #[arg(long, value_parser = inline_description, conflicts_with = "description_file")]
-        description: Option<String>,
-        /// Read the description from PATH, or from stdin if PATH is `-`. Stored byte for byte.
-        #[arg(long, value_name = "PATH", value_parser = read_description)]
-        description_file: Option<String>,
-        /// Backlog, Planned, Started (or In Progress), Paused, Completed or Canceled; case and spaces are ignored.
-        #[arg(long, default_value = "Backlog")]
-        status: ProjectStatus,
-        /// When it should be done, as YYYY-MM-DD.
-        #[arg(long, value_name = "DATE", value_parser = parse_date)]
-        target_date: Option<NaiveDate>,
-        /// lcl 0.1.0's flag for a global workspace: refused with a hint.
-        #[arg(long, hide = true)]
-        global: bool,
-        /// lcl 0.1.0's workspace key: refused with a hint.
-        #[arg(long, hide = true, num_args = 0..=1, default_missing_value = "", allow_hyphen_values = true)]
-        key: Option<String>,
-    },
+    Create(ProjectCreateArgs),
     /// List projects, by name.
-    List {
-        /// Only projects with this status; repeat for any of several.
-        #[arg(long, value_name = "STATUS")]
-        status: Vec<ProjectStatus>,
-    },
+    List(ProjectListArgs),
     /// Show a project: its fields, its issues counted by status, and its
     /// milestones by sort order, then name.
-    Show {
-        /// The project's name (ignoring case) or id.
-        #[arg(value_name = "PROJECT", value_parser = parse_project_name)]
-        project: String,
-    },
+    Show(ProjectShowArgs),
     /// Change a project's name, description, status or target date.
-    Update {
-        /// The project's name (ignoring case) or id.
-        #[arg(value_name = "PROJECT", value_parser = parse_project_name)]
-        project: String,
-        /// Its new name: unique in this workspace, ignoring case (its own name in another case is fine).
-        #[arg(long, value_name = "NAME", value_parser = parse_project_name)]
-        name: Option<String>,
-        /// The description inline; "" clears it. For long text, use --description-file.
-        #[arg(long, value_parser = inline_description, conflicts_with = "description_file")]
-        description: Option<String>,
-        /// Read the description from PATH, or from stdin if PATH is `-`. Stored byte for byte.
-        #[arg(long, value_name = "PATH", value_parser = read_description)]
-        description_file: Option<String>,
-        /// Backlog, Planned, Started (or In Progress), Paused, Completed or Canceled; case and spaces are ignored.
-        #[arg(long)]
-        status: Option<ProjectStatus>,
-        /// When it should be done, as YYYY-MM-DD.
-        #[arg(long, value_name = "DATE", value_parser = parse_date, conflicts_with = "no_target_date")]
-        target_date: Option<NaiveDate>,
-        /// Clear the target date.
-        #[arg(long)]
-        no_target_date: bool,
-    },
+    Update(ProjectUpdateArgs),
     /// Delete a project. Refused while it has issues or milestones.
-    Delete {
-        /// The project's name (ignoring case) or id.
-        #[arg(value_name = "PROJECT", value_parser = parse_project_name)]
-        project: String,
-    },
+    Delete(ProjectDeleteArgs),
+}
+
+#[derive(Args)]
+struct ProjectCreateArgs {
+    /// The project's name: unique in this workspace, ignoring case.
+    #[arg(value_name = "NAME", value_parser = parse_project_name)]
+    name: String,
+    /// The description inline. For long text, use --description-file.
+    #[arg(long, value_parser = inline_description, conflicts_with = "description_file")]
+    description: Option<String>,
+    /// Read the description from PATH, or from stdin if PATH is `-`. Stored byte for byte.
+    #[arg(long, value_name = "PATH", value_parser = read_description)]
+    description_file: Option<String>,
+    /// Backlog, Planned, Started (or In Progress), Paused, Completed or Canceled; case and spaces are ignored.
+    #[arg(long, default_value = "Backlog")]
+    status: ProjectStatus,
+    /// When it should be done, as YYYY-MM-DD.
+    #[arg(long, value_name = "DATE", value_parser = parse_date)]
+    target_date: Option<NaiveDate>,
+    /// lcl 0.1.0's flag for a global workspace: refused with a hint.
+    #[arg(long, hide = true)]
+    global: bool,
+    /// lcl 0.1.0's workspace key: refused with a hint.
+    #[arg(long, hide = true, num_args = 0..=1, default_missing_value = "", allow_hyphen_values = true)]
+    key: Option<String>,
+}
+
+#[derive(Args)]
+struct ProjectListArgs {
+    /// Only projects with this status; repeat for any of several.
+    #[arg(long, value_name = "STATUS")]
+    status: Vec<ProjectStatus>,
+}
+
+#[derive(Args)]
+struct ProjectShowArgs {
+    /// The project's name (ignoring case) or id.
+    #[arg(value_name = "PROJECT", value_parser = parse_project_name)]
+    project: String,
+}
+
+#[derive(Args)]
+struct ProjectUpdateArgs {
+    /// The project's name (ignoring case) or id.
+    #[arg(value_name = "PROJECT", value_parser = parse_project_name)]
+    project: String,
+    /// Its new name: unique in this workspace, ignoring case (its own name in another case is fine).
+    #[arg(long, value_name = "NAME", value_parser = parse_project_name)]
+    name: Option<String>,
+    /// The description inline; "" clears it. For long text, use --description-file.
+    #[arg(long, value_parser = inline_description, conflicts_with = "description_file")]
+    description: Option<String>,
+    /// Read the description from PATH, or from stdin if PATH is `-`. Stored byte for byte.
+    #[arg(long, value_name = "PATH", value_parser = read_description)]
+    description_file: Option<String>,
+    /// Backlog, Planned, Started (or In Progress), Paused, Completed or Canceled; case and spaces are ignored.
+    #[arg(long)]
+    status: Option<ProjectStatus>,
+    /// When it should be done, as YYYY-MM-DD.
+    #[arg(long, value_name = "DATE", value_parser = parse_date, conflicts_with = "no_target_date")]
+    target_date: Option<NaiveDate>,
+    /// Clear the target date.
+    #[arg(long)]
+    no_target_date: bool,
+}
+
+#[derive(Args)]
+struct ProjectDeleteArgs {
+    /// The project's name (ignoring case) or id.
+    #[arg(value_name = "PROJECT", value_parser = parse_project_name)]
+    project: String,
 }
 
 #[derive(Subcommand)]
 enum MilestoneCmd {
     /// Create a milestone in a project. It stays in that project.
-    Create {
-        /// The milestone's name: unique in its project, ignoring case.
-        #[arg(value_name = "NAME", value_parser = parse_milestone_name)]
-        name: String,
-        /// Its project, by name (ignoring case) or id.
-        #[arg(long, value_name = "PROJECT", value_parser = parse_project_name)]
-        project: String,
-        /// The description inline. For long text, use --description-file.
-        #[arg(long, value_parser = inline_description, conflicts_with = "description_file")]
-        description: Option<String>,
-        /// Read the description from PATH, or from stdin if PATH is `-`. Stored byte for byte.
-        #[arg(long, value_name = "PATH", value_parser = read_description)]
-        description_file: Option<String>,
-        /// When it should be reached, as YYYY-MM-DD.
-        #[arg(long, value_name = "DATE", value_parser = parse_date)]
-        target_date: Option<NaiveDate>,
-        /// Its place among its project's milestones: lower first, ties by name. May be negative.
-        #[arg(
-            long,
-            value_name = "N",
-            default_value_t = 0,
-            allow_negative_numbers = true
-        )]
-        sort_order: i64,
-    },
+    Create(MilestoneCreateArgs),
     /// List milestones, by project name, then sort order, then name.
-    List {
-        /// Only this project's milestones, by name (ignoring case) or id.
-        #[arg(long, value_name = "PROJECT", value_parser = parse_project_name)]
-        project: Option<String>,
-    },
+    List(MilestoneListArgs),
     /// Show a milestone and its issues counted by status.
-    Show {
-        /// The milestone's name (ignoring case) or id. A name several projects have needs --project.
-        #[arg(value_name = "MILESTONE", value_parser = parse_milestone_name)]
-        milestone: String,
-        /// The project to look in, by name (ignoring case) or id.
-        #[arg(long, value_name = "PROJECT", value_parser = parse_project_name)]
-        project: Option<String>,
-    },
+    Show(MilestoneShowArgs),
     /// Change a milestone's name, description, target date or sort order. It can't move to another project.
-    Update {
-        /// The milestone's name (ignoring case) or id. A name several projects have needs --project.
-        #[arg(value_name = "MILESTONE", value_parser = parse_milestone_name)]
-        milestone: String,
-        /// The project to look in, by name (ignoring case) or id.
-        #[arg(long, value_name = "PROJECT", value_parser = parse_project_name)]
-        project: Option<String>,
-        /// Its new name: unique in its project, ignoring case (its own name in another case is fine).
-        #[arg(long, value_name = "NAME", value_parser = parse_milestone_name)]
-        name: Option<String>,
-        /// The description inline; "" clears it. For long text, use --description-file.
-        #[arg(long, value_parser = inline_description, conflicts_with = "description_file")]
-        description: Option<String>,
-        /// Read the description from PATH, or from stdin if PATH is `-`. Stored byte for byte.
-        #[arg(long, value_name = "PATH", value_parser = read_description)]
-        description_file: Option<String>,
-        /// When it should be reached, as YYYY-MM-DD.
-        #[arg(long, value_name = "DATE", value_parser = parse_date, conflicts_with = "no_target_date")]
-        target_date: Option<NaiveDate>,
-        /// Clear the target date.
-        #[arg(long)]
-        no_target_date: bool,
-        /// Its place among its project's milestones: lower first, ties by name. May be negative.
-        #[arg(long, value_name = "N", allow_negative_numbers = true)]
-        sort_order: Option<i64>,
-    },
+    Update(MilestoneUpdateArgs),
     /// Delete a milestone. Refused while issues have it.
-    Delete {
-        /// The milestone's name (ignoring case) or id. A name several projects have needs --project.
-        #[arg(value_name = "MILESTONE", value_parser = parse_milestone_name)]
-        milestone: String,
-        /// The project to look in, by name (ignoring case) or id.
-        #[arg(long, value_name = "PROJECT", value_parser = parse_project_name)]
-        project: Option<String>,
-    },
+    Delete(MilestoneDeleteArgs),
+}
+
+#[derive(Args)]
+struct MilestoneCreateArgs {
+    /// The milestone's name: unique in its project, ignoring case.
+    #[arg(value_name = "NAME", value_parser = parse_milestone_name)]
+    name: String,
+    /// Its project, by name (ignoring case) or id.
+    #[arg(long, value_name = "PROJECT", value_parser = parse_project_name)]
+    project: String,
+    /// The description inline. For long text, use --description-file.
+    #[arg(long, value_parser = inline_description, conflicts_with = "description_file")]
+    description: Option<String>,
+    /// Read the description from PATH, or from stdin if PATH is `-`. Stored byte for byte.
+    #[arg(long, value_name = "PATH", value_parser = read_description)]
+    description_file: Option<String>,
+    /// When it should be reached, as YYYY-MM-DD.
+    #[arg(long, value_name = "DATE", value_parser = parse_date)]
+    target_date: Option<NaiveDate>,
+    /// Its place among its project's milestones: lower first, ties by name. May be negative.
+    #[arg(
+        long,
+        value_name = "N",
+        default_value_t = 0,
+        allow_negative_numbers = true
+    )]
+    sort_order: i64,
+}
+
+#[derive(Args)]
+struct MilestoneListArgs {
+    /// Only this project's milestones, by name (ignoring case) or id.
+    #[arg(long, value_name = "PROJECT", value_parser = parse_project_name)]
+    project: Option<String>,
+}
+
+#[derive(Args)]
+struct MilestoneShowArgs {
+    /// The milestone's name (ignoring case) or id. A name several projects have needs --project.
+    #[arg(value_name = "MILESTONE", value_parser = parse_milestone_name)]
+    milestone: String,
+    /// The project to look in, by name (ignoring case) or id.
+    #[arg(long, value_name = "PROJECT", value_parser = parse_project_name)]
+    project: Option<String>,
+}
+
+#[derive(Args)]
+struct MilestoneUpdateArgs {
+    /// The milestone's name (ignoring case) or id. A name several projects have needs --project.
+    #[arg(value_name = "MILESTONE", value_parser = parse_milestone_name)]
+    milestone: String,
+    /// The project to look in, by name (ignoring case) or id.
+    #[arg(long, value_name = "PROJECT", value_parser = parse_project_name)]
+    project: Option<String>,
+    /// Its new name: unique in its project, ignoring case (its own name in another case is fine).
+    #[arg(long, value_name = "NAME", value_parser = parse_milestone_name)]
+    name: Option<String>,
+    /// The description inline; "" clears it. For long text, use --description-file.
+    #[arg(long, value_parser = inline_description, conflicts_with = "description_file")]
+    description: Option<String>,
+    /// Read the description from PATH, or from stdin if PATH is `-`. Stored byte for byte.
+    #[arg(long, value_name = "PATH", value_parser = read_description)]
+    description_file: Option<String>,
+    /// When it should be reached, as YYYY-MM-DD.
+    #[arg(long, value_name = "DATE", value_parser = parse_date, conflicts_with = "no_target_date")]
+    target_date: Option<NaiveDate>,
+    /// Clear the target date.
+    #[arg(long)]
+    no_target_date: bool,
+    /// Its place among its project's milestones: lower first, ties by name. May be negative.
+    #[arg(long, value_name = "N", allow_negative_numbers = true)]
+    sort_order: Option<i64>,
+}
+
+#[derive(Args)]
+struct MilestoneDeleteArgs {
+    /// The milestone's name (ignoring case) or id. A name several projects have needs --project.
+    #[arg(value_name = "MILESTONE", value_parser = parse_milestone_name)]
+    milestone: String,
+    /// The project to look in, by name (ignoring case) or id.
+    #[arg(long, value_name = "PROJECT", value_parser = parse_project_name)]
+    project: Option<String>,
 }
 
 #[derive(Subcommand)]
 enum DocCmd {
     /// Create a doc, at the top level or under another doc.
-    Create {
-        /// The doc's title. Not blank.
-        #[arg(long, value_parser = parse_title)]
-        title: String,
-        /// The content inline. For long text, use --content-file.
-        #[arg(long, value_parser = inline_content, conflicts_with = "content_file")]
-        content: Option<String>,
-        /// Read the content from PATH, or from stdin if PATH is `-`. Stored byte for byte.
-        #[arg(long, value_name = "PATH", value_parser = read_content)]
-        content_file: Option<String>,
-        /// The parent doc's id: it must exist.
-        #[arg(long, value_name = "ID")]
-        parent: Option<String>,
-    },
+    Create(DocCreateArgs),
     /// List docs: id and title, most recently updated first.
-    List {
-        /// List the trash: only the docs doc delete moved there.
-        #[arg(long)]
-        trashed: bool,
-    },
+    List(DocListArgs),
     /// Show a doc: its title and content.
-    Show {
-        /// The doc's id, as doc list shows it.
-        id: String,
-    },
+    Show(DocShowArgs),
     /// Change a doc's title, content or parent: only what the flags name changes.
-    Update {
-        /// The doc's id, as doc list shows it.
-        id: String,
-        /// Its new title. Not blank.
-        #[arg(long, value_parser = parse_title)]
-        title: Option<String>,
-        /// The content inline; "" clears it. For long text, use --content-file.
-        #[arg(long, value_parser = inline_content, conflicts_with = "content_file")]
-        content: Option<String>,
-        /// Read the content from PATH, or from stdin if PATH is `-`. Stored byte for byte.
-        #[arg(long, value_name = "PATH", value_parser = read_content)]
-        content_file: Option<String>,
-        /// Move it under the doc with this id, which must exist and must not
-        /// be this doc or one below it.
-        #[arg(long, value_name = "ID", conflicts_with = "no_parent")]
-        parent: Option<String>,
-        /// Make it a top-level doc.
-        #[arg(long)]
-        no_parent: bool,
-    },
+    Update(DocUpdateArgs),
     /// Move a doc to the trash. Refused while docs that aren't in the trash are under it.
     ///
     /// The doc is left out of doc list and search, and a command that
     /// names it is refused, until doc restore brings it back. doc list
     /// --trashed shows the trash.
-    Delete {
-        /// The doc's id, as doc list shows it.
-        id: String,
-    },
+    Delete(DocDeleteArgs),
     /// Bring a doc back from the trash, as it was. Refused while its parent is there.
-    Restore {
-        /// The doc's id, as doc list --trashed shows it.
-        id: String,
-    },
+    Restore(DocRestoreArgs),
     /// Remove a doc in the trash for good, or with --all every one. It can't be undone.
     ///
     /// Only a doc in the trash can be purged, and one with docs under it
@@ -900,38 +987,82 @@ enum DocCmd {
     },
 }
 
+#[derive(Args)]
+struct DocCreateArgs {
+    /// The doc's title. Not blank.
+    #[arg(long, value_parser = parse_title)]
+    title: String,
+    /// The content inline. For long text, use --content-file.
+    #[arg(long, value_parser = inline_content, conflicts_with = "content_file")]
+    content: Option<String>,
+    /// Read the content from PATH, or from stdin if PATH is `-`. Stored byte for byte.
+    #[arg(long, value_name = "PATH", value_parser = read_content)]
+    content_file: Option<String>,
+    /// The parent doc's id: it must exist.
+    #[arg(long, value_name = "ID")]
+    parent: Option<String>,
+}
+
+#[derive(Args)]
+struct DocListArgs {
+    /// List the trash: only the docs doc delete moved there.
+    #[arg(long)]
+    trashed: bool,
+}
+
+#[derive(Args)]
+struct DocShowArgs {
+    /// The doc's id, as doc list shows it.
+    id: String,
+}
+
+#[derive(Args)]
+struct DocUpdateArgs {
+    /// The doc's id, as doc list shows it.
+    id: String,
+    /// Its new title. Not blank.
+    #[arg(long, value_parser = parse_title)]
+    title: Option<String>,
+    /// The content inline; "" clears it. For long text, use --content-file.
+    #[arg(long, value_parser = inline_content, conflicts_with = "content_file")]
+    content: Option<String>,
+    /// Read the content from PATH, or from stdin if PATH is `-`. Stored byte for byte.
+    #[arg(long, value_name = "PATH", value_parser = read_content)]
+    content_file: Option<String>,
+    /// Move it under the doc with this id, which must exist and must not
+    /// be this doc or one below it.
+    #[arg(long, value_name = "ID", conflicts_with = "no_parent")]
+    parent: Option<String>,
+    /// Make it a top-level doc.
+    #[arg(long)]
+    no_parent: bool,
+}
+
+#[derive(Args)]
+struct DocDeleteArgs {
+    /// The doc's id, as doc list shows it.
+    id: String,
+}
+
+#[derive(Args)]
+struct DocRestoreArgs {
+    /// The doc's id, as doc list --trashed shows it.
+    id: String,
+}
+
 #[derive(Subcommand)]
 enum LabelCmd {
     /// Create a label.
-    Create {
-        /// The label's name, trimmed: not blank, and unique ignoring case.
-        #[arg(value_parser = parse_label_name)]
-        name: String,
-        /// Its color, as #rgb or #rrggbb.
-        #[arg(long, default_value = "#888888", value_parser = parse_color)]
-        color: String,
-    },
+    Create(LabelCreateArgs),
     /// List labels: id, name and color, by name.
-    List {
-        /// List the trash: only the labels label delete moved there.
-        #[arg(long)]
-        trashed: bool,
-    },
+    List(LabelListArgs),
     /// Move a label to the trash, by name (ignoring case) or id. No issue shows it any more.
     ///
     /// Its name stays taken, and the issues that had it are remembered:
     /// label restore puts it back on every one of them.
-    Delete {
-        /// The label's name (ignoring case) or id.
-        #[arg(value_parser = parse_label_name)]
-        name_or_id: String,
-    },
+    Delete(LabelDeleteArgs),
     /// Bring a label back from the trash, onto every issue that had it.
-    Restore {
-        /// The label's name (ignoring case) or id.
-        #[arg(value_parser = parse_label_name)]
-        name_or_id: String,
-    },
+    Restore(LabelRestoreArgs),
     /// Remove a label in the trash for good, or with --all every one. It can't be undone.
     ///
     /// Only a label in the trash can be purged. It goes with its links to
@@ -947,49 +1078,89 @@ enum LabelCmd {
     },
 }
 
+#[derive(Args)]
+struct LabelCreateArgs {
+    /// The label's name, trimmed: not blank, and unique ignoring case.
+    #[arg(value_parser = parse_label_name)]
+    name: String,
+    /// Its color, as #rgb or #rrggbb.
+    #[arg(long, default_value = "#888888", value_parser = parse_color)]
+    color: String,
+}
+
+#[derive(Args)]
+struct LabelListArgs {
+    /// List the trash: only the labels label delete moved there.
+    #[arg(long)]
+    trashed: bool,
+}
+
+#[derive(Args)]
+struct LabelDeleteArgs {
+    /// The label's name (ignoring case) or id.
+    #[arg(value_parser = parse_label_name)]
+    name_or_id: String,
+}
+
+#[derive(Args)]
+struct LabelRestoreArgs {
+    /// The label's name (ignoring case) or id.
+    #[arg(value_parser = parse_label_name)]
+    name_or_id: String,
+}
+
 #[derive(Subcommand)]
 enum CycleCmd {
     /// Create a cycle, with or without its dates.
-    Create {
-        /// The cycle's name, trimmed: no other cycle's, ignoring case.
-        #[arg(value_parser = parse_cycle_name)]
-        name: String,
-        /// Its first day, as YYYY-MM-DD.
-        #[arg(long, value_parser = parse_date)]
-        start: Option<NaiveDate>,
-        /// Its last day, as YYYY-MM-DD: not before --start.
-        #[arg(long, value_parser = parse_date)]
-        end: Option<NaiveDate>,
-    },
+    Create(CycleCreateArgs),
     /// List cycles: id, name and dates, newest first.
     List,
     /// Rename a cycle, or set or clear its dates. The end can't come before the start.
-    Update {
-        /// The cycle's name (trimmed, ignoring case) or id. A name several cycles have needs the id.
-        #[arg(value_name = "CYCLE", value_parser = parse_cycle_name)]
-        cycle: String,
-        /// Its new name, trimmed: no other cycle's, ignoring case (its own in another case is fine).
-        #[arg(long, value_name = "NAME", value_parser = parse_cycle_name)]
-        name: Option<String>,
-        /// Its first day, as YYYY-MM-DD.
-        #[arg(long, value_name = "DATE", value_parser = parse_date, conflicts_with = "no_start")]
-        start: Option<NaiveDate>,
-        /// Clear its first day.
-        #[arg(long)]
-        no_start: bool,
-        /// Its last day, as YYYY-MM-DD: not before its start.
-        #[arg(long, value_name = "DATE", value_parser = parse_date, conflicts_with = "no_end")]
-        end: Option<NaiveDate>,
-        /// Clear its last day.
-        #[arg(long)]
-        no_end: bool,
-    },
+    Update(CycleUpdateArgs),
     /// Delete a cycle. Refused while any issue is in it.
-    Delete {
-        /// The cycle's name (trimmed, ignoring case) or id. A name several cycles have needs the id.
-        #[arg(value_name = "CYCLE", value_parser = parse_cycle_name)]
-        cycle: String,
-    },
+    Delete(CycleDeleteArgs),
+}
+
+#[derive(Args)]
+struct CycleCreateArgs {
+    /// The cycle's name, trimmed: no other cycle's, ignoring case.
+    #[arg(value_parser = parse_cycle_name)]
+    name: String,
+    /// Its first day, as YYYY-MM-DD.
+    #[arg(long, value_parser = parse_date)]
+    start: Option<NaiveDate>,
+    /// Its last day, as YYYY-MM-DD: not before --start.
+    #[arg(long, value_parser = parse_date)]
+    end: Option<NaiveDate>,
+}
+
+#[derive(Args)]
+struct CycleUpdateArgs {
+    /// The cycle's name (trimmed, ignoring case) or id. A name several cycles have needs the id.
+    #[arg(value_name = "CYCLE", value_parser = parse_cycle_name)]
+    cycle: String,
+    /// Its new name, trimmed: no other cycle's, ignoring case (its own in another case is fine).
+    #[arg(long, value_name = "NAME", value_parser = parse_cycle_name)]
+    name: Option<String>,
+    /// Its first day, as YYYY-MM-DD.
+    #[arg(long, value_name = "DATE", value_parser = parse_date, conflicts_with = "no_start")]
+    start: Option<NaiveDate>,
+    /// Clear its first day.
+    #[arg(long)]
+    no_start: bool,
+    /// Its last day, as YYYY-MM-DD: not before its start.
+    #[arg(long, value_name = "DATE", value_parser = parse_date, conflicts_with = "no_end")]
+    end: Option<NaiveDate>,
+    /// Clear its last day.
+    #[arg(long)]
+    no_end: bool,
+}
+
+#[derive(Args)]
+struct CycleDeleteArgs {
+    /// The cycle's name (trimmed, ignoring case) or id. A name several cycles have needs the id.
+    #[arg(value_name = "CYCLE", value_parser = parse_cycle_name)]
+    cycle: String,
 }
 
 #[derive(Subcommand)]
@@ -1009,15 +1180,9 @@ enum CommentCmd {
         body_file: Option<String>,
     },
     /// Move a comment to the trash. issue show, issue comments and search leave it out.
-    Delete {
-        /// The comment's id (a UUID, ignoring case), as issue comments --json shows it.
-        id: String,
-    },
+    Delete(CommentDeleteArgs),
     /// Bring a comment back from the trash, as it was.
-    Restore {
-        /// The comment's id (a UUID, ignoring case), as issue comments --trashed --json shows it.
-        id: String,
-    },
+    Restore(CommentRestoreArgs),
     /// Remove a comment in the trash for good, or with --all every one. It can't be undone.
     ///
     /// Only a comment in the trash can be purged. Nothing is purged by itself.
@@ -1029,6 +1194,18 @@ enum CommentCmd {
         #[arg(long)]
         all: bool,
     },
+}
+
+#[derive(Args)]
+struct CommentDeleteArgs {
+    /// The comment's id (a UUID, ignoring case), as issue comments --json shows it.
+    id: String,
+}
+
+#[derive(Args)]
+struct CommentRestoreArgs {
+    /// The comment's id (a UUID, ignoring case), as issue comments --trashed --json shows it.
+    id: String,
 }
 
 // The value rules live in lcl_core::parse, shared with `import`; these
@@ -1348,9 +1525,9 @@ fn refuse_old_forms(cli: &Cli) {
         ));
     }
     // lcl 0.1.0's project create made a workspace when given either flag.
-    if let Commands::Project {
-        cmd: ProjectCmd::Create { global, key, .. },
-    } = &cli.cmd
+    if let Commands::Project(ProjectArgs {
+        cmd: ProjectCmd::Create(ProjectCreateArgs { global, key, .. }),
+    }) = &cli.cmd
         && (*global || key.is_some())
     {
         fail("workspaces are now: lcl workspace create NAME --key KEY / list / show".into());
@@ -1397,14 +1574,14 @@ fn honour_lcl_project(cli: &mut Cli) {
 /// the usage of the subcommand at `path` (as clap's own errors have).
 fn validate(cli: &Cli) {
     let fail = |path: &[&str], msg: String| -> ! { clap_exit(subcommand_error(path, msg)) };
-    if let Commands::Cycle {
+    if let Commands::Cycle(CycleArgs {
         cmd:
-            CycleCmd::Create {
+            CycleCmd::Create(CycleCreateArgs {
                 start: Some(start),
                 end: Some(end),
                 ..
-            },
-    } = &cli.cmd
+            }),
+    }) = &cli.cmd
         && end < start
     {
         fail(
@@ -1412,14 +1589,14 @@ fn validate(cli: &Cli) {
             format!("cycle end {end} is before its start {start}"),
         );
     }
-    if let Commands::Cycle {
+    if let Commands::Cycle(CycleArgs {
         cmd:
-            CycleCmd::Update {
+            CycleCmd::Update(CycleUpdateArgs {
                 start: Some(start),
                 end: Some(end),
                 ..
-            },
-    } = &cli.cmd
+            }),
+    }) = &cli.cmd
         && end < start
     {
         fail(
@@ -1428,14 +1605,18 @@ fn validate(cli: &Cli) {
         );
     }
     // Names match ignoring ASCII case, as label lookups do.
-    if let Commands::Issue {
+    if let Commands::Issue(IssueArgs {
         cmd:
-            IssueCmd::Update {
-                add_label,
-                remove_label,
+            IssueCmd::Update(IssueUpdateArgs {
+                labels:
+                    IssueUpdateLabels {
+                        add_label,
+                        remove_label,
+                        ..
+                    },
                 ..
-            },
-    } = &cli.cmd
+            }),
+    }) = &cli.cmd
         && let Some(both) = add_label
             .iter()
             .find(|a| remove_label.iter().any(|r| r.eq_ignore_ascii_case(a)))
@@ -1445,14 +1626,14 @@ fn validate(cli: &Cli) {
             format!("label {both:?} is in both --add-label and --remove-label"),
         );
     }
-    if let Commands::Issue {
+    if let Commands::Issue(IssueArgs {
         cmd:
-            IssueCmd::List {
+            IssueCmd::List(IssueListArgs {
                 project: Some(ProjectFilter::NoProject),
                 milestone: Some(m),
                 ..
-            },
-    } = &cli.cmd
+            }),
+    }) = &cli.cmd
     {
         fail(
             &["issue", "list"],
@@ -1963,7 +2144,7 @@ fn main() -> ExitCode {
 
 fn run(cli: Cli) -> Result<()> {
     match cli.cmd {
-        Commands::Init { name, key } => {
+        Commands::Init(InitArgs { name, key }) => {
             // Every check that needs nothing opened comes first, so a
             // refused init creates nothing: not .lcl/, not ~/.lcl.
             let home = home()?;
@@ -1993,10 +2174,10 @@ fn run(cli: Cli) -> Result<()> {
                 );
             }
         }
-        Commands::Project { cmd } => {
+        Commands::Project(ProjectArgs { cmd }) => {
             let mut store = resolve_store(&cli.workspace)?;
             match cmd {
-                ProjectCmd::Create {
+                ProjectCmd::Create(ProjectCreateArgs {
                     name,
                     description,
                     description_file,
@@ -2004,7 +2185,7 @@ fn run(cli: Cli) -> Result<()> {
                     target_date,
                     global: _,
                     key: _,
-                } => {
+                }) => {
                     let description = description.or(description_file).unwrap_or_default();
                     let p = store.create_project(
                         &name,
@@ -2018,7 +2199,7 @@ fn run(cli: Cli) -> Result<()> {
                         outln!("Created project {:?}", p.name);
                     }
                 }
-                ProjectCmd::List { status } => {
+                ProjectCmd::List(ProjectListArgs { status }) => {
                     let all = store.list_projects(&status)?;
                     if cli.json {
                         print_json(&all)?;
@@ -2033,7 +2214,7 @@ fn run(cli: Cli) -> Result<()> {
                         }
                     }
                 }
-                ProjectCmd::Show { project } => {
+                ProjectCmd::Show(ProjectShowArgs { project }) => {
                     let d = store.project_detail(&project)?;
                     if cli.json {
                         print_json(&d)?;
@@ -2066,7 +2247,7 @@ fn run(cli: Cli) -> Result<()> {
                         }
                     }
                 }
-                ProjectCmd::Update {
+                ProjectCmd::Update(ProjectUpdateArgs {
                     project,
                     name,
                     description,
@@ -2074,7 +2255,7 @@ fn run(cli: Cli) -> Result<()> {
                     status,
                     target_date,
                     no_target_date,
-                } => {
+                }) => {
                     let u = ProjectUpdate {
                         name,
                         description: description.or(description_file),
@@ -2092,7 +2273,7 @@ fn run(cli: Cli) -> Result<()> {
                         outln!("Updated project {:?}", p.name);
                     }
                 }
-                ProjectCmd::Delete { project } => {
+                ProjectCmd::Delete(ProjectDeleteArgs { project }) => {
                     let p = store.delete_project(&project)?;
                     if cli.json {
                         print_json(&serde_json::json!({"deleted": p.name, "id": p.id}))?;
@@ -2102,17 +2283,17 @@ fn run(cli: Cli) -> Result<()> {
                 }
             }
         }
-        Commands::Milestone { cmd } => {
+        Commands::Milestone(MilestoneArgs { cmd }) => {
             let mut store = resolve_store(&cli.workspace)?;
             match cmd {
-                MilestoneCmd::Create {
+                MilestoneCmd::Create(MilestoneCreateArgs {
                     name,
                     project,
                     description,
                     description_file,
                     target_date,
                     sort_order,
-                } => {
+                }) => {
                     let description = description.or(description_file).unwrap_or_default();
                     let target = target_date.map(|d| d.to_string());
                     let m = project_hint(
@@ -2131,7 +2312,7 @@ fn run(cli: Cli) -> Result<()> {
                         outln!("Created milestone {:?} in project {:?}", m.name, m.project);
                     }
                 }
-                MilestoneCmd::List { project } => {
+                MilestoneCmd::List(MilestoneListArgs { project }) => {
                     let all = project_hint(
                         store.list_milestones(project.as_deref()),
                         project.as_deref(),
@@ -2150,7 +2331,7 @@ fn run(cli: Cli) -> Result<()> {
                         }
                     }
                 }
-                MilestoneCmd::Show { milestone, project } => {
+                MilestoneCmd::Show(MilestoneShowArgs { milestone, project }) => {
                     let d = project_hint(
                         store.milestone_detail(&milestone, project.as_deref()),
                         project.as_deref(),
@@ -2174,7 +2355,7 @@ fn run(cli: Cli) -> Result<()> {
                         outln!("Issues: {}", counts_line(&d.issues));
                     }
                 }
-                MilestoneCmd::Update {
+                MilestoneCmd::Update(MilestoneUpdateArgs {
                     milestone,
                     project,
                     name,
@@ -2183,7 +2364,7 @@ fn run(cli: Cli) -> Result<()> {
                     target_date,
                     no_target_date,
                     sort_order,
-                } => {
+                }) => {
                     let u = MilestoneUpdate {
                         name,
                         description: description.or(description_file),
@@ -2204,7 +2385,7 @@ fn run(cli: Cli) -> Result<()> {
                         outln!("Updated milestone {:?} in project {:?}", m.name, m.project);
                     }
                 }
-                MilestoneCmd::Delete { milestone, project } => {
+                MilestoneCmd::Delete(MilestoneDeleteArgs { milestone, project }) => {
                     let m = project_hint(
                         store.delete_milestone(&milestone, project.as_deref()),
                         project.as_deref(),
@@ -2223,8 +2404,8 @@ fn run(cli: Cli) -> Result<()> {
                 }
             }
         }
-        Commands::Workspace { cmd } => match cmd {
-            WorkspaceCmd::Create { name, key } => {
+        Commands::Workspace(WorkspaceArgs { cmd }) => match cmd {
+            WorkspaceCmd::Create(WorkspaceCreateArgs { name, key }) => {
                 let made = open_registry(&home()?)?.create_workspace(&name, &key)?;
                 if cli.json {
                     print_json(&made)?;
@@ -2280,10 +2461,10 @@ fn run(cli: Cli) -> Result<()> {
                 }
             }
         },
-        Commands::Issue { cmd } => {
+        Commands::Issue(IssueArgs { cmd }) => {
             let mut store = resolve_store(&cli.workspace)?;
             match cmd {
-                IssueCmd::Create {
+                IssueCmd::Create(IssueCreateArgs {
                     title,
                     description,
                     description_file,
@@ -2301,7 +2482,7 @@ fn run(cli: Cli) -> Result<()> {
                     cycle,
                     issue_ref,
                     author,
-                } => {
+                }) => {
                     let description = description.or(description_file).unwrap_or_default();
                     let flag = project.clone();
                     let author = author.or_else(env_author);
@@ -2333,7 +2514,7 @@ fn run(cli: Cli) -> Result<()> {
                         outln!("Created {}", issue.identifier);
                     }
                 }
-                IssueCmd::List {
+                IssueCmd::List(IssueListArgs {
                     status,
                     assignee,
                     label,
@@ -2348,7 +2529,7 @@ fn run(cli: Cli) -> Result<()> {
                     offset,
                     all,
                     trashed,
-                } => {
+                }) => {
                     let page = if all {
                         Page::ALL
                     } else {
@@ -2403,7 +2584,7 @@ fn run(cli: Cli) -> Result<()> {
                         }
                     }
                 }
-                IssueCmd::Show { id } => {
+                IssueCmd::Show(IssueShowArgs { id }) => {
                     let issue = store.resolve(&id)?;
                     let comments = store.list_comments(issue.id.as_str(), false)?;
                     let children = store.children(issue.id.as_str())?;
@@ -2476,34 +2657,43 @@ fn run(cli: Cli) -> Result<()> {
                         }
                     }
                 }
-                IssueCmd::Update {
+                IssueCmd::Update(IssueUpdateArgs {
                     id,
-                    title,
-                    description,
-                    description_file,
-                    status,
-                    priority,
-                    assignee,
-                    no_assignee,
-                    estimate,
-                    no_estimate,
-                    due,
-                    no_due,
-                    label,
-                    add_label,
-                    remove_label,
-                    clear_labels,
-                    parent,
-                    no_parent,
-                    project,
-                    no_project,
-                    milestone,
-                    no_milestone,
-                    cycle,
-                    no_cycle,
-                    issue_ref,
-                    no_ref,
-                } => {
+                    fields:
+                        IssueUpdateFields {
+                            title,
+                            description,
+                            description_file,
+                            status,
+                            priority,
+                            assignee,
+                            no_assignee,
+                            estimate,
+                            no_estimate,
+                            due,
+                            no_due,
+                        },
+                    labels:
+                        IssueUpdateLabels {
+                            label,
+                            add_label,
+                            remove_label,
+                            clear_labels,
+                            parent,
+                            no_parent,
+                        },
+                    place:
+                        IssueUpdatePlace {
+                            project,
+                            no_project,
+                            milestone,
+                            no_milestone,
+                            cycle,
+                            no_cycle,
+                            issue_ref,
+                            no_ref,
+                        },
+                }) => {
                     let flag = project.clone();
                     let place = placement(
                         project,
@@ -2583,7 +2773,7 @@ fn run(cli: Cli) -> Result<()> {
                         outln!("Updated {}", issue.identifier);
                     }
                 }
-                IssueCmd::Delete { id } => {
+                IssueCmd::Delete(IssueDeleteArgs { id }) => {
                     let issue = store.delete_issue(&id)?;
                     if cli.json {
                         print_json(
@@ -2596,7 +2786,7 @@ fn run(cli: Cli) -> Result<()> {
                         );
                     }
                 }
-                IssueCmd::Restore { id } => {
+                IssueCmd::Restore(IssueRestoreArgs { id }) => {
                     let issue = store.restore_issue(&id)?;
                     if cli.json {
                         print_json(&issue)?;
@@ -2624,7 +2814,7 @@ fn run(cli: Cli) -> Result<()> {
                         );
                     }
                 }
-                IssueCmd::Relate { a, kind, b } => {
+                IssueCmd::Relate(IssueRelateArgs { a, kind, b }) => {
                     let (relation, created) = store.relate(&a, kind, &b)?;
                     if cli.json {
                         print_json(
@@ -2638,7 +2828,7 @@ fn run(cli: Cli) -> Result<()> {
                         outln!("{relation}");
                     }
                 }
-                IssueCmd::Unrelate { a, kind, b } => {
+                IssueCmd::Unrelate(IssueUnrelateArgs { a, kind, b }) => {
                     let relation = store.unrelate(&a, kind, &b)?;
                     if cli.json {
                         print_json(
@@ -2666,7 +2856,7 @@ fn run(cli: Cli) -> Result<()> {
                         outln!("Comment added");
                     }
                 }
-                IssueCmd::Comments { id, trashed } => {
+                IssueCmd::Comments(IssueCommentsArgs { id, trashed }) => {
                     let issue = store.resolve(&id)?;
                     let comments = store.list_comments(issue.id.as_str(), trashed)?;
                     if cli.json {
@@ -2675,7 +2865,7 @@ fn run(cli: Cli) -> Result<()> {
                         outln!("{}", comments_text(&comments, true));
                     }
                 }
-                IssueCmd::History { id } => {
+                IssueCmd::History(IssueHistoryArgs { id }) => {
                     let history = store.issue_history(&id)?;
                     if cli.json {
                         print_json(&history)?;
@@ -2685,7 +2875,7 @@ fn run(cli: Cli) -> Result<()> {
                 }
             }
         }
-        Commands::Comment { cmd } => {
+        Commands::Comment(CommentArgs { cmd }) => {
             let mut store = resolve_store(&cli.workspace)?;
             match cmd {
                 CommentCmd::Edit {
@@ -2703,7 +2893,7 @@ fn run(cli: Cli) -> Result<()> {
                         outln!("Comment edited");
                     }
                 }
-                CommentCmd::Delete { id } => {
+                CommentCmd::Delete(CommentDeleteArgs { id }) => {
                     let (c, issue) = store.delete_comment(&id)?;
                     if cli.json {
                         print_json(&serde_json::json!({"deleted": c.id, "issue": issue}))?;
@@ -2714,7 +2904,7 @@ fn run(cli: Cli) -> Result<()> {
                         );
                     }
                 }
-                CommentCmd::Restore { id } => {
+                CommentCmd::Restore(CommentRestoreArgs { id }) => {
                     let (c, _) = store.restore_comment(&id)?;
                     if cli.json {
                         print_json(&c)?;
@@ -2740,15 +2930,15 @@ fn run(cli: Cli) -> Result<()> {
                 }
             }
         }
-        Commands::Doc { cmd } => {
+        Commands::Doc(DocArgs { cmd }) => {
             let mut store = resolve_store(&cli.workspace)?;
             match cmd {
-                DocCmd::Create {
+                DocCmd::Create(DocCreateArgs {
                     title,
                     content,
                     content_file,
                     parent,
-                } => {
+                }) => {
                     let content = content.or(content_file).unwrap_or_default();
                     let d = store.create_doc(Doc {
                         id: String::new(),
@@ -2765,7 +2955,7 @@ fn run(cli: Cli) -> Result<()> {
                         outln!("Created doc {}", d.id);
                     }
                 }
-                DocCmd::List { trashed } => {
+                DocCmd::List(DocListArgs { trashed }) => {
                     let docs = store.list_docs(trashed)?;
                     if cli.json {
                         print_json(&docs)?;
@@ -2775,7 +2965,7 @@ fn run(cli: Cli) -> Result<()> {
                         }
                     }
                 }
-                DocCmd::Show { id } => {
+                DocCmd::Show(DocShowArgs { id }) => {
                     let d = store
                         .get_doc(&id)?
                         .ok_or_else(|| LclError::DocNotFound(id.clone()))?;
@@ -2785,14 +2975,14 @@ fn run(cli: Cli) -> Result<()> {
                         outln!("# {}\n\n{}", d.title, d.content);
                     }
                 }
-                DocCmd::Update {
+                DocCmd::Update(DocUpdateArgs {
                     id,
                     title,
                     content,
                     content_file,
                     parent,
                     no_parent,
-                } => {
+                }) => {
                     let parent = match (parent, no_parent) {
                         (Some(p), _) => Change::Set(p),
                         (None, true) => Change::Clear,
@@ -2805,7 +2995,7 @@ fn run(cli: Cli) -> Result<()> {
                         outln!("Updated {}", id);
                     }
                 }
-                DocCmd::Delete { id } => {
+                DocCmd::Delete(DocDeleteArgs { id }) => {
                     let doc = store.delete_doc(&id)?;
                     if cli.json {
                         print_json(&serde_json::json!({"deleted": doc.id}))?;
@@ -2816,7 +3006,7 @@ fn run(cli: Cli) -> Result<()> {
                         );
                     }
                 }
-                DocCmd::Restore { id } => {
+                DocCmd::Restore(DocRestoreArgs { id }) => {
                     let doc = store.restore_doc(&id)?;
                     if cli.json {
                         print_json(&doc)?;
@@ -2839,10 +3029,10 @@ fn run(cli: Cli) -> Result<()> {
                 }
             }
         }
-        Commands::Label { cmd } => {
+        Commands::Label(LabelArgs { cmd }) => {
             let mut store = resolve_store(&cli.workspace)?;
             match cmd {
-                LabelCmd::Create { name, color } => {
+                LabelCmd::Create(LabelCreateArgs { name, color }) => {
                     let l = Label {
                         id: uuid::Uuid::new_v4().to_string(),
                         name,
@@ -2856,7 +3046,7 @@ fn run(cli: Cli) -> Result<()> {
                         outln!("Created label {}", l.name);
                     }
                 }
-                LabelCmd::List { trashed } => {
+                LabelCmd::List(LabelListArgs { trashed }) => {
                     let ls = store.list_labels(trashed)?;
                     if cli.json {
                         print_json(&ls)?;
@@ -2866,7 +3056,7 @@ fn run(cli: Cli) -> Result<()> {
                         }
                     }
                 }
-                LabelCmd::Delete { name_or_id } => {
+                LabelCmd::Delete(LabelDeleteArgs { name_or_id }) => {
                     let (label, issues) = store.delete_label(&name_or_id)?;
                     if cli.json {
                         print_json(
@@ -2881,7 +3071,7 @@ fn run(cli: Cli) -> Result<()> {
                         );
                     }
                 }
-                LabelCmd::Restore { name_or_id } => {
+                LabelCmd::Restore(LabelRestoreArgs { name_or_id }) => {
                     let (label, issues) = store.restore_label(&name_or_id)?;
                     if cli.json {
                         print_json(
@@ -2913,10 +3103,10 @@ fn run(cli: Cli) -> Result<()> {
                 }
             }
         }
-        Commands::Cycle { cmd } => {
+        Commands::Cycle(CycleArgs { cmd }) => {
             let mut store = resolve_store(&cli.workspace)?;
             match cmd {
-                CycleCmd::Create { name, start, end } => {
+                CycleCmd::Create(CycleCreateArgs { name, start, end }) => {
                     let c = store.create_cycle(Cycle {
                         id: String::new(),
                         name,
@@ -2944,14 +3134,14 @@ fn run(cli: Cli) -> Result<()> {
                         }
                     }
                 }
-                CycleCmd::Update {
+                CycleCmd::Update(CycleUpdateArgs {
                     cycle,
                     name,
                     start,
                     no_start,
                     end,
                     no_end,
-                } => {
+                }) => {
                     let u = CycleUpdate {
                         name,
                         starts_at: change(start.map(|d| d.to_string()), no_start),
@@ -2964,7 +3154,7 @@ fn run(cli: Cli) -> Result<()> {
                         outln!("Updated cycle {:?}", c.name);
                     }
                 }
-                CycleCmd::Delete { cycle } => {
+                CycleCmd::Delete(CycleDeleteArgs { cycle }) => {
                     let c = store.delete_cycle(&cycle)?;
                     if cli.json {
                         print_json(&serde_json::json!({"deleted": c.name, "id": c.id}))?;
@@ -2974,7 +3164,7 @@ fn run(cli: Cli) -> Result<()> {
                 }
             }
         }
-        Commands::Search { words, limit } => {
+        Commands::Search(SearchArgs { words, limit }) => {
             let query = search_query(&words);
             let store = resolve_store(&cli.workspace)?;
             let found = store.search(&query, limit as usize)?;
@@ -3009,7 +3199,7 @@ fn run(cli: Cli) -> Result<()> {
                 }
             }
         }
-        Commands::Export { output, force } => {
+        Commands::Export(ExportArgs { output, force }) => {
             let store = resolve_store(&cli.workspace)?;
             let export = store.export()?;
             match output.as_deref() {
@@ -3031,11 +3221,11 @@ fn run(cli: Cli) -> Result<()> {
                 }
             }
         }
-        Commands::Sync { cmd } => {
+        Commands::Sync(SyncArgs { cmd }) => {
             let mut store = resolve_store(&cli.workspace)?;
             let token = || std::env::var(lcl_core::sync::TOKEN_VAR).ok();
             match cmd {
-                Some(SyncCmd::Start { url }) => {
+                Some(SyncCmd::Start(SyncStartArgs { url })) => {
                     let service = lcl_core::sync::Http::new(&url, token())?;
                     let s = store.sync_start(&service)?;
                     if cli.json {
@@ -3055,7 +3245,7 @@ fn run(cli: Cli) -> Result<()> {
                         );
                     }
                 }
-                Some(SyncCmd::Join { url, id }) => {
+                Some(SyncCmd::Join(SyncJoinArgs { url, id })) => {
                     let service = lcl_core::sync::Http::new(&url, token())?;
                     let s = store.sync_join(&service, &id)?;
                     if cli.json {
@@ -3070,7 +3260,7 @@ fn run(cli: Cli) -> Result<()> {
                         );
                     }
                 }
-                Some(SyncCmd::Leave { output, force }) => {
+                Some(SyncCmd::Leave(SyncLeaveArgs { output, force })) => {
                     // The token is checked first, and the export written
                     // before anything is deleted.
                     let service = match store.sync_status()? {
@@ -3145,7 +3335,7 @@ fn run(cli: Cli) -> Result<()> {
                 }
             }
         }
-        Commands::Backup { path } => {
+        Commands::Backup(BackupArgs { path }) => {
             let store = resolve_store(&cli.workspace)?;
             let report = store.backup(&path)?;
             let shown = path.display().to_string();
@@ -3161,7 +3351,7 @@ fn run(cli: Cli) -> Result<()> {
                 );
             }
         }
-        Commands::Import { input, dry_run } => {
+        Commands::Import(ImportArgs { input, dry_run }) => {
             let mut store = resolve_store(&cli.workspace)?;
             let s = store.import(&input.0, dry_run)?;
             if cli.json {
@@ -3205,6 +3395,30 @@ fn run(cli: Cli) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every argument of every subcommand is built on a 512 KiB stack, in a
+    /// debug build too (LOCL-46). clap's derive builds a command's arguments
+    /// in one function, and an unoptimized build gives each temporary its own
+    /// slot, so a command with many arguments has a large frame: before the
+    /// big ones got `Args` structs of their own, `lcl --version` needed about
+    /// 900 KB of stack, near the 1 MiB a Windows main thread gets.
+    #[test]
+    fn the_command_builds_on_a_small_stack() {
+        // A Linux debug build needs about 370 KB here; main's code before
+        // LOCL-46 needed over 768.
+        let kind = std::thread::Builder::new()
+            .stack_size(512 * 1024)
+            .spawn(|| {
+                Cli::try_parse_from(["lcl", "--version"])
+                    .map(|_| ())
+                    .unwrap_err()
+                    .kind()
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+        assert_eq!(kind, clap::error::ErrorKind::DisplayVersion);
+    }
 
     #[test]
     fn a_terminal_is_shown_control_characters_as_pictures() {
