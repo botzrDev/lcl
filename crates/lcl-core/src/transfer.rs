@@ -757,6 +757,12 @@ fn records(input: &[u8]) -> Result<(Vec<Rec>, BTreeMap<String, usize>)> {
 
 /// Reads and checks every value of every record, then every reference
 /// between them. `now` is the import time, the default for timestamps.
+/// Whether `input` is a file `Store::import` would read: every check that
+/// needs no workspace. A problem names its line, as an import's does.
+pub(crate) fn check_file(input: &[u8]) -> Result<()> {
+    read_file(input, now()).map(|_| ())
+}
+
 fn read_file(input: &[u8], now: i64) -> Result<File> {
     let (recs, skipped) = records(input)?;
     let mut recs = recs.into_iter();

@@ -4,6 +4,7 @@ pub mod cycle_report;
 pub mod db;
 pub mod error;
 pub mod insights;
+pub mod linear;
 mod migrations;
 pub mod models;
 pub mod parse;
