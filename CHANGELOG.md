@@ -6,6 +6,10 @@ All notable changes to lcl are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.0-alpha.3] - 2026-11-24
+
+The third alpha: issue history, the sync client, writes in the TUI, insights, similar issues, the cycle report, and Linear import.
+
 ### Added
 
 - One command installs lcl from the newest release: `curl -fsSL https://raw.githubusercontent.com/botzrDev/lcl/main/install.sh | sh` on Linux and macOS, `irm https://raw.githubusercontent.com/botzrDev/lcl/main/install.ps1 | iex` in PowerShell on Windows. It picks the build for the machine, checks it against `SHA256SUMS`, and checks that it runs and prints the release's version before it puts it in place. A failed download, a checksum that doesn't match, or a binary that doesn't run installs nothing and exits 1. `LCL_VERSION` installs a given release and `LCL_INSTALL_DIR` chooses the directory. Until 1.0 the newest release can be a pre-release.

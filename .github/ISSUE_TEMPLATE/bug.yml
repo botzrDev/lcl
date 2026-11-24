@@ -6,7 +6,7 @@ body:
     attributes:
       label: Version
       description: Output of `lcl --version`
-      placeholder: lcl 0.3.0-alpha.2
+      placeholder: lcl 0.3.0-alpha.3
     validations:
       required: true
   - type: input
