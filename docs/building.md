@@ -57,3 +57,15 @@ git push origin vX.Y.Z
 ```
 
 A dry run does the same checks and builds and publishes nothing. The files it would release, and the notes, are uploaded as an artifact of the run, and the notes are shown in its summary. Start one with `gh workflow run release.yml -f tag=vX.Y.Z`. Any push to a branch that changes the workflow or the check script starts one too.
+
+## Installing
+
+`install.sh` (Linux and macOS) and `install.ps1` (Windows) install a release; the README gives the line that runs each. `.github/workflows/install.yml` tests them. It runs when they change, after a release is published, and by hand:
+
+- It installs with the install line on `ubuntu-24.04`, `ubuntu-24.04-arm`, `macos-latest`, `macos-15-intel`, and on `windows-latest` in PowerShell 7 and Windows PowerShell 5.1. Each then runs `lcl --version`, `lcl init` and `lcl issue create`. The line fetches the script of the commit under test, not main's.
+- `.github/scripts/test-install.sh` and `.github/scripts/test-install.ps1` run the scripts against fake releases on disk, through `LCL_RELEASES_URL`: the build each platform gets, and every failure that must install nothing. Both run locally. The PowerShell one needs Windows PowerShell 5.1 and a release's Windows archive:
+
+```
+.github/scripts/test-install.sh
+powershell -NoProfile -ExecutionPolicy Bypass -File .github/scripts/test-install.ps1 -Zip lcl-VERSION-x86_64-pc-windows-msvc.zip
+```

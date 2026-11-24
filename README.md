@@ -6,13 +6,17 @@ The command line is the interface. `lcl --json` prints one JSON value on stdout,
 
 ## Install
 
-Each [release](https://github.com/botzrDev/lcl/releases) has `lcl` for Linux (x86_64 and arm64, glibc 2.28 or later), macOS (Apple silicon and Intel) and Windows (x86_64). Unpack the archive for your platform and put `lcl` on your `PATH`. `SHA256SUMS` lists every file's checksum.
+On Linux or macOS:
 
-To build it instead, lcl needs Rust 1.98 or later.
+    curl -fsSL https://raw.githubusercontent.com/botzrDev/lcl/main/install.sh | sh
 
-    cargo install --path crates/lcl-cli --locked
+On Windows, in PowerShell:
 
-That puts `lcl` in `~/.cargo/bin`. `lcl --version` prints the version.
+    irm https://raw.githubusercontent.com/botzrDev/lcl/main/install.ps1 | iex
+
+It installs the newest [release](https://github.com/botzrDev/lcl/releases), which until 1.0 can be an alpha. It checks the download against the release's `SHA256SUMS` and installs nothing if they differ. `lcl` goes in `~/.local/bin`, or `%LOCALAPPDATA%\Programs\lcl` on Windows, which is added to your user `PATH`. `lcl --version` prints the version. To install a given release, set `LCL_VERSION`, as `LCL_VERSION=v0.3.0-alpha.2`; to choose the directory, `LCL_INSTALL_DIR`. The other settings are at the top of [`install.sh`](install.sh) and [`install.ps1`](install.ps1).
+
+The builds are for Linux (x86_64 and arm64, glibc 2.28 or later), macOS (Apple silicon and Intel) and Windows (x86_64). Elsewhere, [build from source](#source).
 
 ## Quick start
 
@@ -97,5 +101,11 @@ Search uses FTS5 tables keyed by rowid. lcl does not run `VACUUM`. On open it ch
 lcl is one process and one file. It is not a multi-user server. It does not reuse issue numbers. It does not vacuum a workspace.
 
 ## Source
+
+To build lcl from source, with Rust 1.98 or later:
+
+    cargo install --path crates/lcl-cli --locked
+
+That puts `lcl` in `~/.cargo/bin`.
 
 The source is public so it can be read and built. Pull requests are not accepted. [CONTRIBUTING.md](CONTRIBUTING.md) says what is accepted. How the program is put together is in [docs/architecture.md](docs/architecture.md). Building it is in [docs/building.md](docs/building.md). The license is [Apache-2.0](LICENSE).

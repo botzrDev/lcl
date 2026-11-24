@@ -1,0 +1,155 @@
+name: install
+
+# Installs lcl with the README's install line, from the newest release, on
+# Linux and macOS for both architectures and on Windows in both PowerShells,
+# then uses it. Tests the install scripts against fake releases too. Runs
+# when the scripts change, after a release is published, and by hand.
+#
+# The install line runs this commit's script, from its raw URL; the README's
+# names main.
+
+on:
+  push:
+    branches: ["**"]
+    paths:
+      - install.sh
+      - install.ps1
+      - .github/workflows/install.yml
+      - .github/scripts/test-install.sh
+      - .github/scripts/test-install.ps1
+  workflow_run:
+    workflows: [release]
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # For the scripts' question to GitHub's API, and for gh.
+  GITHUB_TOKEN: ${{ github.token }}
+  GH_TOKEN: ${{ github.token }}
+
+jobs:
+  # A release run that published nothing (a dry run, or a failure) is not a
+  # reason to run: a tag push that succeeded is.
+  gate:
+    if: >-
+      github.event_name != 'workflow_run' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       startsWith(github.event.workflow_run.head_branch, 'v'))
+    runs-on: ubuntu-24.04
+    outputs:
+      tag: ${{ steps.newest.outputs.tag }}
+    steps:
+      - id: newest
+        run: echo "tag=$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=1" --jq '.[0].tag_name')" >>"$GITHUB_OUTPUT"
+
+  fake-releases:
+    needs: gate
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - if: runner.os == 'Linux'
+        run: |
+          shellcheck -s sh install.sh
+          shellcheck .github/scripts/test-install.sh
+      - run: .github/scripts/test-install.sh
+
+  fake-releases-windows:
+    needs: gate
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download the newest release's Windows archive
+        shell: pwsh
+        env:
+          TAG: ${{ needs.gate.outputs.tag }}
+        run: gh release download $env:TAG --pattern '*-x86_64-pc-windows-msvc.zip' --dir $env:RUNNER_TEMP
+      - name: Test install.ps1 against fake releases
+        shell: powershell
+        run: |
+          $zip = Get-ChildItem "$env:RUNNER_TEMP\lcl-*-x86_64-pc-windows-msvc.zip" | Select-Object -First 1
+          powershell -NoProfile -ExecutionPolicy Bypass -File .github/scripts/test-install.ps1 -Zip $zip.FullName
+          exit $LASTEXITCODE
+
+  install:
+    needs: gate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        # bash with pipefail, so a failed curl fails the install line.
+        shell: bash
+    env:
+      TAG: ${{ needs.gate.outputs.tag }}
+      TARGET: ${{ matrix.target }}
+    steps:
+      - name: Install with the install line
+        run: |
+          curl -fsSL "https://raw.githubusercontent.com/$GITHUB_REPOSITORY/$GITHUB_SHA/install.sh" | sh 2>&1 | tee install.log
+          grep -qx "lcl install: downloading lcl ${TAG#v} for $TARGET" install.log
+      - name: Use it
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          [[ "$(lcl --version)" == "lcl ${TAG#v}" ]]
+          cd "$(mktemp -d)"
+          lcl init demo --key DEMO
+          lcl --json issue create --title "installed with the install line"
+          [[ "$(lcl --json issue list | python3 -c 'import json,sys; print(json.load(sys.stdin)["total"])')" == 1 ]]
+
+  install-windows:
+    needs: gate
+    runs-on: windows-latest
+    env:
+      TAG: ${{ needs.gate.outputs.tag }}
+    steps:
+      - name: Install with the install line, in PowerShell 7
+        shell: pwsh
+        run: |
+          irm "https://raw.githubusercontent.com/$env:GITHUB_REPOSITORY/$env:GITHUB_SHA/install.ps1" | iex
+          # The script put its directory on this session's PATH.
+          $printed = lcl --version
+          if ($printed -ne "lcl $($env:TAG.Substring(1))") { throw "lcl --version printed $printed" }
+          Set-Location (New-Item -ItemType Directory -Path (Join-Path $env:RUNNER_TEMP 'pwsh-ws'))
+          lcl init demo --key DEMO
+          if ($LASTEXITCODE) { throw "lcl init exited $LASTEXITCODE" }
+          lcl --json issue create --title "installed with the install line"
+          if ($LASTEXITCODE) { throw "lcl issue create exited $LASTEXITCODE" }
+      - name: Install again, in Windows PowerShell 5.1
+        shell: powershell
+        run: |
+          irm "https://raw.githubusercontent.com/$env:GITHUB_REPOSITORY/$env:GITHUB_SHA/install.ps1" | iex
+          $printed = lcl --version
+          if ($printed -ne "lcl $($env:TAG.Substring(1))") { throw "lcl --version printed $printed" }
+          Set-Location (New-Item -ItemType Directory -Path (Join-Path $env:RUNNER_TEMP 'ps51-ws'))
+          lcl init demo --key DEMO
+          if ($LASTEXITCODE) { throw "lcl init exited $LASTEXITCODE" }
+          lcl --json issue create --title "installed with the install line"
+          if ($LASTEXITCODE) { throw "lcl issue create exited $LASTEXITCODE" }
+      - name: The user PATH names the install directory once
+        shell: pwsh
+        run: |
+          $dir = Join-Path $env:LOCALAPPDATA 'Programs\lcl'
+          $path = [Environment]::GetEnvironmentVariable('Path', 'User')
+          $n = @($path -split ';' | Where-Object { $_.TrimEnd('\') -eq $dir }).Count
+          if ($n -ne 1) { throw "the user PATH names $dir $n times: $path" }
