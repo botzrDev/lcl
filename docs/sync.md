@@ -1,6 +1,6 @@
 # Sync (design note)
 
-Status: approved by the project's owner on 2026-11-24 (LOCL-22). The change log is built (LOCL-34, schema 14), and import skips unknown record types (LOCL-48). Sync is being built (LOCL-30), from [the protocol note](sync-protocol.md): the client is built and tested against a reference service; the service is not. The service lives in a separate closed repository; this note says what it needs from the data, and what the client changes. LOCL-30 builds sync from it.
+Status: approved by the project's owner on 2026-11-24 (LOCL-22). The change log is built (LOCL-34, schema 14), and import skips unknown record types (LOCL-48). The sync client is built (LOCL-30), from [the protocol note](sync-protocol.md), and tested against a reference service; the service itself lives in its own repository. The service lives in a separate closed repository; this note says what it needs from the data, and what the client changes. LOCL-30 builds sync from it.
 
 ## What sync is
 
@@ -102,9 +102,10 @@ For sync (LOCL-30):
 ### The `--json` contract
 
 - Every existing output keeps its shape. Issue, comment, doc, label, project, milestone and cycle objects do not change.
-- New commands with their own shapes: `lcl sync`, and `lcl issue history` (LOCL-34).
+- New commands with their own shapes: `lcl sync` with `start`, `join` and `stop` ([sync-protocol.md](sync-protocol.md)), and `lcl issue history` (LOCL-34).
 - `workspace show --json` gains `sync`: null for a workspace that has not opted in, else an object with the service's address, the time of the last sync, and the issue numbers left in this machine's blocks.
-- One new refusal, only in an opted-in workspace: an issue create with no numbers left, kind `conflict`. No new error kind.
+- One new refusal, only in an opted-in workspace: an issue create with no numbers left, kind `conflict`.
+- Two new error kinds, from the sync commands only: `network` and `auth`. This note said none; the protocol note, approved after it, added them.
 
 ### `lcl-export/1`
 
