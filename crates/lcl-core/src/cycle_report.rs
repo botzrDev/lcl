@@ -224,8 +224,8 @@ impl Store {
             let log_began = first.as_deref().and_then(clock_ms);
             let day = |d: &Option<String>| d.as_deref().and_then(|d| crate::parse::date(d).ok());
             let window = |c: &Cycle| Window {
-                start: day(&c.starts_at).map(|d| midnight(d, tz)),
-                end: day(&c.ends_at).and_then(|d| d.succ_opt()).map(|d| midnight(d, tz)),
+                start: day(&c.start_date).map(|d| midnight(d, tz)),
+                end: day(&c.end_date).and_then(|d| d.succ_opt()).map(|d| midnight(d, tz)),
                 now: now_ms,
                 log_began,
             };
@@ -286,7 +286,7 @@ impl Store {
 
             // Started cycles by start date, then the others by creation.
             let mut cycles = all_cycles(conn)?;
-            cycles.sort_by_key(|c| (day(&c.starts_at).is_none(), day(&c.starts_at), c.created_at));
+            cycles.sort_by_key(|c| (day(&c.start_date).is_none(), day(&c.start_date), c.created_at));
             let at = cycles.iter().position(|c| c.id == cycle.id).unwrap_or(0);
             let mut velocity = Vec::new();
             for c in &cycles[at.saturating_sub(EARLIER)..at] {

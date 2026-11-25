@@ -171,12 +171,14 @@ pub struct RegisteredWorkspace {
     pub missing: bool,
 }
 
-/// What `init_workspace` found or made.
+/// What `init_workspace` found or made: the same keys as `NewWorkspace`.
 #[derive(Debug, Clone, Serialize)]
 pub struct InitWorkspace {
-    pub path: String,
     pub name: String,
+    pub slug: String,
     pub key: String,
+    pub path: String,
+    pub created_at: i64,
     /// False when the workspace was already there.
     pub created: bool,
 }
@@ -204,6 +206,9 @@ pub struct NewWorkspace {
     pub key: String,
     pub path: String,
     pub created_at: i64,
+    /// Always true. `lcl init` prints the same keys, and there it is false
+    /// when the workspace was already there.
+    pub created: bool,
 }
 
 pub struct Registry {
@@ -358,10 +363,12 @@ impl Registry {
                 |r| r.get(0),
             )
             .optional()?;
-        let found = |created| InitWorkspace {
-            path: recorded.clone(),
+        let found = |created, created_at| InitWorkspace {
             name: name.to_string(),
+            slug: slug.clone(),
             key: key.to_string(),
+            path: recorded.clone(),
+            created_at,
             created,
         };
 
@@ -402,7 +409,7 @@ impl Registry {
                 )?;
                 tx.commit()?;
             }
-            return Ok(found(false));
+            return Ok(found(false, created_at));
         }
 
         // No file. A row for this path names a file that is gone.
@@ -444,7 +451,7 @@ impl Registry {
             undo();
             return Err(e.into());
         }
-        Ok(found(true))
+        Ok(found(true, created_at))
     }
 
     /// Creates the global workspace `name` with issue key `key`: its file at
@@ -510,6 +517,7 @@ impl Registry {
             key: key.to_string(),
             path: path.display().to_string(),
             created_at,
+            created: true,
         })
     }
 }

@@ -228,8 +228,8 @@ fn the_v10_repair_s_names_are_reached_by_what_they_show() {
         (
             &fixed["id"],
             &fixed["name"],
-            &fixed["starts_at"],
-            &fixed["ends_at"]
+            &fixed["start_date"],
+            &fixed["end_date"]
         ),
         (
             &json!("29ade97e-eeac-4de5-9f98-656f5a5628c2"),
@@ -272,7 +272,7 @@ fn cycle_update_renames_and_redates() {
         .json();
     assert_eq!(
         out,
-        json!({"id": a, "name": "a", "starts_at": "2026-11-01", "ends_at": "2026-11-30", "created_at": created})
+        json!({"id": a, "name": "a", "start_date": "2026-11-01", "end_date": "2026-11-30", "created_at": created})
     );
     refused(
         &env,
@@ -358,7 +358,7 @@ fn cycle_update_renames_and_redates() {
         .assert_ok()
         .json();
     assert_eq!(
-        (&out["starts_at"], &out["ends_at"]),
+        (&out["start_date"], &out["end_date"]),
         (&Value::Null, &json!("2026-10-01"))
     );
     let out = env
@@ -374,7 +374,7 @@ fn cycle_update_renames_and_redates() {
         .assert_ok()
         .json();
     assert_eq!(
-        (&out["starts_at"], &out["ends_at"]),
+        (&out["start_date"], &out["end_date"]),
         (&json!("2027-01-01"), &Value::Null)
     );
     assert_eq!(
@@ -568,8 +568,8 @@ fn cycle_list_counts_issues_in_json_only() {
     assert_eq!(
         env.lcl(&["--json", "cycle", "list"]).assert_ok().json(),
         json!([
-            {"id": b, "name": "B", "starts_at": null, "ends_at": null, "created_at": 200, "issues": 0},
-            {"id": a, "name": "A", "starts_at": "2026-11-01", "ends_at": "2026-11-14", "created_at": 100, "issues": 2},
+            {"id": b, "name": "B", "start_date": null, "end_date": null, "created_at": 200, "issues": 0},
+            {"id": a, "name": "A", "start_date": "2026-11-01", "end_date": "2026-11-14", "created_at": 100, "issues": 2},
         ])
     );
     assert_eq!(

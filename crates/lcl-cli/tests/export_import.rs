@@ -634,6 +634,8 @@ fn a_bad_line_exits_2_naming_it_and_writes_nothing() {
             "line 10: parent: no doc with id 33333333-3333-4333-8333-333333333333 in the file".into()),
         ("a doc id that isn't a UUID", set(9, r#"{"type":"doc","id":"top","title":"top"}"#),
             r#"line 9: id: invalid id "top"; expected a UUID"#.into()),
+        ("a cycle date in both spellings", set(8, r#"{"type":"cycle","id":"0f8fad5b-d9cb-469f-a165-70867728950e","name":"Sprint","starts_at":"2026-01-05","start_date":"2026-01-05"}"#),
+            r#"line 8: starts_at: given with "start_date", which replaced it; keep one"#.into()),
         ("a comment id that isn't a UUID", set(14, r#"{"type":"comment","id":"c1","issue":1,"body":"hi"}"#),
             r#"line 14: id: invalid id "c1"; expected a UUID"#.into()),
         ("the same comment id twice", {
@@ -744,6 +746,21 @@ fn a_bad_line_exits_2_naming_it_and_writes_nothing() {
             ""
         )
     );
+}
+
+/// Files from 0.3.0-alpha.3 and earlier name a cycle's dates `starts_at`
+/// and `ends_at`. They import, as `start_date` and `end_date`.
+#[test]
+fn a_cycle_with_the_old_date_keys_imports() {
+    let env = drm();
+    let mut lines = base();
+    lines[7] = r#"{"type":"cycle","id":"0f8fad5b-d9cb-469f-a165-70867728950e","name":"Sprint","starts_at":"2026-01-05","ends_at":"2026-01-18"}"#.into();
+    env.lcl_stdin(&["import", "-"], join(&lines).as_bytes())
+        .assert_ok();
+    let cycles = env.lcl(&["--json", "cycle", "list"]).assert_ok().json();
+    assert_eq!(cycles[0]["start_date"], "2026-01-05", "{cycles:#}");
+    assert_eq!(cycles[0]["end_date"], "2026-01-18", "{cycles:#}");
+    assert!(export(&env).contains(r#""start_date":"2026-01-05","end_date":"2026-01-18""#));
 }
 
 #[test]

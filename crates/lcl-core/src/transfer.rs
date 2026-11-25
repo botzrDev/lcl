@@ -173,8 +173,8 @@ struct CycleLine {
     r#type: &'static str,
     id: String,
     name: String,
-    starts_at: Option<String>,
-    ends_at: Option<String>,
+    start_date: Option<String>,
+    end_date: Option<String>,
     created_at: i64,
 }
 
@@ -262,7 +262,10 @@ const MILESTONE_KEYS: &[&str] = &[
     "created_at",
     "updated_at",
 ];
-const CYCLE_KEYS: &[&str] = &["type", "id", "name", "starts_at", "ends_at", "created_at"];
+const CYCLE_KEYS: &[&str] = &["type", "id", "name", "start_date", "end_date", "created_at"];
+/// The keys 0.3.0-alpha.3 and earlier wrote for a cycle's dates, and the
+/// ones that replaced them. Import reads either, not both.
+const CYCLE_OLD_KEYS: &[(&str, &str)] = &[("starts_at", "start_date"), ("ends_at", "end_date")];
 const ISSUE_KEYS: &[&str] = &[
     "type",
     "number",
@@ -349,8 +352,8 @@ struct CycleRec {
     line: usize,
     id: Option<String>,
     name: String,
-    starts_at: Option<String>,
-    ends_at: Option<String>,
+    start_date: Option<String>,
+    end_date: Option<String>,
     created_at: i64,
 }
 
@@ -921,6 +924,18 @@ fn read_milestone(r: &mut Rec, now: i64) -> Result<MilestoneRec> {
 }
 
 fn read_cycle(r: &mut Rec, now: i64) -> Result<CycleRec> {
+    // An earlier lcl's dates, read as the keys that replaced them.
+    for (old, new) in CYCLE_OLD_KEYS {
+        if let Some(v) = r.map.remove(*old) {
+            if r.map.contains_key(*new) {
+                return Err(r.bad(
+                    old,
+                    format!("given with {new:?}, which replaced it; keep one"),
+                ));
+            }
+            r.map.insert((*new).to_string(), v);
+        }
+    }
     r.known(CYCLE_KEYS)?;
     let id = r
         .defaulted("id", "a new id")?
@@ -930,17 +945,17 @@ fn read_cycle(r: &mut Rec, now: i64) -> Result<CycleRec> {
         .map(|id| parse::uuid(&id).map_err(|e| r.bad("id", e.0)))
         .transpose()?;
     let name = r.req_str("name")?;
-    let starts_at = r.opt_str("starts_at")?;
-    let starts_at = r.date("starts_at", starts_at)?;
-    let ends_at = r.opt_str("ends_at")?;
-    let ends_at = r.date("ends_at", ends_at)?;
+    let start_date = r.opt_str("start_date")?;
+    let start_date = r.date("start_date", start_date)?;
+    let end_date = r.opt_str("end_date")?;
+    let end_date = r.date("end_date", end_date)?;
     let created_at = r.def_int("created_at", now, "the import time")?;
     Ok(CycleRec {
         line: r.line,
         id,
         name,
-        starts_at,
-        ends_at,
+        start_date,
+        end_date,
         created_at,
     })
 }
@@ -1812,8 +1827,8 @@ fn insert(conn: &Connection, file: &File, at: i64) -> Result<i64> {
             stmt.execute(params![
                 c.id.clone().unwrap_or_else(new_id),
                 c.name,
-                c.starts_at,
-                c.ends_at,
+                c.start_date,
+                c.end_date,
                 c.created_at
             ])?;
         }
@@ -2204,8 +2219,8 @@ fn export_in(conn: &Connection) -> Result<(String, Counts)> {
                     r#type: "cycle",
                     id: cid,
                     name: cname,
-                    starts_at: starts,
-                    ends_at: ends,
+                    start_date: starts,
+                    end_date: ends,
                     created_at: created,
                 },
             );

@@ -1294,7 +1294,7 @@ struct CycleReportArgs {
 
 /// A cycle's dates as people read them.
 fn cycle_dates(c: &Cycle) -> String {
-    match (&c.starts_at, &c.ends_at) {
+    match (&c.start_date, &c.end_date) {
         (Some(s), Some(e)) => format!("{s} to {e}"),
         (Some(s), None) => format!("from {s}"),
         (None, Some(e)) => format!("to {e}"),
@@ -3261,7 +3261,9 @@ fn run(cli: Cli) -> Result<()> {
                 CommentCmd::Delete(CommentDeleteArgs { id }) => {
                     let (c, issue) = store.delete_comment(&id)?;
                     if cli.json {
-                        print_json(&serde_json::json!({"deleted": c.id, "issue": issue}))?;
+                        print_json(
+                            &serde_json::json!({"deleted": c.id, "id": c.id, "issue": issue}),
+                        )?;
                     } else {
                         outln!(
                             "Moved comment {0} to the trash; restore it with: lcl comment restore {0}",
@@ -3363,7 +3365,7 @@ fn run(cli: Cli) -> Result<()> {
                 DocCmd::Delete(DocDeleteArgs { id }) => {
                     let doc = store.delete_doc(&id)?;
                     if cli.json {
-                        print_json(&serde_json::json!({"deleted": doc.id}))?;
+                        print_json(&serde_json::json!({"deleted": doc.id, "id": doc.id}))?;
                     } else {
                         outln!(
                             "Moved doc {0} to the trash; restore it with: lcl doc restore {0}",
@@ -3475,8 +3477,8 @@ fn run(cli: Cli) -> Result<()> {
                     let c = store.create_cycle(Cycle {
                         id: String::new(),
                         name,
-                        starts_at: start.map(|d| d.to_string()),
-                        ends_at: end.map(|d| d.to_string()),
+                        start_date: start.map(|d| d.to_string()),
+                        end_date: end.map(|d| d.to_string()),
                         created_at: 0,
                     })?;
                     if cli.json {
@@ -3492,8 +3494,8 @@ fn run(cli: Cli) -> Result<()> {
                     } else {
                         for CycleListing { cycle: c, .. } in cs {
                             let (start, end) = (
-                                c.starts_at.as_deref().unwrap_or("?"),
-                                c.ends_at.as_deref().unwrap_or("?"),
+                                c.start_date.as_deref().unwrap_or("?"),
+                                c.end_date.as_deref().unwrap_or("?"),
                             );
                             outln!("{}\t{}\t{start}..{end}", c.id, c.name);
                         }
@@ -3520,8 +3522,8 @@ fn run(cli: Cli) -> Result<()> {
                 }) => {
                     let u = CycleUpdate {
                         name,
-                        starts_at: change(start.map(|d| d.to_string()), no_start),
-                        ends_at: change(end.map(|d| d.to_string()), no_end),
+                        start_date: change(start.map(|d| d.to_string()), no_start),
+                        end_date: change(end.map(|d| d.to_string()), no_end),
                     };
                     let c = store.update_cycle(&cycle, &u)?;
                     if cli.json {

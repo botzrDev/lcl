@@ -64,6 +64,39 @@ fn numbers(list: &Value) -> Vec<i64> {
         .collect()
 }
 
+/// `--json` spells a relation's kind as `issue show` names the relations,
+/// however it was typed; text keeps the typed words.
+#[test]
+fn relate_prints_the_kind_as_issue_show_names_it() {
+    let env = workspace(4);
+    for (typed, printed) in [
+        ("blocked-by", "blocked_by"),
+        ("Blocked_By", "blocked_by"),
+        ("duplicate-of", "duplicate_of"),
+        ("blocks", "blocks"),
+    ] {
+        let (a, b) = if printed == "blocks" {
+            ("4", "1")
+        } else {
+            ("2", "3")
+        };
+        let made = env
+            .lcl(&["--json", "issue", "relate", a, typed, b])
+            .assert_ok()
+            .json();
+        assert_eq!(made["kind"], printed, "{typed}: {made}");
+        let gone = env
+            .lcl(&["--json", "issue", "unrelate", a, typed, b])
+            .assert_ok()
+            .json();
+        assert_eq!(
+            (&gone["kind"], &gone["removed"]),
+            (&json!(printed), &json!(true)),
+            "{typed}"
+        );
+    }
+}
+
 #[test]
 fn each_kind_shows_from_both_sides() {
     let env = workspace(7);

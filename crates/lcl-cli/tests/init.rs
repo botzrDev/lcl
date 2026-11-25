@@ -138,9 +138,11 @@ fn init_takes_its_name_from_the_directory() {
     let made = lcl_in(&env, &dir, &["--json", "init", "--key", "mp"]);
     made.assert_ok();
     let db = db_in(&dir);
+    let at = made.json()["created_at"].clone();
+    assert!(at.is_i64(), "{at}");
     assert_eq!(
         made.json(),
-        json!({"path": db.display().to_string(), "name": "my proj", "key": "MP", "created": true})
+        json!({"name": "my proj", "slug": "my-proj", "key": "MP", "path": db.display().to_string(), "created_at": at, "created": true})
     );
     assert_eq!(rows(&env), [row("my-proj", "my proj", "cwd", &db)]);
     let shown = lcl_in(&env, &dir, &["--json", "workspace", "show"]);
@@ -161,9 +163,11 @@ fn init_trims_the_directory_s_name() {
     let made = lcl_in(&env, &dir, &["--json", "init", "--key", "PD"]);
     made.assert_ok();
     let db = db_in(&dir);
+    let at = made.json()["created_at"].clone();
+    assert!(at.is_i64(), "{at}");
     assert_eq!(
         made.json(),
-        json!({"path": db.display().to_string(), "name": "padded", "key": "PD", "created": true})
+        json!({"name": "padded", "slug": "padded", "key": "PD", "path": db.display().to_string(), "created_at": at, "created": true})
     );
     assert_eq!(rows(&env), [row("padded", "padded", "cwd", &db)]);
     assert_eq!(
@@ -183,9 +187,11 @@ fn init_again_with_the_same_name_and_key_writes_nothing() {
     let first = env.lcl(&["--json", "init", "alpha", "--key", "AL"]);
     first.assert_ok();
     let db = env.db_path();
+    let at = first.json()["created_at"].clone();
+    assert!(at.is_i64(), "{at}");
     assert_eq!(
         first.json(),
-        json!({"path": db.display().to_string(), "name": "alpha", "key": "AL", "created": true})
+        json!({"name": "alpha", "slug": "alpha", "key": "AL", "path": db.display().to_string(), "created_at": at, "created": true})
     );
     exec(
         &db,
@@ -210,7 +216,8 @@ fn init_again_with_the_same_name_and_key_writes_nothing() {
     json_again.assert_ok();
     assert_eq!(
         json_again.json(),
-        json!({"path": db.display().to_string(), "name": "alpha", "key": "AL", "created": false})
+        json!({"name": "alpha", "slug": "alpha", "key": "AL", "path": db.display().to_string(), "created_at": 1_700_000_000, "created": false}),
+        "the workspace's own created_at, not the time of the second init"
     );
     assert!(
         dump(&db) == before,

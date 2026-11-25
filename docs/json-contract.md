@@ -200,7 +200,7 @@ The records of one type an import didn't know, in type order. A later `lcl-expor
 ### `Cycle`
 
 ```json
-{"id": "string", "name": "string", "starts_at": "string|null", "ends_at": "string|null", "created_at": "integer"}
+{"id": "string", "name": "string", "start_date": "string|null", "end_date": "string|null", "created_at": "integer"}
 ```
 
 ### `CycleCount`
@@ -254,13 +254,15 @@ A change of this machine's that the service did not apply (its record was purged
 `created` is false when the workspace was already there with that name and key.
 
 ```json
-{"path": "string", "name": "string", "key": "string", "created": "boolean"}
+{"name": "string", "slug": "string", "key": "string", "path": "string", "created_at": "integer", "created": "boolean"}
 ```
 
 ### `lcl workspace create`
 
+As `lcl init` prints, with `created` always true.
+
 ```json
-{"name": "string", "slug": "string", "key": "string", "path": "string", "created_at": "integer"}
+{"name": "string", "slug": "string", "key": "string", "path": "string", "created_at": "integer", "created": "boolean"}
 ```
 
 ### `lcl workspace list`
@@ -356,16 +358,16 @@ What was removed for good: `purged` holds the identifiers, lowest number first, 
 
 ### `lcl issue relate`
 
-`issue` and `related` are identifiers, and `kind` is as typed. `created` is false when the relation was already there.
+`issue` and `related` are identifiers, and `kind` is the relation as typed (`blocked-by` or `blocked_by` both print `blocked_by`), spelled as `lcl issue show` names the relations. `created` is false when the relation was already there.
 
 ```json
-{"issue": "string", "kind": "'blocks'|'blocked-by'|'related'|'duplicate-of'", "related": "string", "created": "boolean"}
+{"issue": "string", "kind": "'blocks'|'blocked_by'|'related'|'duplicate_of'", "related": "string", "created": "boolean"}
 ```
 
 ### `lcl issue unrelate`
 
 ```json
-{"issue": "string", "kind": "'blocks'|'blocked-by'|'related'|'duplicate-of'", "related": "string", "removed": "boolean"}
+{"issue": "string", "kind": "'blocks'|'blocked_by'|'related'|'duplicate_of'", "related": "string", "removed": "boolean"}
 ```
 
 ### `lcl issue comment`
@@ -400,10 +402,10 @@ Oldest first, one entry per write. A write made without lcl (a hand edit) is an 
 
 ### `lcl comment delete`
 
-`deleted` is the comment's id and `issue` the issue's identifier. The comment is in the trash, and `lcl comment restore` brings it back.
+`deleted` and `id` are the comment's id, as for every delete `deleted` is how the command line names it, and `issue` the issue's identifier. The comment is in the trash, and `lcl comment restore` brings it back.
 
 ```json
-{"deleted": "string", "issue": "string"}
+{"deleted": "string", "id": "string", "issue": "string"}
 ```
 
 ### `lcl comment restore`
@@ -603,10 +605,10 @@ With `--trashed`, the docs in the trash, and no others.
 
 ### `lcl doc delete`
 
-`deleted` is the id. The doc is in the trash, and `lcl doc restore` brings it back.
+`deleted` and `id` are the doc's id: the command line names a doc by it. The doc is in the trash, and `lcl doc restore` brings it back.
 
 ```json
-{"deleted": "string"}
+{"deleted": "string", "id": "string"}
 ```
 
 ### `lcl doc restore`

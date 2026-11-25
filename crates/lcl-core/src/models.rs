@@ -359,9 +359,11 @@ impl Issue {
     }
 }
 
-/// A relation as typed: `A <kind> B`.
+/// A relation as typed: `A <kind> B`. `--json` spells it as `issue show`
+/// and `issue history` name the relations (`blocked_by`); the command line
+/// and text, as typed (`blocked-by`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "kebab-case")]
+#[serde(rename_all = "snake_case")]
 pub enum RelationKind {
     /// A blocks B.
     Blocks,
@@ -637,8 +639,10 @@ pub struct Doc {
 pub struct Cycle {
     pub id: String,
     pub name: String,
-    pub starts_at: Option<String>,
-    pub ends_at: Option<String>,
+    /// The first day, `YYYY-MM-DD`.
+    pub start_date: Option<String>,
+    /// The last day, `YYYY-MM-DD`.
+    pub end_date: Option<String>,
     pub created_at: i64,
 }
 

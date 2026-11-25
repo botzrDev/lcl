@@ -207,8 +207,8 @@ pub struct Placement {
 #[derive(Debug, Clone, Default)]
 pub struct CycleUpdate {
     pub name: Option<String>,
-    pub starts_at: Change<String>,
-    pub ends_at: Change<String>,
+    pub start_date: Change<String>,
+    pub end_date: Change<String>,
 }
 
 /// A milestone `update_issue` took off an issue because the issue left the
@@ -1165,7 +1165,7 @@ impl Store {
             check_cycle_name(tx, &c.name, None)?;
             tx.execute(
                 "INSERT INTO cycles(id,name,starts_at,ends_at,created_at) VALUES(?1,?2,?3,?4,?5)",
-                params![c.id, c.name, c.starts_at, c.ends_at, c.created_at],
+                params![c.id, c.name, c.start_date, c.end_date, c.created_at],
             )?;
             Ok(c)
         })
@@ -1193,8 +1193,8 @@ impl Store {
                 c.name = name.clone();
             }
             for (date, change) in [
-                (&mut c.starts_at, &u.starts_at),
-                (&mut c.ends_at, &u.ends_at),
+                (&mut c.start_date, &u.start_date),
+                (&mut c.end_date, &u.end_date),
             ] {
                 match change {
                     Change::Keep => {}
@@ -1202,7 +1202,7 @@ impl Store {
                     Change::Set(d) => *date = Some(d.clone()),
                 }
             }
-            if let (Some(start), Some(end)) = (&c.starts_at, &c.ends_at)
+            if let (Some(start), Some(end)) = (&c.start_date, &c.end_date)
                 && let (Ok(s), Ok(e)) = (crate::parse::date(start), crate::parse::date(end))
                 && e < s
             {
@@ -1214,7 +1214,7 @@ impl Store {
             }
             tx.execute(
                 "UPDATE cycles SET name=?1, starts_at=?2, ends_at=?3 WHERE id=?4",
-                params![c.name, c.starts_at, c.ends_at, c.id],
+                params![c.name, c.start_date, c.end_date, c.id],
             )?;
             Ok(c)
         })
@@ -2231,8 +2231,8 @@ fn row_to_cycle(r: &rusqlite::Row<'_>) -> rusqlite::Result<Cycle> {
     Ok(Cycle {
         id: r.get(0)?,
         name: r.get(1)?,
-        starts_at: r.get(2)?,
-        ends_at: r.get(3)?,
+        start_date: r.get(2)?,
+        end_date: r.get(3)?,
         created_at: r.get(4)?,
     })
 }

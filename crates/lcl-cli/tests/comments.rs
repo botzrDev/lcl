@@ -253,7 +253,7 @@ fn comment_delete_removes_one_comment() {
     let out = env.lcl(&["--json", "comment", "delete", &b.to_uppercase()]);
     assert_eq!(
         out.assert_ok().json(),
-        json!({"deleted": b, "issue": "W-1"})
+        json!({"deleted": b, "id": b, "issue": "W-1"})
     );
     let left = env
         .lcl(&["--json", "issue", "comments", "1"])

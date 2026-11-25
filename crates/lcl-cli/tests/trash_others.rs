@@ -326,7 +326,7 @@ fn a_comment_s_delete_and_restore_change_one_field() {
 
     assert_eq!(
         j(&env, &["comment", "delete", banana]),
-        json!({"deleted": banana, "issue": "W-1"})
+        json!({"deleted": banana, "id": banana, "issue": "W-1"})
     );
     // Out of sight: issue show, issue comments, search.
     assert_eq!(
@@ -558,7 +558,7 @@ fn a_doc_s_delete_and_restore_change_one_field() {
 
     assert_eq!(
         j(&env, &["doc", "delete", &section]),
-        json!({"deleted": section})
+        json!({"deleted": section, "id": section})
     );
     assert_eq!(names(&j(&env, &["doc", "list"]), "title").len(), 3);
     assert!(!names(&j(&env, &["doc", "list"]), "title").contains(&"Section".to_string()));

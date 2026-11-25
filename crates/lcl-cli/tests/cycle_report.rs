@@ -225,7 +225,7 @@ fn imported() -> Env {
         let id = format!("00000000-0000-4000-8000-{:012}", k + 1);
         lines.push(
             json!({"type": "cycle", "id": id, "name": format!("Week {}", k + 1),
-                "starts_at": start.to_string(), "ends_at": (start + Days::new(6)).to_string()})
+                "start_date": start.to_string(), "end_date": (start + Days::new(6)).to_string()})
             .to_string(),
         );
         let mut done = vec![(start + Days::new(2), Some(k as i64 + 1))];

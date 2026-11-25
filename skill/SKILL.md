@@ -111,7 +111,7 @@ lcl --json issue unrelate DEMO-2 blocks DEMO-1
 ```
 
 - The kinds are `blocks`, `blocked-by`, `related` and `duplicate-of`. `A blocked-by B` is the same relation as `B blocks A`.
-- `relate` returns `{"issue","kind","related","created"}`; `created` is false when the relation was there already. `unrelate` returns the same with `removed`.
+- `relate` returns `{"issue","kind","related","created"}`, with `kind` spelled as `issue show` names the relations (`blocked_by`, `duplicate_of`) however it was typed; `created` is false when the relation was there already. `unrelate` returns the same with `removed`.
 - `duplicate-of` sets A's status to Duplicate. An issue is a duplicate of at most one issue.
 - A loop of blocks, of duplicates or of parents is refused (exit 1).
 - `issue update --parent DEMO-1` moves an issue under another; `--no-parent` makes it top-level.

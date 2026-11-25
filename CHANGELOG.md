@@ -8,6 +8,11 @@ All notable changes to lcl are recorded here. The format follows
 
 ### Changed
 
+- Four names and shapes that disagreed, fixed before 1.0 freezes them:
+  - A cycle's dates are `start_date` and `end_date` in `--json` and in `lcl-export/1`, as `due_date` and `target_date` are; `_at` is for Unix seconds. 0.3.0-alpha.3 named them `starts_at` and `ends_at`; `lcl import` still reads those, and refuses a record with both spellings of a date.
+  - `lcl comment delete` and `lcl doc delete` print `id` beside `deleted`, as every other delete does.
+  - `lcl issue relate` and `unrelate` print `kind` as `issue show` and `issue history` name the relations: `blocked_by` and `duplicate_of`, however it was typed. 0.3.0-alpha.3 printed it as typed, `blocked-by` and `duplicate-of`. The command line takes both spellings, as before.
+  - `lcl init` and `lcl workspace create` print the same keys: `name`, `slug`, `key`, `path`, `created_at` and `created`. `init` added `slug` and `created_at`; `workspace create` added `created`, always true.
 - `lcl export` writes each comment's `id`, and `lcl import` keeps it, so a comment has the same id after an export and import, and a later record type can name a comment. A file without comment ids, from an earlier lcl or a converter, still imports, and each comment gets a new id. 0.3.0-alpha.3 and earlier refuse a file that has them (unknown key `id`).
 - A write that waits out the 30-second lock another lcl holds, and `lcl backup` that can't get it, fail with a new error kind, `busy` (exit 1), and say that nothing was written and the command can be run again. 0.3.0-alpha.3 reported them as kind `other`, with SQLite's "database is locked".
 - docs/json-contract.md and the skill say what a release may do to the `--json` contract from 1.0: inside a major version it may add keys to an output, commands, flags and error kinds, and never removes, renames or retypes a key, changes an exit status, or changes what a value means. A reader ignores keys it doesn't know and reads an unknown error kind as `other`.
