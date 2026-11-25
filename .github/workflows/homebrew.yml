@@ -1,0 +1,88 @@
+name: homebrew
+
+# Makes the Homebrew formula for the newest release with
+# packaging/homebrew/formula.sh, puts it in a tap on the runner, and
+# installs and tests it with brew: on Linux x86_64, macOS arm64 and macOS
+# x86_64. (GitHub's Linux arm64 runners don't come with Homebrew.) Runs when
+# the script changes, after a release is published, and by hand.
+#
+# This is the check the real tap (botzrDev/homebrew-tap, LOCL-13) relies on:
+# what passes here is the file that goes in the tap.
+
+on:
+  push:
+    branches: ["**"]
+    paths:
+      - packaging/homebrew/**
+      - .github/workflows/homebrew.yml
+  workflow_run:
+    workflows: [release]
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  GH_TOKEN: ${{ github.token }}
+
+jobs:
+  # A release run that published nothing (a dry run, or a failure) is not a
+  # reason to run: a tag push that succeeded is.
+  gate:
+    if: >-
+      github.event_name != 'workflow_run' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       startsWith(github.event.workflow_run.head_branch, 'v'))
+    runs-on: ubuntu-24.04
+    outputs:
+      tag: ${{ steps.newest.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: shellcheck -s sh packaging/homebrew/formula.sh
+      - id: newest
+        run: echo "tag=$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=1" --jq '.[0].tag_name')" >>"$GITHUB_OUTPUT"
+      - name: A release missing an archive writes nothing
+        env:
+          TAG: ${{ steps.newest.outputs.tag }}
+        run: |
+          gh release download "$TAG" --pattern SHA256SUMS --dir "$RUNNER_TEMP"
+          grep -v aarch64-unknown-linux-gnu "$RUNNER_TEMP/SHA256SUMS" >"$RUNNER_TEMP/short"
+          if packaging/homebrew/formula.sh "$TAG" "$RUNNER_TEMP/short" >"$RUNNER_TEMP/out.rb"; then
+            echo "::error::formula.sh wrote a formula for a release missing an archive"
+            exit 1
+          fi
+          [[ ! -s "$RUNNER_TEMP/out.rb" ]]
+
+  brew:
+    needs: gate
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-latest, macos-15-intel]
+    runs-on: ${{ matrix.os }}
+    env:
+      TAG: ${{ needs.gate.outputs.tag }}
+      HOMEBREW_NO_AUTO_UPDATE: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Homebrew on PATH (Linux)
+        if: runner.os == 'Linux'
+        run: echo "/home/linuxbrew/.linuxbrew/bin" >>"$GITHUB_PATH"
+      - name: Write the formula into a tap on this runner
+        run: |
+          brew tap-new --no-git botzrdev/local
+          tap="$(brew --repository)/Library/Taps/botzrdev/homebrew-local"
+          packaging/homebrew/formula.sh "$TAG" >"$tap/Formula/lcl.rb"
+          cat "$tap/Formula/lcl.rb"
+      - run: brew audit --formula botzrdev/local/lcl
+      - run: brew install botzrdev/local/lcl
+      - run: brew test botzrdev/local/lcl
+      - name: Use it
+        run: |
+          [[ "$(lcl --version)" == "lcl ${TAG#v}" ]]
+          cd "$(mktemp -d)"
+          lcl init demo --key DEMO
+          lcl --json issue create --title "installed with brew"
+          [[ "$(lcl --json issue list | python3 -c 'import json,sys; print(json.load(sys.stdin)["total"])')" == 1 ]]
