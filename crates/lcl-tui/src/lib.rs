@@ -21,7 +21,7 @@ use crossterm::terminal::{
 use lcl_core::db::{
     Change, IssueFilter, IssueSort, IssueUpdate, LabelUpdate, NewIssue, Page, Placement, Store,
 };
-use lcl_core::models::{Comment, Issue, IssueId, IssueRef, Priority, Status};
+use lcl_core::models::{Comment, Issue, IssueId, IssueRef, Priority, Relations, Status};
 use lcl_core::search::SearchQuery;
 use ratatui::buffer::CellWidth;
 use ratatui::prelude::*;
@@ -36,6 +36,8 @@ use unicode_segmentation::UnicodeSegmentation;
 const LIST_HELP: &str = "j/k: move  Enter: open  c: create  s: status  !: priority  a: assignee  l: labels  /: search  p: project  1-7: filter  0: all  r: reload  q: quit";
 const DETAIL_HELP: &str =
     "j/k: scroll  PgUp/PgDn: page  c: comment  l: labels  Esc: back  r: reload  q: quit";
+/// The detail's keys when the issue links to others.
+const LINKS_HELP: &str = "j/k: scroll  Tab: next link  Enter: open it  c: comment  l: labels  Esc: back  r: reload  q: quit";
 
 /// What marks the selected row. Every row is indented by its width.
 const SYMBOL: &str = ">> ";
@@ -229,6 +231,9 @@ pub struct Snapshot {
     /// The comments of the issue that was open (`Request::open`) when this
     /// was read, oldest first; none while the list is shown.
     pub comments: Vec<Comment>,
+    /// The relations of the issue that was open, as `issue show` lists
+    /// them, with that issue's id; None while the list is shown.
+    pub relations: Option<(IssueId, Relations)>,
     /// The search asked for (`Request::search`), if one was.
     pub search: Option<Found>,
 }
@@ -548,6 +553,10 @@ struct Detail {
     /// bottom), and how many lines fit, a page. Keys scroll within them.
     bottom: Cell<usize>,
     page: Cell<usize>,
+    /// The link highlighted, by its place in `App::links`; none until Tab.
+    link: Option<usize>,
+    /// From the last draw: the line each link is on.
+    link_lines: RefCell<Vec<usize>>,
 }
 
 impl Detail {
@@ -557,6 +566,32 @@ impl Detail {
             scroll: 0,
             bottom: Cell::new(0),
             page: Cell::new(0),
+            link: None,
+            link_lines: RefCell::new(Vec::new()),
+        }
+    }
+
+    /// Highlights the next link of `count` (Tab), or the one before
+    /// (Shift-Tab), round to the other end, and scrolls it into view.
+    fn next_link(&mut self, count: usize, back: bool) {
+        if count == 0 {
+            return;
+        }
+        let at = match (self.link.filter(|&n| n < count), back) {
+            (None, false) => 0,
+            (None, true) => count - 1,
+            (Some(n), false) => (n + 1) % count,
+            (Some(n), true) => (n + count - 1) % count,
+        };
+        self.link = Some(at);
+        let Some(&line) = self.link_lines.borrow().get(at) else {
+            return;
+        };
+        let page = self.page.get().max(1);
+        if line < self.scroll {
+            self.scroll = line;
+        } else if line >= self.scroll + page {
+            self.scroll = line + 1 - page;
         }
     }
 
@@ -578,6 +613,26 @@ impl Detail {
     }
 }
 
+/// An issue the open one links to, and how: "Parent", "Blocks" and so on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Link {
+    how: &'static str,
+    identifier: String,
+    status: Status,
+    title: String,
+}
+
+impl Link {
+    fn of(how: &'static str, issue: &Issue) -> Link {
+        Link {
+            how,
+            identifier: issue.identifier.clone(),
+            status: issue.status,
+            title: issue.title.clone(),
+        }
+    }
+}
+
 /// The workspace as last read, what narrows the list (a status, a project,
 /// a search), the selected issue, and what the screen shows (`Mode`).
 ///
@@ -595,6 +650,9 @@ pub struct App {
     search: Option<SearchQuery>,
     selected: Option<IssueId>,
     mode: Mode,
+    /// The details opened before the one shown, from a link, the last one
+    /// last; Esc goes back through them.
+    trail: Vec<Detail>,
     /// Why the last write failed; the keys line shows it until the next key.
     failed: Option<String>,
     /// How a comment's time is shown; local time, but for the tests.
@@ -611,6 +669,7 @@ impl App {
             search: None,
             selected: None,
             mode: Mode::List,
+            trail: Vec::new(),
             failed: None,
             time: local_time,
         };
@@ -701,8 +760,11 @@ impl App {
     /// choice of its labels; and
     /// Enter opens its detail, asking for a reload to read its comments. A
     /// new filter selects the first row. In the detail, keys scroll
-    /// (`Detail::scroll`), c starts a comment, l opens a choice of the
-    /// issue's labels, and Esc goes back to the list, as it was. In a choice
+    /// (`Detail::scroll`), Tab and Shift-Tab highlight the next and the
+    /// last of the issues it links to (`App::links`), Enter opens the one
+    /// highlighted, c starts a comment, l opens a choice of the issue's
+    /// labels, and Esc goes back the way it came: to the detail a link was
+    /// opened from, and from the first, to the list, as it was. In a choice
     /// of labels, j/k move, space ticks or unticks one, Enter writes what
     /// changed, and Esc goes back with nothing written: to the detail, if
     /// it was opened there.
@@ -812,10 +874,21 @@ impl App {
             | Mode::Choose(_)
             | Mode::Labels(_)
             | Mode::Comment(..) => self.list_key(key.code),
-            Mode::Detail(_) if key.code == KeyCode::Esc => {
-                self.mode = Mode::List;
+            Mode::Detail(_) if key.code == KeyCode::Esc => self.back(),
+            Mode::Detail(d) if matches!(key.code, KeyCode::Tab | KeyCode::BackTab) => {
+                let count = self
+                    .snapshot
+                    .issues
+                    .iter()
+                    .find(|i| i.id == d.id)
+                    .map_or(0, |i| self.links(i).len());
+                // Borrowed again: `links` read the snapshot.
+                if let Mode::Detail(d) = &mut self.mode {
+                    d.next_link(count, key.code == KeyCode::BackTab);
+                }
                 Action::Stay
             }
+            Mode::Detail(_) if key.code == KeyCode::Enter => self.follow(),
             Mode::Detail(_) if key.code == KeyCode::Char('c') => {
                 if let Mode::Detail(d) = std::mem::replace(&mut self.mode, Mode::List) {
                     self.mode = Mode::Comment(d, Prompt::new(""));
@@ -836,6 +909,96 @@ impl App {
                 Action::Stay
             }
         }
+    }
+
+    /// Esc in the detail: back to the detail a link was opened from,
+    /// reading its comments again, or from the first one to the list. A
+    /// detail on the way whose issue is gone is passed over.
+    fn back(&mut self) -> Action {
+        while let Some(d) = self.trail.pop() {
+            if self.snapshot.issues.iter().any(|i| i.id == d.id) {
+                self.mode = Mode::Detail(d);
+                return Action::Reload;
+            }
+        }
+        self.mode = Mode::List;
+        Action::Stay
+    }
+
+    /// Enter in the detail: the highlighted link's issue opens, and Esc
+    /// comes back here. Nothing happens with no link highlighted.
+    fn follow(&mut self) -> Action {
+        let Mode::Detail(d) = &self.mode else {
+            return Action::Stay;
+        };
+        let Some(issue) = self.snapshot.issues.iter().find(|i| i.id == d.id) else {
+            return Action::Stay;
+        };
+        let links = self.links(issue);
+        let Some(to) = d
+            .link
+            .and_then(|n| links.get(n))
+            .and_then(|l| {
+                self.snapshot
+                    .issues
+                    .iter()
+                    .find(|i| i.identifier == l.identifier)
+            })
+            .map(|i| i.id.clone())
+        else {
+            return Action::Stay;
+        };
+        if let Mode::Detail(from) = std::mem::replace(&mut self.mode, Mode::Detail(Detail::new(to)))
+        {
+            self.trail.push(from);
+        }
+        Action::Reload
+    }
+
+    /// The issues `issue` links to, in the order the detail lists them: its
+    /// parent, its sub-issues by number, then what it blocks, is blocked
+    /// by, is related to, is a duplicate of, and has as duplicates, as
+    /// `issue show` lists them. The relations are known only for the issue
+    /// that was open when the workspace was read.
+    fn links(&self, issue: &Issue) -> Vec<Link> {
+        let find = |identifier: &str| {
+            self.snapshot
+                .issues
+                .iter()
+                .find(|i| i.identifier == identifier)
+        };
+        let mut out = Vec::new();
+        if let Some(parent) = issue.parent_identifier.as_deref().and_then(find) {
+            out.push(Link::of("Parent", parent));
+        }
+        let mut children: Vec<&Issue> = self
+            .snapshot
+            .issues
+            .iter()
+            .filter(|i| i.parent_id.as_ref() == Some(&issue.id))
+            .collect();
+        children.sort_by_key(|i| i.number);
+        out.extend(children.into_iter().map(|i| Link::of("Sub-issue", i)));
+        if let Some((id, r)) = &self.snapshot.relations
+            && id == &issue.id
+        {
+            let groups = [
+                ("Blocks", r.blocks.as_slice()),
+                ("Blocked by", r.blocked_by.as_slice()),
+                ("Related", r.related.as_slice()),
+                ("Duplicate of", r.duplicate_of.as_slice()),
+                ("Duplicates", r.duplicates.as_slice()),
+            ];
+            for (how, issues) in groups {
+                out.extend(issues.iter().map(|i| Link {
+                    how,
+                    identifier: i.identifier.clone(),
+                    status: i.status,
+                    title: i.title.clone(),
+                }));
+            }
+        }
+        out
     }
 
     fn list_key(&mut self, code: KeyCode) -> Action {
@@ -1174,6 +1337,9 @@ impl App {
         {
             self.mode = Mode::List;
         }
+        if matches!(self.mode, Mode::List) {
+            self.trail.clear();
+        }
     }
 
     /// The header line: the workspace's name, with its key in brackets if it
@@ -1250,21 +1416,33 @@ impl App {
     }
 
     /// The open issue's detail, in lines of at most `width` cells: its
-    /// identifier and title; its status, priority, assignee and labels; its
-    /// description; then its comments, oldest first, each `AUTHOR · TIME`
-    /// and its body indented two cells, as `lcl issue comments` prints them.
-    fn detail_lines(&self, issue: &Issue, width: usize) -> Vec<Line<'static>> {
+    /// identifier and title; its status, priority, assignee and labels; the
+    /// issues it links to (`App::links`), one line each, `link` highlighted;
+    /// its description; then its comments, oldest first, each `AUTHOR ·
+    /// TIME` and its body indented two cells, as `lcl issue comments` prints
+    /// them. With the lines, the line each link is on.
+    fn detail_lines(
+        &self,
+        issue: &Issue,
+        width: usize,
+        link: Option<usize>,
+    ) -> (Vec<Line<'static>>, Vec<usize>) {
         let plain = Style::default();
         let bold = plain.add_modifier(Modifier::BOLD);
         let dim = plain.add_modifier(Modifier::DIM);
         let mut out = Vec::new();
-        let mut add = |text: &str, style: Style, indent: usize| {
+        let add = |out: &mut Vec<Line<'static>>, text: &str, style: Style, indent: usize| {
             for line in wrap(text, width.saturating_sub(indent)) {
                 out.push(Line::styled(format!("{}{line}", " ".repeat(indent)), style));
             }
         };
-        add(&format!("{}  {}", issue.identifier, issue.title), bold, 0);
-        add("", plain, 0);
+        add(
+            &mut out,
+            &format!("{}  {}", issue.identifier, issue.title),
+            bold,
+            0,
+        );
+        add(&mut out, "", plain, 0);
         let labels = issue.labels.join(", ");
         for (name, value) in [
             ("Status", issue.status.as_str()),
@@ -1272,15 +1450,42 @@ impl App {
             ("Assignee", issue.assignee.as_deref().unwrap_or("none")),
             ("Labels", if labels.is_empty() { "none" } else { &labels }),
         ] {
-            add(&format!("{name:<8}  {value}"), plain, 0);
+            add(&mut out, &format!("{name:<8}  {value}"), plain, 0);
         }
-        add("", plain, 0);
+        let links = self.links(issue);
+        let mut at = Vec::with_capacity(links.len());
+        if !links.is_empty() {
+            add(&mut out, "", plain, 0);
+        }
+        let how = links.iter().map(|l| cells(l.how)).max().unwrap_or(0);
+        let key = links
+            .iter()
+            .map(|l| cells(&l.identifier))
+            .max()
+            .unwrap_or(0);
+        for (n, l) in links.iter().enumerate() {
+            let text = format!(
+                "{:<how$}  {:<key$}  {:<10}  {}",
+                l.how,
+                clean(&l.identifier),
+                l.status.as_str(),
+                clean(&l.title)
+            );
+            let style = if link == Some(n) {
+                plain.bg(Color::DarkGray)
+            } else {
+                plain
+            };
+            at.push(out.len());
+            out.push(Line::styled(fit(&text, width), style));
+        }
+        add(&mut out, "", plain, 0);
         if issue.description.trim().is_empty() {
-            add("No description.", dim, 0);
+            add(&mut out, "No description.", dim, 0);
         } else {
-            add(&issue.description, plain, 0);
+            add(&mut out, &issue.description, plain, 0);
         }
-        add("", plain, 0);
+        add(&mut out, "", plain, 0);
         let comments: Vec<&Comment> = self
             .snapshot
             .comments
@@ -1288,18 +1493,23 @@ impl App {
             .filter(|c| c.issue_id == issue.id.as_str())
             .collect();
         if comments.is_empty() {
-            add("No comments.", dim, 0);
+            add(&mut out, "No comments.", dim, 0);
         }
         for (n, c) in comments.iter().enumerate() {
             if n == 0 {
-                add(&format!("Comments ({})", comments.len()), bold, 0);
+                add(&mut out, &format!("Comments ({})", comments.len()), bold, 0);
             }
-            add("", plain, 0);
+            add(&mut out, "", plain, 0);
             let author = c.author.as_deref().unwrap_or("anon");
-            add(&format!("{author} · {}", (self.time)(c.created_at)), dim, 0);
-            add(&c.body, plain, 2);
+            add(
+                &mut out,
+                &format!("{author} · {}", (self.time)(c.created_at)),
+                dim,
+                0,
+            );
+            add(&mut out, &c.body, plain, 2);
         }
-        out
+        (out, at)
     }
 
     /// One line of header, the list or the open issue's detail, one line
@@ -1324,7 +1534,11 @@ impl App {
             }
             Mode::Detail(d) => {
                 self.draw_detail(f, chunks[1], d);
-                DETAIL_HELP.into()
+                if d.link_lines.borrow().is_empty() {
+                    DETAIL_HELP.into()
+                } else {
+                    LINKS_HELP.into()
+                }
             }
             Mode::Search(p) => {
                 self.draw_list(f, chunks[1]);
@@ -1431,11 +1645,12 @@ impl App {
         let Some(issue) = self.snapshot.issues.iter().find(|i| i.id == d.id) else {
             return;
         };
-        let lines = self.detail_lines(issue, area.width.into());
+        let (lines, links) = self.detail_lines(issue, area.width.into(), d.link);
         let height = usize::from(area.height);
         let bottom = lines.len().saturating_sub(height);
         d.bottom.set(bottom);
         d.page.set(height);
+        *d.link_lines.borrow_mut() = links;
         let shown: Vec<Line> = lines
             .into_iter()
             .skip(d.scroll.min(bottom))
@@ -1562,7 +1777,8 @@ pub fn run(store: Store) -> Result<()> {
 }
 
 /// The workspace's name and key, and every issue by number; then what
-/// `request` asks for: the open issue's comments, oldest first, and the
+/// `request` asks for: the open issue's comments, oldest first, and its
+/// relations, and the
 /// issues the search finds, as `lcl search` finds and ranks them. Read-only.
 fn load(store: &Store, request: &Request) -> Result<Snapshot> {
     let issues = store
@@ -1592,6 +1808,10 @@ fn load(store: &Store, request: &Request) -> Result<Snapshot> {
         comments: match &request.open {
             Some(id) => store.list_comments(id.as_str(), false)?,
             None => Vec::new(),
+        },
+        relations: match &request.open {
+            Some(id) => Some((id.clone(), store.relations(id.as_str())?)),
+            None => None,
         },
         search,
     })
@@ -1805,6 +2025,7 @@ mod tests {
             issues,
             labels: vec![],
             comments: vec![],
+            relations: None,
             search: None,
         }
     }
@@ -2161,6 +2382,7 @@ mod tests {
             issues: vec![issue(1, Status::Todo)],
             labels: vec![],
             comments: vec![],
+            relations: None,
             search: None,
         });
         assert_eq!(app.header(), "solo · 1 issue");
@@ -2693,7 +2915,7 @@ mod tests {
         app.key(code(KeyCode::Enter));
         let issue = app.snapshot.issues[0].clone();
         for width in 0..=60 {
-            let lines = app.detail_lines(&issue, width);
+            let (lines, _) = app.detail_lines(&issue, width, None);
             assert!(width < 4 || lines.len() > 12, "{width}: {}", lines.len());
             for line in lines {
                 let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
@@ -3498,6 +3720,189 @@ mod tests {
         assert_eq!(
             frame(&app, 90, 6)[5].trim_end(),
             "Not written: D-2 is in the trash; restore it with: lcl issue restore D-2"
+        );
+    }
+
+    /// W-1 Done, the parent of W-2 Todo; W-2 blocks W-3 Backlog; W-4 has
+    /// no links. The relations are W-2's, as if it were open.
+    fn linked() -> Snapshot {
+        let mut snapshot = work(vec![
+            issue(1, Status::Done),
+            issue(2, Status::Todo),
+            issue(3, Status::Backlog),
+            issue(4, Status::Backlog),
+        ]);
+        snapshot.issues[1].parent_id = Some(id("id-1"));
+        snapshot.issues[1].parent_identifier = Some("W-1".into());
+        snapshot.relations = Some((id("id-2"), blocks_w3()));
+        snapshot
+    }
+
+    fn blocks_w3() -> Relations {
+        Relations {
+            blocks: vec![lcl_core::models::RelatedIssue {
+                identifier: "W-3".into(),
+                title: "issue 3".into(),
+                status: Status::Backlog,
+            }],
+            ..Default::default()
+        }
+    }
+
+    /// Opens `n`'s detail, as Enter on its row does, and the reload that
+    /// follows it reads `relations` for it.
+    fn open_on(app: &mut App, n: &str, relations: Relations) {
+        while selected(app) != n {
+            app.key(press('j'));
+        }
+        assert_eq!(app.key(code(KeyCode::Enter)), Action::Reload);
+        let mut snapshot = linked();
+        snapshot.relations = Some((app.open().unwrap().clone(), relations));
+        app.reloaded(snapshot);
+    }
+
+    #[test]
+    fn the_detail_lists_the_links_and_tab_enter_and_esc_walk_them() {
+        let mut app = App::new(linked());
+        open_on(&mut app, "W-2", blocks_w3());
+        let lines = frame(&app, 50, 12);
+        assert_eq!(
+            lines[8..10],
+            [
+                "Parent  W-1  Done        issue 1                  ",
+                "Blocks  W-3  Backlog     issue 3                  ",
+            ]
+            .map(String::from)
+        );
+        assert_eq!(
+            lines[11],
+            "j/k: scroll  Tab: next link  Enter: open it  c: co"
+        );
+        // Enter with no link highlighted does nothing.
+        assert_eq!(app.key(code(KeyCode::Enter)), Action::Stay);
+        // Tab highlights the parent, Tab again the next, round to the first;
+        // Shift-Tab goes back.
+        app.key(code(KeyCode::Tab));
+        assert_eq!(link_at(&app), Some(0));
+        app.key(code(KeyCode::Tab));
+        app.key(code(KeyCode::Tab));
+        assert_eq!(link_at(&app), Some(0));
+        app.key(code(KeyCode::BackTab));
+        assert_eq!(link_at(&app), Some(1));
+        let style = |app: &App, row: usize| {
+            let mut terminal = Terminal::new(TestBackend::new(50, 12)).unwrap();
+            terminal.draw(|f| app.draw(f)).unwrap();
+            terminal.backend().buffer()[(0, row as u16)].bg
+        };
+        assert_eq!(style(&app, 9), Color::DarkGray);
+        assert_eq!(style(&app, 8), Color::Reset);
+        // Enter opens W-3; the reload reads its relations.
+        app.key(code(KeyCode::BackTab));
+        assert_eq!(app.key(code(KeyCode::Enter)), Action::Reload);
+        assert_eq!(opened(&app), Some("id-1"));
+        let mut snapshot = linked();
+        snapshot.relations = Some((id("id-1"), Relations::default()));
+        app.reloaded(snapshot);
+        // W-1's one link is its sub-issue, W-2. Open it.
+        let lines = frame(&app, 50, 12);
+        assert_eq!(lines[8].trim_end(), "Sub-issue  W-2  Todo        issue 2");
+        app.key(code(KeyCode::Tab));
+        assert_eq!(app.key(code(KeyCode::Enter)), Action::Reload);
+        assert_eq!(opened(&app), Some("id-2"));
+        // Esc goes back the way it came, reading each detail again, then
+        // to the list, as it was.
+        assert_eq!(app.key(code(KeyCode::Esc)), Action::Reload);
+        assert_eq!(opened(&app), Some("id-1"));
+        assert_eq!(app.key(code(KeyCode::Esc)), Action::Reload);
+        assert_eq!(opened(&app), Some("id-2"));
+        assert_eq!(app.key(code(KeyCode::Esc)), Action::Stay);
+        assert!(matches!(app.mode, Mode::List));
+        assert_eq!(selected(&app), "W-2");
+    }
+
+    fn link_at(app: &App) -> Option<usize> {
+        match &app.mode {
+            Mode::Detail(d) => d.link,
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn an_issue_with_no_links_keeps_the_detail_s_keys() {
+        let mut app = App::new(linked());
+        open_on(&mut app, "W-4", Relations::default());
+        let lines = frame(&app, 90, 10);
+        assert!(!lines.iter().any(|l| l.starts_with("Parent")), "{lines:#?}");
+        assert_eq!(lines[9].trim_end(), DETAIL_HELP);
+        assert_eq!(app.key(code(KeyCode::Tab)), Action::Stay);
+        assert_eq!(link_at(&app), None);
+        assert_eq!(app.key(code(KeyCode::Enter)), Action::Stay);
+        assert_eq!(opened(&app), Some("id-4"));
+    }
+
+    #[test]
+    fn esc_passes_over_a_detail_whose_issue_is_gone() {
+        let mut app = App::new(linked());
+        open_on(&mut app, "W-2", blocks_w3());
+        app.key(code(KeyCode::BackTab));
+        app.key(code(KeyCode::Enter));
+        assert_eq!(opened(&app), Some("id-3"));
+        // W-2 is purged behind the TUI: Esc goes past it, to the list.
+        let mut snapshot = linked();
+        snapshot.issues.remove(1);
+        snapshot.relations = None;
+        app.reloaded(snapshot);
+        assert_eq!(app.key(code(KeyCode::Esc)), Action::Stay);
+        assert!(matches!(app.mode, Mode::List));
+    }
+
+    #[test]
+    fn links_are_read_from_the_store_for_the_open_issue() {
+        let mut store = three();
+        let n = |number| IssueRef::Number { key: None, number };
+        store
+            .update_issue(
+                &n(3),
+                &Placement::default(),
+                &IssueUpdate {
+                    parent: Change::Set(n(1)),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        store
+            .relate(&n(2), lcl_core::models::RelationKind::Blocks, &n(3))
+            .unwrap();
+        let store = RefCell::new(store);
+        let mut app = App::new(load(&store.borrow(), &Request::default()).unwrap());
+        // D-3's detail, its parent opened from it, then back.
+        while selected(&app) != "D-3" {
+            app.key(press('j'));
+        }
+        let pressed = [code(KeyCode::Enter), press('q')];
+        run_on(&store, &mut app, &pressed).unwrap();
+        let lines = frame(&app, 50, 12);
+        assert_eq!(
+            lines[8..10],
+            [
+                "Parent      D-1  Backlog     one                  ",
+                "Blocked by  D-2  Backlog     two                  ",
+            ]
+            .map(String::from)
+        );
+        let pressed = [code(KeyCode::Tab), code(KeyCode::Enter), press('q')];
+        run_on(&store, &mut app, &pressed).unwrap();
+        assert_eq!(frame(&app, 50, 12)[1].trim_end(), "D-1  one");
+        assert_eq!(
+            frame(&app, 50, 12)[8].trim_end(),
+            "Sub-issue  D-3  Backlog     three"
+        );
+        let pressed = [code(KeyCode::Esc), press('q')];
+        run_on(&store, &mut app, &pressed).unwrap();
+        assert_eq!(frame(&app, 50, 12)[1].trim_end(), "D-3  three");
+        assert_eq!(
+            frame(&app, 50, 12)[9].trim_end(),
+            "Blocked by  D-2  Backlog     two"
         );
     }
 
