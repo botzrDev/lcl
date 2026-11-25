@@ -37,3 +37,25 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: EmbarkStudios/cargo-deny-action@v2
+
+  # What `cargo publish` would upload, built from the packages alone:
+  # lcl-core, lcl-tui, then the CLI, each against the ones before it.
+  # publish = false keeps the crates off crates.io until the owner picks the
+  # names (LOCL-14). cargo packages siblings together only when they're
+  # publishable, so this lifts it on the runner's checkout and nowhere else.
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.98
+      - uses: Swatinem/rust-cache@v2
+      - run: sed -i 's/^publish = false$/publish = true/' Cargo.toml
+      - run: cargo package --workspace --locked --allow-dirty
+      - name: Each package holds the license, and the CLI's binary is lcl
+        run: |
+          for crate in target/package/*.crate; do
+            tar tzf "$crate" | grep -q '/LICENSE$' || { echo "::error::$crate has no LICENSE"; exit 1; }
+          done
+          # Whatever the CLI's package is called, the one binary is lcl.
+          bins=$(cat target/package/*-[0-9]*/Cargo.toml | grep -A1 '^\[\[bin\]\]' | grep '^name = ')
+          [[ "$bins" == 'name = "lcl"' ]] || { echo "::error::the packages' binaries are: $bins"; exit 1; }

@@ -9,6 +9,8 @@ publish.workspace = true
 authors.workspace = true
 repository.workspace = true
 readme.workspace = true
+keywords = ["issue-tracker", "sqlite", "jsonl"]
+categories = ["database", "development-tools"]
 
 [dependencies]
 serde = { workspace = true }

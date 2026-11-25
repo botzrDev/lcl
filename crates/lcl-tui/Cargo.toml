@@ -9,6 +9,8 @@ publish.workspace = true
 authors.workspace = true
 repository.workspace = true
 readme.workspace = true
+keywords = ["tui", "issue-tracker", "ratatui"]
+categories = ["command-line-interface"]
 
 [dependencies]
 lcl-core = { workspace = true }
