@@ -2,7 +2,7 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum LclError {
-    #[error("database error: {0}")]
+    #[error("{}", db_message(.0))]
     Db(#[from] rusqlite::Error),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
@@ -134,7 +134,7 @@ pub enum LclError {
     BackupFailed { path: String, reason: String },
     /// A backup or snapshot that could not get a lock on `file` for as
     /// long as a write waits. Nothing is left at `path`.
-    #[error("can't write {path}: {file} stayed locked by another lcl")]
+    #[error("can't write {path}: {file} stayed locked by another lcl; run the command again")]
     BackupLocked { path: String, file: String },
     /// `lcl init` could not write `.lcl/.gitignore`. It made no workspace
     /// and registered none.
@@ -494,6 +494,9 @@ pub enum ErrorKind {
     Conflict,
     /// A file from a newer lcl, or values this lcl doesn't know.
     Schema,
+    /// Another lcl held the workspace's lock for as long as a write waits
+    /// (`crate::db::BUSY_TIMEOUT`). Nothing was written: run it again.
+    Busy,
     Io,
     Other,
 }
@@ -507,6 +510,7 @@ impl ErrorKind {
             ErrorKind::NotFound => "not_found",
             ErrorKind::Conflict => "conflict",
             ErrorKind::Schema => "schema",
+            ErrorKind::Busy => "busy",
             ErrorKind::Io => "io",
             ErrorKind::Other => "other",
         }
@@ -537,8 +541,8 @@ impl LclError {
             | LclError::BadRegistryVersion(_)
             | LclError::BadRegistryVersionNumber(_)
             | LclError::ExportRoundTrip(_)
-            | LclError::SyncRefused { .. }
-            | LclError::BackupLocked { .. } => Other,
+            | LclError::SyncRefused { .. } => Other,
+            LclError::BackupLocked { .. } => Busy,
             LclError::SyncNetwork { .. }
             | LclError::LinearNetwork { .. }
             | LclError::LinearRateLimited { .. } => Network,
@@ -648,12 +652,27 @@ impl LclError {
 }
 
 /// A SQLite error about the file or the disk (it can't be opened, read,
-/// written, or grown) is io; any other is other.
+/// written, or grown) is io; a lock another lcl held past the wait is busy;
+/// any other is other.
 fn db_kind(e: &rusqlite::Error) -> ErrorKind {
-    use rusqlite::ErrorCode::{CannotOpen, DiskFull, ReadOnly, SystemIoFailure};
+    use rusqlite::ErrorCode::{CannotOpen, DatabaseBusy, DiskFull, ReadOnly, SystemIoFailure};
     match e.sqlite_error_code() {
         Some(CannotOpen | SystemIoFailure | DiskFull | ReadOnly) => ErrorKind::Io,
+        Some(DatabaseBusy) => ErrorKind::Busy,
         _ => ErrorKind::Other,
+    }
+}
+
+/// A SQLite error's message. A lock held past the wait says what happened
+/// and what to do, where SQLite says only "database is locked".
+fn db_message(e: &rusqlite::Error) -> String {
+    if e.sqlite_error_code() == Some(rusqlite::ErrorCode::DatabaseBusy) {
+        let secs = crate::db::BUSY_TIMEOUT.as_secs();
+        format!(
+            "another lcl kept the workspace locked for {secs} seconds; nothing was written, run the command again"
+        )
+    } else {
+        format!("database error: {e}")
     }
 }
 

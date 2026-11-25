@@ -33,9 +33,9 @@ lcl init --key DEMO                    # here: ./.lcl/data.sqlite, named after t
   - Exit 2 means the command can't succeed as typed. Fix the arguments.
   - Exit 1 means it could succeed with other stored data, for example once a label exists.
 - With `--json`, an error is the last line of stderr, and the only one starting with `{`:
-  `{"error":{"kind":"usage|not_found|conflict|schema|io|network|auth|other","message":"..."}}`. Other stderr lines are notices starting with `lcl:`.
+  `{"error":{"kind":"usage|not_found|conflict|schema|busy|io|network|auth|other","message":"..."}}`. Other stderr lines are notices starting with `lcl:`.
   - `conflict` includes naming something in the trash. The message names the `restore` command that brings it back.
-- Writes are safe to run concurrently; each one is a single transaction. A write waits up to 30 s for another one; reads don't wait.
+- Writes are safe to run concurrently; each one is a single transaction. A write waits up to 30 s for another one; reads don't wait. A write that waits it out fails with kind `busy` and writes nothing: run it again.
 - A later lcl may add keys to an output, commands, flags and error kinds, but doesn't rename, remove or retype a key, or change an exit status. Ignore keys you don't know, and read an error kind you don't know as `other`.
 - For long or multi-line text, use `--description-file -`, `--content-file -` or `--body-file -` and pipe the text in. It is stored byte for byte, with no shell quoting to get wrong.
 

@@ -8,6 +8,7 @@ All notable changes to lcl are recorded here. The format follows
 
 ### Changed
 
+- A write that waits out the 30-second lock another lcl holds, and `lcl backup` that can't get it, fail with a new error kind, `busy` (exit 1), and say that nothing was written and the command can be run again. 0.3.0-alpha.3 reported them as kind `other`, with SQLite's "database is locked".
 - docs/json-contract.md and the skill say what a release may do to the `--json` contract from 1.0: inside a major version it may add keys to an output, commands, flags and error kinds, and never removes, renames or retypes a key, changes an exit status, or changes what a value means. A reader ignores keys it doesn't know and reads an unknown error kind as `other`.
 
 ### Fixed

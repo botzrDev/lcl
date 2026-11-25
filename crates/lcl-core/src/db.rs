@@ -2699,6 +2699,32 @@ mod tests {
         holder.execute_batch("COMMIT").expect("release");
     }
 
+    /// A write that can't get the lock in time is kind busy, and its message
+    /// says what to do. The wait here is none, so the test needn't sit out
+    /// BUSY_TIMEOUT; the error is the one the full wait ends in.
+    #[test]
+    fn a_write_that_waits_out_the_lock_is_busy() {
+        let db = TempDb::new();
+        let mut store = Store::open(&db.0).expect("create");
+        store.conn.busy_timeout(Duration::ZERO).expect("no wait");
+        let holder = Connection::open(&db.0).expect("second connection");
+        holder
+            .execute_batch("BEGIN IMMEDIATE")
+            .expect("take the write lock");
+        let err = begin_write(&mut store.conn, &mut store.fts_checked, None)
+            .map(|_| ())
+            .expect_err("the lock is held");
+        holder.execute_batch("COMMIT").expect("release");
+        assert_eq!(err.kind(), ErrorKind::Busy, "{err:?}");
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "another lcl kept the workspace locked for {} seconds; nothing was written, run the command again",
+                BUSY_TIMEOUT.as_secs()
+            )
+        );
+    }
+
     /// The full check's errors: only FTS5's corrupt result is a mismatch. A
     /// busy one, from a connection that may not wait for the lock, is the
     /// SQLite error it is, never kind schema.

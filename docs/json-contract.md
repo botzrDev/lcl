@@ -12,7 +12,7 @@ The shapes below are checked. `crates/lcl-cli/tests/contract.rs` reads this file
 ## Exit status
 
 - `0`: success. A closed stdout also exits 0.
-- `1`: the command failed. It could succeed with other stored data: a row was not found, the change conflicts with what is stored, the file has a schema this build will not read, or there was an I/O error.
+- `1`: the command failed. It could succeed with other stored data, or later: a row was not found, the change conflicts with what is stored, the file has a schema this build will not read, another lcl kept the workspace locked, or there was an I/O error.
 - `2`: the command line is wrong: a bad flag, a bad value, or a combination that cannot work. It cannot succeed as typed.
 
 The exit status is the same with and without `--json`.
@@ -32,13 +32,14 @@ With `--json`, an error is one line: the last line of stderr, and the only one t
 ### `Error`
 
 ```json
-{"error": {"kind": "'usage'|'not_found'|'conflict'|'schema'|'io'|'network'|'auth'|'other'", "message": "string"}}
+{"error": {"kind": "'usage'|'not_found'|'conflict'|'schema'|'busy'|'io'|'network'|'auth'|'other'", "message": "string"}}
 ```
 
 - `usage` comes with exit 2. Every other kind comes with exit 1.
 - `not_found`: a named issue, label, project, milestone, cycle, doc, comment or workspace does not exist.
 - `conflict`: the change is refused because of what is stored, as deleting a project that still has issues. A command that names an issue, a doc, a comment or a label in the trash is a conflict, and its message names the `restore` command.
 - `schema`: the file's schema is newer than this build reads, or is not a schema lcl wrote.
+- `busy`: another lcl kept the workspace locked for as long as a write waits (30 seconds). Nothing was written; the same command can run again.
 - `io`: a file could not be read or written.
 - `network`: the sync service could not be reached, or answered outside [the protocol](sync-protocol.md). Edits stay in the file and go at the next `lcl sync`.
 - `auth`: `LCL_SYNC_TOKEN` is not set, or the sync service refused the token.

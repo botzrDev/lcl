@@ -24,7 +24,7 @@
 //! process killed in 2 or 3 leaves the temporary file behind (nothing can
 //! remove it), and still nothing at `DEST`. An error names `DEST` and the
 //! reason, never the temporary name. A lock not got in time is
-//! `LclError::BackupLocked`, kind other, as for a write; anything else is
+//! `LclError::BackupLocked`, kind busy, as for a write; anything else is
 //! kind io.
 //!
 //! # Invariants
@@ -110,7 +110,7 @@ pub(crate) fn copy_database(src: &Connection, dest: &Path) -> Result<BackupRepor
 type Stop = Box<dyn std::error::Error>;
 
 /// The copy waited `wait` for a lock and did not get it. Reported as
-/// `LclError::BackupLocked`, kind other, as a write that times out on the
+/// `LclError::BackupLocked`, kind busy, as a write that times out on the
 /// lock is, and not as a file that can't be written.
 #[derive(Debug)]
 struct StayedLocked;
@@ -368,7 +368,7 @@ pub(crate) fn snapshot_before_upgrade(
         match copied {
             Ok(_) => return Ok(snapshot),
             Err(LclError::BackupExists(_)) => continue,
-            // Kind other, as a write that times out on the lock is. The
+            // Kind busy, as a write that times out on the lock is. The
             // upgrade has not started.
             Err(locked @ LclError::BackupLocked { .. }) => return Err(locked),
             Err(LclError::BackupFailed { reason, .. }) => return Err(failed(&snapshot, reason)),
@@ -555,7 +555,7 @@ mod tests {
         assert_eq!(out.names(), BTreeSet::new());
     }
 
-    /// A copy that can't get a lock in time is kind other, as a write that
+    /// A copy that can't get a lock in time is kind busy, as a write that
     /// times out on the lock is, and leaves nothing. The source here is a
     /// rollback-journal file another connection holds an exclusive lock on,
     /// which keeps every reader out.
@@ -581,11 +581,11 @@ mod tests {
         .unwrap_err();
         holder.execute_batch("COMMIT").unwrap();
         assert!(matches!(err, LclError::BackupLocked { .. }), "{err:?}");
-        assert_eq!(err.kind(), crate::error::ErrorKind::Other);
+        assert_eq!(err.kind(), crate::error::ErrorKind::Busy);
         assert_eq!(
             err.to_string(),
             format!(
-                "can't write {}: {} stayed locked by another lcl",
+                "can't write {}: {} stayed locked by another lcl; run the command again",
                 dest.display(),
                 src.path().unwrap()
             )
