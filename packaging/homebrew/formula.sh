@@ -71,7 +71,6 @@ main() {
 class Lcl < Formula
   desc "Local issue tracker with one SQLite file per workspace"
   homepage "https://github.com/$REPO"
-  version "$version"
   license "Apache-2.0"
 
   on_macos do

@@ -73,6 +73,9 @@ jobs:
       - name: Write the formula into a tap on this runner
         run: |
           brew tap-new --no-git botzrdev/local
+          # Newer Homebrew loads formulae only from taps it was told to
+          # trust; older Homebrew has no trust command and trusts every tap.
+          if brew commands | grep -qx trust; then brew trust botzrdev/local; fi
           tap="$(brew --repository)/Library/Taps/botzrdev/homebrew-local"
           packaging/homebrew/formula.sh "$TAG" >"$tap/Formula/lcl.rb"
           cat "$tap/Formula/lcl.rb"
