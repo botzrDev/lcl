@@ -111,6 +111,7 @@ For sync (LOCL-30):
 
 - The records and their keys do not change. An export is a snapshot. It carries no change log, no tombstones, and no sync settings.
 - **One change before the freeze, made in LOCL-48:** `lcl import` refused a record type it didn't know (exit 2). Then no record type could be added after 1.0 without a new format: a 1.0 reader would refuse every newer file. Now `lcl import` skips a record whose type it doesn't know, and says how many it skipped, of which types. An unknown key in a known record stays an error, so a converter's typo is still caught. Anything added after 1.0 comes as a new record type, not a new key.
+- **And one more, LOCL-63:** the comment record carries the comment's `id`, which import keeps. A comment has no name or number, so without it no later record type (a reply, an attachment on a comment) could say which comment it means.
 
 ## Out of 1.0
 

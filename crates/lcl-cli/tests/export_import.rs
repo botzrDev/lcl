@@ -634,6 +634,13 @@ fn a_bad_line_exits_2_naming_it_and_writes_nothing() {
             "line 10: parent: no doc with id 33333333-3333-4333-8333-333333333333 in the file".into()),
         ("a doc id that isn't a UUID", set(9, r#"{"type":"doc","id":"top","title":"top"}"#),
             r#"line 9: id: invalid id "top"; expected a UUID"#.into()),
+        ("a comment id that isn't a UUID", set(14, r#"{"type":"comment","id":"c1","issue":1,"body":"hi"}"#),
+            r#"line 14: id: invalid id "c1"; expected a UUID"#.into()),
+        ("the same comment id twice", {
+            let mut l = set(14, &format!(r#"{{"type":"comment","id":"{doc1}","issue":1,"body":"hi"}}"#));
+            l.push(format!(r#"{{"type":"comment","id":"{doc1}","issue":2,"body":"again"}}"#));
+            l
+        }, format!("line 19: id: comment {doc1} is already on line 14")),
         ("an unknown key", set(12, r#"{"type":"issue","number":2,"title":"two","parent":1,"titel":"x"}"#),
             r#"line 12: issue: unknown key "titel"; an issue record has: type, number, title, description, status, priority, assignee, creator, ref, parent, project, milestone, labels, cycles, estimate, due_date, created_at, updated_at, started_at, completed_at, canceled_at"#.into()),
         ("a known type in other case", set(14, r#"{"type":"Comment","issue":1,"body":"hi"}"#),
@@ -1680,6 +1687,17 @@ fn a_second_person_importing_an_export_sees_the_same_issues() {
             .as_array()
             .expect("comments")
             .len();
+        // A comment keeps its id, so a later record can name it.
+        let ids = |env: &Env| -> Vec<Value> {
+            env.lcl(&["--json", "issue", "comments", id])
+                .json()
+                .as_array()
+                .expect("comments")
+                .iter()
+                .map(|c| c["id"].clone())
+                .collect()
+        };
+        assert_eq!(ids(&b), ids(&a), "{id}: the comments' ids changed");
     }
     assert!(comments >= 3, "everything() has comments: {comments}");
 

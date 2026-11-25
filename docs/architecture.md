@@ -122,7 +122,7 @@ An issue matches when every word is in its title and description together, or ev
 
 ## Export
 
-`lcl export` writes the whole workspace as `lcl-export/1`: one JSON object per line. The workspace header is first, then labels, projects, milestones, cycles, issues, comments, relations, and docs. The same workspace exports to the same bytes. Issues are named by number in the file, not by the UUID stored on disk. Cycles and docs keep their ids, because a name is not unique for them.
+`lcl export` writes the whole workspace as `lcl-export/1`: one JSON object per line. The workspace header is first, then labels, projects, milestones, cycles, issues, comments, relations, and docs. The same workspace exports to the same bytes. Issues are named by number in the file, not by the UUID stored on disk. Cycles, docs and comments keep their ids: a name is not unique for a cycle or a doc, and a comment has no other, so a later record type can name one.
 
 An export carries no history. It is a snapshot of the records, and an import begins each record's history with its values as imported.
 

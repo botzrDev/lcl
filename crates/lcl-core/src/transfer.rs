@@ -206,6 +206,7 @@ struct IssueLine {
 #[derive(Serialize)]
 struct CommentLine {
     r#type: &'static str,
+    id: String,
     issue: i64,
     body: String,
     author: Option<String>,
@@ -285,7 +286,7 @@ const ISSUE_KEYS: &[&str] = &[
     "completed_at",
     "canceled_at",
 ];
-const COMMENT_KEYS: &[&str] = &["type", "issue", "body", "author", "created_at"];
+const COMMENT_KEYS: &[&str] = &["type", "id", "issue", "body", "author", "created_at"];
 const RELATION_KEYS: &[&str] = &["type", "kind", "from", "to"];
 const DOC_KEYS: &[&str] = &[
     "type",
@@ -378,6 +379,9 @@ struct IssueRec {
 }
 
 struct CommentRec {
+    /// Kept when the file has it (exports from 0.3.0-alpha.4 on); made on
+    /// import when it doesn't.
+    id: Option<String>,
     issue: i64,
     body: String,
     author: Option<String>,
@@ -1017,12 +1021,20 @@ fn read_issue(r: &mut Rec, now: i64) -> Result<IssueRec> {
 
 fn read_comment(r: &mut Rec, now: i64) -> Result<CommentRec> {
     r.known(COMMENT_KEYS)?;
+    let id = r
+        .defaulted("id", "a new id")?
+        .map(|v| r.string("id", v))
+        .transpose()?;
+    let id = id
+        .map(|id| parse::uuid(&id).map_err(|e| r.bad("id", e.0)))
+        .transpose()?;
     let issue = r.req_int("issue")?;
     let body = r.req_str("body")?;
     let author = r.opt_str("author")?;
     let author = r.exact_opt("author", author, parse::author)?;
     let created_at = r.def_int("created_at", now, "the import time")?;
     Ok(CommentRec {
+        id,
         issue,
         body,
         author,
@@ -1582,7 +1594,18 @@ fn check_references(file: &File, comment_lines: &[usize]) -> Result<()> {
         }
     }
 
+    let mut comment_ids: HashMap<&str, usize> = HashMap::new();
     for (c, line) in file.comments.iter().zip(comment_lines) {
+        if let Some(cid) = &c.id {
+            if let Some(at) = comment_ids.get(cid.as_str()) {
+                return Err(bad(
+                    *line,
+                    "id",
+                    format!("comment {cid} is already on line {at}"),
+                ));
+            }
+            comment_ids.insert(cid, *line);
+        }
         if !numbers.contains_key(&c.issue) {
             return Err(bad(
                 *line,
@@ -1886,7 +1909,7 @@ fn insert(conn: &Connection, file: &File, at: i64) -> Result<i64> {
         let mut stmt = conn.prepare("INSERT INTO comments(id, issue_id, body, author, created_at) VALUES (?1, ?2, ?3, ?4, ?5)")?;
         for c in &file.comments {
             stmt.execute(params![
-                new_id(),
+                c.id.clone().unwrap_or_else(new_id),
                 issue_ids[&c.issue],
                 c.body,
                 c.author,
@@ -2484,6 +2507,7 @@ fn export_in(conn: &Connection) -> Result<(String, Counts)> {
                 &mut out,
                 &CommentLine {
                     r#type: "comment",
+                    id: cid.clone(),
                     issue: number,
                     body,
                     author,
