@@ -8,6 +8,7 @@ All notable changes to lcl are recorded here. The format follows
 
 ### Added
 
+- In `lcl tui`, `d` shows the workspace's docs, nested as they are and by title, and Enter opens one, scrolled as an issue's detail is. Esc goes back to the docs, then to the issues. Read-only.
 - In `lcl tui`, `y` puts the selected issue in a cycle, or in none, as `issue update --cycle` and `--no-cycle` do, from a box of the cycles with its own marked; and `Y` narrows the list to each cycle in turn, then to none, as `p` does with projects.
 - In `lcl tui`, `m` sets the selected issue's project: a box of the projects, and none, with its own marked. A project with milestones goes on to a box of them, and none. It writes as `issue update --project` and `--milestone` do; moving to another project takes away a milestone that isn't in it. Esc writes nothing.
 - In `lcl tui`, an issue's detail lists its parent, its sub-issues, and the issues it blocks, is blocked by, is related to, is a duplicate of and has as duplicates, each with its status and title. Tab and Shift-Tab pick one, Enter opens it, and Esc goes back the way it came.

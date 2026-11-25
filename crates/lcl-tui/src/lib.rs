@@ -21,7 +21,7 @@ use crossterm::terminal::{
 use lcl_core::db::{
     Change, IssueFilter, IssueSort, IssueUpdate, LabelUpdate, NewIssue, Page, Placement, Store,
 };
-use lcl_core::models::{Comment, Issue, IssueId, IssueRef, Priority, Relations, Status};
+use lcl_core::models::{Comment, Doc, Issue, IssueId, IssueRef, Priority, Relations, Status};
 use lcl_core::search::SearchQuery;
 use ratatui::buffer::CellWidth;
 use ratatui::prelude::*;
@@ -33,9 +33,12 @@ use std::io::{IsTerminal, stdout};
 use std::time::Duration;
 use unicode_segmentation::UnicodeSegmentation;
 
-const LIST_HELP: &str = "j/k: move  Enter: open  c: create  s: status  !: priority  a: assignee  l: labels  m: project  y: cycle  /: search  p: project  Y: cycle  1-7: filter  0: all  r: reload  q: quit";
+const LIST_HELP: &str = "j/k: move  Enter: open  c: create  s: status  !: priority  a: assignee  l: labels  m: project  y: cycle  /: search  p: project  Y: cycle  d: docs  1-7: filter  0: all  r: reload  q: quit";
 const DETAIL_HELP: &str =
     "j/k: scroll  PgUp/PgDn: page  c: comment  l: labels  Esc: back  r: reload  q: quit";
+/// The docs list's keys, and an open doc's.
+const DOCS_HELP: &str = "j/k: move  Enter: open  Esc: issues  r: reload  q: quit";
+const DOC_HELP: &str = "j/k: scroll  PgUp/PgDn: page  Esc: docs  r: reload  q: quit";
 /// The detail's keys when the issue links to others.
 const LINKS_HELP: &str = "j/k: scroll  Tab: next link  Enter: open it  c: comment  l: labels  Esc: back  r: reload  q: quit";
 
@@ -239,6 +242,9 @@ pub struct Snapshot {
     /// The relations of the issue that was open, as `issue show` lists
     /// them, with that issue's id; None while the list is shown.
     pub relations: Option<(IssueId, Relations)>,
+    /// The docs not in the trash, while the docs are shown
+    /// (`Request::docs`); none otherwise.
+    pub docs: Vec<Doc>,
     /// The search asked for (`Request::search`), if one was.
     pub search: Option<Found>,
 }
@@ -267,6 +273,8 @@ pub struct Request {
     pub open: Option<IssueId>,
     /// The search the list is narrowed by.
     pub search: Option<SearchQuery>,
+    /// Whether the docs are read.
+    pub docs: bool,
 }
 
 /// A write the TUI asks for: one field of one issue, a new issue, or a
@@ -338,8 +346,63 @@ enum Mode {
     Choose(Choice),
     Labels(Labels),
     Pick(Pick),
+    Docs(Docs),
     /// The detail goes on showing, and Esc goes back to it.
     Comment(Detail, Prompt),
+}
+
+/// The docs, nested (`doc_rows`), the row highlighted, and the doc open
+/// over them, if one is.
+struct Docs {
+    at: usize,
+    open: Option<DocView>,
+}
+
+/// An open doc, by id, scrolled to a line; as `Detail` keeps them, the
+/// furthest it scrolls and a page, from the last draw.
+struct DocView {
+    id: String,
+    scroll: usize,
+    bottom: Cell<usize>,
+    page: Cell<usize>,
+}
+
+/// The docs in the order the docs list shows them, each with how deep it
+/// is nested: a doc's sub-docs follow it, one deeper, and docs at one
+/// depth are by title, ignoring case. A doc whose parent isn't among them
+/// is at the top.
+fn doc_rows(docs: &[Doc]) -> Vec<(usize, &Doc)> {
+    let ids: std::collections::HashSet<&str> = docs.iter().map(|d| d.id.as_str()).collect();
+    let mut under: HashMap<Option<&str>, Vec<&Doc>> = HashMap::new();
+    for d in docs {
+        let parent = d.parent_id.as_deref().filter(|p| ids.contains(p));
+        under.entry(parent).or_default().push(d);
+    }
+    for kids in under.values_mut() {
+        kids.sort_by(|a, b| {
+            (a.title.to_lowercase(), &a.title, &a.id).cmp(&(
+                b.title.to_lowercase(),
+                &b.title,
+                &b.id,
+            ))
+        });
+    }
+    let mut out = Vec::with_capacity(docs.len());
+    let mut stack: Vec<(usize, &Doc)> = under
+        .get(&None)
+        .map(|kids| kids.iter().rev().map(|d| (0, *d)).collect())
+        .unwrap_or_default();
+    let mut seen = std::collections::HashSet::new();
+    while let Some((depth, d)) = stack.pop() {
+        if !seen.insert(d.id.as_str()) {
+            continue;
+        }
+        out.push((depth, d));
+        if let Some(kids) = under.get(&Some(d.id.as_str())) {
+            stack.extend(kids.iter().rev().map(|k| (depth + 1, *k)));
+        }
+    }
+    out
 }
 
 /// What a pick sets: the issue's project, its milestone in the project
@@ -675,18 +738,7 @@ impl Detail {
     /// j/k (or the arrows) scroll a line, PgDn/PgUp (or space and b) a page,
     /// g/G (or Home and End) to the top and the bottom.
     fn scroll(&mut self, code: KeyCode) {
-        let (bottom, page) = (self.bottom.get(), self.page.get().max(1));
-        // After the terminal grew, `scroll` can be past the bottom.
-        let at = self.scroll.min(bottom);
-        self.scroll = match code {
-            KeyCode::Char('j') | KeyCode::Down => (at + 1).min(bottom),
-            KeyCode::Char('k') | KeyCode::Up => at.saturating_sub(1),
-            KeyCode::PageDown | KeyCode::Char(' ') => (at + page).min(bottom),
-            KeyCode::PageUp | KeyCode::Char('b') => at.saturating_sub(page),
-            KeyCode::Char('g') | KeyCode::Home => 0,
-            KeyCode::Char('G') | KeyCode::End => bottom,
-            _ => self.scroll,
-        };
+        self.scroll = scrolled(self.scroll, &self.bottom, &self.page, code);
     }
 }
 
@@ -707,6 +759,25 @@ impl Link {
             status: issue.status,
             title: issue.title.clone(),
         }
+    }
+}
+
+/// Where a key scrolls lines from `at`, within the furthest it goes and a
+/// page from the last draw: j/k (or the arrows) a line, PgDn/PgUp (or
+/// space and b) a page, g/G (or Home and End) to the top and the bottom.
+/// Any other key leaves it.
+fn scrolled(at: usize, bottom: &Cell<usize>, page: &Cell<usize>, code: KeyCode) -> usize {
+    let (bottom, page) = (bottom.get(), page.get().max(1));
+    // After the terminal grew, `at` can be past the bottom.
+    let from = at.min(bottom);
+    match code {
+        KeyCode::Char('j') | KeyCode::Down => (from + 1).min(bottom),
+        KeyCode::Char('k') | KeyCode::Up => from.saturating_sub(1),
+        KeyCode::PageDown | KeyCode::Char(' ') => (from + page).min(bottom),
+        KeyCode::PageUp | KeyCode::Char('b') => from.saturating_sub(page),
+        KeyCode::Char('g') | KeyCode::Home => 0,
+        KeyCode::Char('G') | KeyCode::End => bottom,
+        _ => at,
     }
 }
 
@@ -768,16 +839,18 @@ impl App {
             | Mode::Create(_)
             | Mode::Assign(..)
             | Mode::Choose(_)
-            | Mode::Pick(_) => None,
+            | Mode::Pick(_)
+            | Mode::Docs(_) => None,
         }
     }
 
-    /// What the next reload reads: the open issue's comments, and the
-    /// search.
+    /// What the next reload reads: the open issue's comments, the search,
+    /// and the docs while they are shown.
     pub fn request(&self) -> Request {
         Request {
             open: self.open().cloned(),
             search: self.search.clone(),
+            docs: matches!(self.mode, Mode::Docs(_)),
         }
     }
 
@@ -846,7 +919,8 @@ impl App {
     /// status and priority, a opens a prompt holding its assignee, l a
     /// choice of its labels, m a pick of its project, then of a milestone
     /// in that project, and y a pick of its cycle (`App::picked`); Y goes to
-    /// the next cycle, as p does to the next project; and
+    /// the next cycle, as p does to the next project; d shows the docs
+    /// (`App::docs_key`); and
     /// Enter opens its detail, asking for a reload to read its comments. A
     /// new filter selects the first row. In the detail, keys scroll
     /// (`Detail::scroll`), Tab and Shift-Tab highlight the next and the
@@ -864,6 +938,9 @@ impl App {
         self.failed = None;
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
             return Action::Quit;
+        }
+        if matches!(self.mode, Mode::Docs(_)) {
+            return self.docs_key(key.code);
         }
         if let Mode::Pick(p) = &mut self.mode {
             match key.code {
@@ -974,6 +1051,7 @@ impl App {
             | Mode::Choose(_)
             | Mode::Labels(_)
             | Mode::Pick(_)
+            | Mode::Docs(_)
             | Mode::Comment(..) => self.list_key(key.code),
             Mode::Detail(_) if key.code == KeyCode::Esc => self.back(),
             Mode::Detail(d) if matches!(key.code, KeyCode::Tab | KeyCode::BackTab) => {
@@ -1010,6 +1088,41 @@ impl App {
                 Action::Stay
             }
         }
+    }
+
+    /// A key while the docs are shown. In the list of them, j/k (or the
+    /// arrows) move, Enter opens the doc highlighted, and Esc goes back to
+    /// the issues, as they were. In an open doc, keys scroll it as the
+    /// issue detail's do, and Esc goes back to the list of docs. q quits
+    /// and r reloads in both.
+    fn docs_key(&mut self, code: KeyCode) -> Action {
+        let count = doc_rows(&self.snapshot.docs).len();
+        let Mode::Docs(docs) = &mut self.mode else {
+            return Action::Stay;
+        };
+        match (code, &mut docs.open) {
+            (KeyCode::Char('q'), _) => return Action::Quit,
+            (KeyCode::Char('r'), _) => return Action::Reload,
+            (KeyCode::Esc, Some(_)) => docs.open = None,
+            (KeyCode::Esc, None) => self.mode = Mode::List,
+            (code, Some(doc)) => doc.scroll = scrolled(doc.scroll, &doc.bottom, &doc.page, code),
+            (KeyCode::Char('j') | KeyCode::Down, None) => {
+                docs.at = (docs.at + 1).min(count.saturating_sub(1));
+            }
+            (KeyCode::Char('k') | KeyCode::Up, None) => docs.at = docs.at.saturating_sub(1),
+            (KeyCode::Enter, None) => {
+                if let Some((_, d)) = doc_rows(&self.snapshot.docs).get(docs.at) {
+                    docs.open = Some(DocView {
+                        id: d.id.clone(),
+                        scroll: 0,
+                        bottom: Cell::new(0),
+                        page: Cell::new(0),
+                    });
+                }
+            }
+            _ => {}
+        }
+        Action::Stay
     }
 
     /// Enter in a pick. A cycle, or none, is written unless the issue is in
@@ -1223,6 +1336,10 @@ impl App {
                 self.next_cycle();
                 Action::Stay
             }
+            KeyCode::Char('d') => {
+                self.mode = Mode::Docs(Docs { at: 0, open: None });
+                Action::Reload
+            }
             KeyCode::Char('m') => {
                 if let Some(issue) = self.selected_issue() {
                     let projects: Vec<(String, String)> = self
@@ -1315,9 +1432,12 @@ impl App {
         match &self.mode {
             Mode::Search(p) | Mode::Comment(_, p) | Mode::Assign(_, p) => Some(p),
             Mode::Create(d) => Some(d.prompt()),
-            Mode::List | Mode::Detail(_) | Mode::Choose(_) | Mode::Labels(_) | Mode::Pick(_) => {
-                None
-            }
+            Mode::List
+            | Mode::Detail(_)
+            | Mode::Choose(_)
+            | Mode::Labels(_)
+            | Mode::Pick(_)
+            | Mode::Docs(_) => None,
         }
     }
 
@@ -1556,6 +1676,7 @@ impl App {
             Mode::Choose(c) => Some(&c.issue),
             Mode::Labels(l) => Some(&l.issue),
             Mode::Pick(p) => Some(&p.issue),
+            Mode::Docs(_) => None,
             Mode::Assign(id, _) => Some(id),
             Mode::List | Mode::Search(_) | Mode::Create(_) => None,
         };
@@ -1567,12 +1688,24 @@ impl App {
         if matches!(self.mode, Mode::List) {
             self.trail.clear();
         }
+        // The docs: the row stays on the list, and a doc that is gone
+        // closes.
+        let count = doc_rows(&self.snapshot.docs).len();
+        if let Mode::Docs(docs) = &mut self.mode {
+            docs.at = docs.at.min(count.saturating_sub(1));
+            if let Some(open) = &docs.open
+                && !self.snapshot.docs.iter().any(|d| d.id == open.id)
+            {
+                docs.open = None;
+            }
+        }
     }
 
     /// The header line: the workspace's name, with its key in brackets if it
     /// has one; how many issues it has; and when the list is narrowed, how
     /// many of them are listed, and by what status, project and search.
     /// `demo (D) · 2 of 5 issues · status: Done · project: tui · search: login`.
+    /// While the docs are shown, how many there are: `demo (D) · 3 docs`.
     /// At a prompt, after an Enter it refused, it says why.
     fn header(&self) -> String {
         if let Some(Prompt { error: Some(e), .. }) = self.prompt() {
@@ -1581,6 +1714,11 @@ impl App {
         let mut out = self.snapshot.workspace.clone();
         if !self.snapshot.key.is_empty() {
             out.push_str(&format!(" ({})", self.snapshot.key));
+        }
+        if matches!(self.mode, Mode::Docs(_)) {
+            let n = self.snapshot.docs.len();
+            out.push_str(&format!(" · {n} {}", if n == 1 { "doc" } else { "docs" }));
+            return out;
         }
         let total = self.snapshot.issues.len();
         let issues = if total == 1 { "issue" } else { "issues" };
@@ -1813,6 +1951,16 @@ impl App {
                 self.draw_labels(f, chunks[1], l);
                 "j/k: move  Space: tick  Enter: save  Esc: cancel".into()
             }
+            Mode::Docs(docs) => match &docs.open {
+                Some(doc) => {
+                    self.draw_doc(f, chunks[1], doc);
+                    DOC_HELP.into()
+                }
+                None => {
+                    self.draw_docs(f, chunks[1], docs.at);
+                    DOCS_HELP.into()
+                }
+            },
             Mode::Pick(p) => {
                 self.draw_list(f, chunks[1]);
                 self.draw_pick(f, chunks[1], p);
@@ -1855,6 +2003,68 @@ impl App {
         };
         let selected = (!l.names.is_empty()).then_some(l.at);
         draw_box(f, area, &title, rows, selected);
+    }
+
+    /// The docs, nested two cells a level, the one at `at` highlighted; or
+    /// how to make one, if there are none.
+    fn draw_docs(&self, f: &mut Frame, area: Rect, at: usize) {
+        let rows = doc_rows(&self.snapshot.docs);
+        if rows.is_empty() {
+            let dim = Style::default().add_modifier(Modifier::DIM);
+            let line = "No docs. lcl doc create --title TITLE makes one.";
+            f.render_widget(Paragraph::new(line).style(dim), area);
+            return;
+        }
+        let width = usize::from(area.width).saturating_sub(cells(SYMBOL));
+        let height = usize::from(area.height);
+        let first = (at + 1).saturating_sub(height.max(1));
+        let items: Vec<ListItem> = rows
+            .iter()
+            .skip(first)
+            .take(height)
+            .map(|(depth, d)| {
+                ListItem::new(fit(&format!("{}{}", "  ".repeat(*depth), d.title), width))
+            })
+            .collect();
+        let list = List::new(items)
+            .highlight_style(Style::default().bg(Color::DarkGray))
+            .highlight_symbol(SYMBOL);
+        let mut state = ListState::default();
+        state.select(Some(at - first));
+        f.render_stateful_widget(list, area, &mut state);
+    }
+
+    /// An open doc: its title, then its content, wrapped to the width,
+    /// from its scroll on; it keeps how far it can scroll, and a page.
+    fn draw_doc(&self, f: &mut Frame, area: Rect, view: &DocView) {
+        let Some(doc) = self.snapshot.docs.iter().find(|d| d.id == view.id) else {
+            return;
+        };
+        let width = usize::from(area.width);
+        let plain = Style::default();
+        let mut lines: Vec<Line> = wrap(&doc.title, width)
+            .into_iter()
+            .map(|l| Line::styled(l, plain.add_modifier(Modifier::BOLD)))
+            .collect();
+        lines.push(Line::default());
+        if doc.content.trim().is_empty() {
+            lines.push(Line::styled(
+                "No content.",
+                plain.add_modifier(Modifier::DIM),
+            ));
+        } else {
+            lines.extend(wrap(&doc.content, width).into_iter().map(Line::from));
+        }
+        let height = usize::from(area.height);
+        let bottom = lines.len().saturating_sub(height);
+        view.bottom.set(bottom);
+        view.page.set(height);
+        let shown: Vec<Line> = lines
+            .into_iter()
+            .skip(view.scroll.min(bottom))
+            .take(height)
+            .collect();
+        f.render_widget(Paragraph::new(shown), area);
     }
 
     /// A pick in a box over the list: a title naming the issue and what is
@@ -2039,7 +2249,7 @@ pub fn run(store: Store) -> Result<()> {
 
 /// The workspace's name and key, and every issue by number; then what
 /// `request` asks for: the open issue's comments, oldest first, and its
-/// relations, and the
+/// relations, the docs, and the
 /// issues the search finds, as `lcl search` finds and ranks them. Read-only.
 fn load(store: &Store, request: &Request) -> Result<Snapshot> {
     let issues = store
@@ -2094,6 +2304,11 @@ fn load(store: &Store, request: &Request) -> Result<Snapshot> {
         relations: match &request.open {
             Some(id) => Some((id.clone(), store.relations(id.as_str())?)),
             None => None,
+        },
+        docs: if request.docs {
+            store.list_docs(false)?
+        } else {
+            Vec::new()
         },
         search,
     })
@@ -2335,6 +2550,7 @@ mod tests {
             cycles: vec![],
             comments: vec![],
             relations: None,
+            docs: vec![],
             search: None,
         }
     }
@@ -2694,6 +2910,7 @@ mod tests {
             cycles: vec![],
             comments: vec![],
             relations: None,
+            docs: vec![],
             search: None,
         });
         assert_eq!(app.header(), "solo · 1 issue");
@@ -3329,7 +3546,7 @@ mod tests {
         let bodies = |open: Option<&IssueId>| -> Vec<String> {
             let request = Request {
                 open: open.cloned(),
-                search: None,
+                ..Default::default()
             };
             load(&store, &request)
                 .unwrap()
@@ -3598,8 +3815,8 @@ mod tests {
             .unwrap();
         let search = |q: &str| -> Vec<String> {
             let request = Request {
-                open: None,
                 search: Some(SearchQuery::parse(q).unwrap()),
+                ..Default::default()
             };
             let snapshot = load(&store, &request).unwrap();
             let found = snapshot.search.unwrap();
@@ -4638,6 +4855,144 @@ mod tests {
         assert_eq!(
             frame(&app, 90, 6)[5].trim_end(),
             "Not written: D-2 is in the trash; restore it with: lcl issue restore D-2"
+        );
+    }
+
+    fn doc(id: &str, title: &str, parent: Option<&str>, content: &str) -> Doc {
+        Doc {
+            id: id.into(),
+            title: title.into(),
+            content: content.into(),
+            parent_id: parent.map(String::from),
+            created_at: 0,
+            updated_at: 0,
+            deleted_at: None,
+        }
+    }
+
+    /// Design, with api notes (30 numbered lines) under it; alpha and
+    /// Zebra at the top; most recently updated first, as `list_docs` reads
+    /// them.
+    fn with_docs() -> Snapshot {
+        let mut snapshot = four();
+        let lines: Vec<String> = (1..=30).map(|n| format!("note {n}")).collect();
+        snapshot.docs = vec![
+            doc("d-zebra", "Zebra", None, ""),
+            doc("d-api", "api notes", Some("d-design"), &lines.join("\n")),
+            doc("d-alpha", "alpha", None, "a"),
+            doc("d-design", "Design", None, "the design"),
+        ];
+        snapshot
+    }
+
+    fn docs_at(app: &App) -> (usize, Option<&str>) {
+        match &app.mode {
+            Mode::Docs(d) => (d.at, d.open.as_ref().map(|o| o.id.as_str())),
+            _ => panic!("not the docs"),
+        }
+    }
+
+    #[test]
+    fn d_shows_the_docs_nested_and_enter_opens_one() {
+        let mut app = App::new(four());
+        assert!(!app.request().docs);
+        // d asks for a reload that reads the docs.
+        assert_eq!(app.key(press('d')), Action::Reload);
+        assert!(app.request().docs);
+        app.reloaded(with_docs());
+        assert_eq!(
+            frame(&app, 30, 7),
+            [
+                "work (W) · 4 docs             ",
+                ">> alpha                      ",
+                "   Design                     ",
+                "     api notes                ",
+                "   Zebra                      ",
+                "                              ",
+                "j/k: move  Enter: open  Esc: i",
+            ]
+            .map(String::from)
+        );
+        // api notes: its title, then its content, scrolled as the issue
+        // detail is.
+        app.key(press('j'));
+        app.key(press('j'));
+        assert_eq!(app.key(code(KeyCode::Enter)), Action::Stay);
+        assert_eq!(docs_at(&app), (2, Some("d-api")));
+        let lines = frame(&app, 30, 7);
+        assert_eq!(
+            lines[1..5],
+            ["api notes", "", "note 1", "note 2"].map(|l| format!("{l:<30}"))
+        );
+        assert_eq!(lines[6], "j/k: scroll  PgUp/PgDn: page  ");
+        app.key(press('j'));
+        assert_eq!(frame(&app, 30, 7)[1].trim_end(), "");
+        app.key(press('G'));
+        assert_eq!(frame(&app, 30, 7)[5].trim_end(), "note 30");
+        // r reloads here too; q quits.
+        assert_eq!(app.key(press('r')), Action::Reload);
+        // Esc: back to the docs, on the same row; Esc again, to the issues.
+        assert_eq!(app.key(code(KeyCode::Esc)), Action::Stay);
+        assert_eq!(docs_at(&app), (2, None));
+        app.key(press('j'));
+        app.key(press('j'));
+        assert_eq!(docs_at(&app), (3, None));
+        assert_eq!(app.key(code(KeyCode::Esc)), Action::Stay);
+        assert!(matches!(app.mode, Mode::List));
+        assert!(!app.request().docs);
+        assert_eq!(app.header(), "work (W) · 4 issues");
+        app.key(press('d'));
+        assert_eq!(app.key(press('q')), Action::Quit);
+    }
+
+    #[test]
+    fn with_no_docs_the_list_says_how_to_make_one() {
+        let mut app = App::new(four());
+        app.key(press('d'));
+        app.reloaded(four());
+        assert_eq!(
+            frame(&app, 60, 4)[1].trim_end(),
+            "No docs. lcl doc create --title TITLE makes one."
+        );
+        assert_eq!(app.key(code(KeyCode::Enter)), Action::Stay);
+        assert_eq!(docs_at(&app), (0, None));
+    }
+
+    #[test]
+    fn a_reload_closes_a_doc_that_is_gone_and_keeps_the_row_on_the_list() {
+        let mut app = App::new(four());
+        app.key(press('d'));
+        app.reloaded(with_docs());
+        for _ in 0..3 {
+            app.key(press('j'));
+        }
+        app.key(code(KeyCode::Enter));
+        assert_eq!(docs_at(&app), (3, Some("d-zebra")));
+        let mut fewer = with_docs();
+        fewer.docs.remove(0);
+        app.reloaded(fewer);
+        assert_eq!(docs_at(&app), (2, None));
+    }
+
+    #[test]
+    fn docs_are_read_from_the_store_only_while_shown() {
+        let mut store = three();
+        let design = store
+            .create_doc(doc("", "Design", None, "the design"))
+            .unwrap();
+        store
+            .create_doc(doc("", "API", Some(&design.id), "GET /issues"))
+            .unwrap();
+        assert!(load(&store, &Request::default()).unwrap().docs.is_empty());
+        let store = RefCell::new(store);
+        let mut app = App::new(load(&store.borrow(), &Request::default()).unwrap());
+        let pressed = [press('d'), press('j'), code(KeyCode::Enter), press('q')];
+        run_on(&store, &mut app, &pressed).unwrap();
+        let lines = frame(&app, 30, 6);
+        assert_eq!(lines[0].trim_end(), "demo (D) · 2 docs");
+        assert_eq!(
+            lines[1..4],
+            ["API", "", "GET /issues"].map(|l| format!("{l:<30}"))
         );
     }
 
