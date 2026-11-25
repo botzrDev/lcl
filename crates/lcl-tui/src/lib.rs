@@ -18,7 +18,9 @@ use crossterm::event::{
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
-use lcl_core::db::{Change, IssueFilter, IssueSort, IssueUpdate, NewIssue, Page, Placement, Store};
+use lcl_core::db::{
+    Change, IssueFilter, IssueSort, IssueUpdate, LabelUpdate, NewIssue, Page, Placement, Store,
+};
 use lcl_core::models::{Comment, Issue, IssueId, IssueRef, Priority, Status};
 use lcl_core::search::SearchQuery;
 use ratatui::buffer::CellWidth;
@@ -31,8 +33,9 @@ use std::io::{IsTerminal, stdout};
 use std::time::Duration;
 use unicode_segmentation::UnicodeSegmentation;
 
-const LIST_HELP: &str = "j/k: move  Enter: open  c: create  s: status  !: priority  a: assignee  /: search  p: project  1-7: filter  0: all  r: reload  q: quit";
-const DETAIL_HELP: &str = "j/k: scroll  PgUp/PgDn: page  c: comment  Esc: back  r: reload  q: quit";
+const LIST_HELP: &str = "j/k: move  Enter: open  c: create  s: status  !: priority  a: assignee  l: labels  /: search  p: project  1-7: filter  0: all  r: reload  q: quit";
+const DETAIL_HELP: &str =
+    "j/k: scroll  PgUp/PgDn: page  c: comment  l: labels  Esc: back  r: reload  q: quit";
 
 /// What marks the selected row. Every row is indented by its width.
 const SYMBOL: &str = ">> ";
@@ -213,13 +216,16 @@ impl Widths {
 }
 
 /// One read of a workspace: its name and key (either may be empty), every
-/// issue in list order, the comments of the issue open in the detail, and
-/// what the search found.
+/// issue in list order, its labels, the comments of the issue open in the
+/// detail, and what the search found.
 #[derive(Debug, Clone, Default)]
 pub struct Snapshot {
     pub workspace: String,
     pub key: String,
     pub issues: Vec<Issue>,
+    /// The names of the labels not in the trash, as `lcl label list`
+    /// orders them.
+    pub labels: Vec<String>,
     /// The comments of the issue that was open (`Request::open`) when this
     /// was read, oldest first; none while the list is shown.
     pub comments: Vec<Comment>,
@@ -253,6 +259,13 @@ pub enum Edit {
     /// A name sets the assignee, as `issue update --assignee` does; None
     /// clears it, as `--no-assignee` does.
     Assignee(IssueId, Option<String>),
+    /// Labels added and removed, as `issue update --add-label` and
+    /// `--remove-label` do.
+    Labels {
+        issue: IssueId,
+        add: Vec<String>,
+        remove: Vec<String>,
+    },
     Create {
         title: String,
         description: String,
@@ -282,8 +295,9 @@ pub enum Action {
 /// What the screen shows, and where keys go: the list, the detail of one
 /// issue, a prompt under the list (the search, a new issue's title and
 /// description, or an issue's assignee), a choice of status or priority
-/// over it, or a comment being typed under the detail. Each one's state
-/// exists only while it is shown.
+/// over it, a choice of labels over it or over the detail, or a comment
+/// being typed under the detail. Each one's state exists only while it is
+/// shown.
 enum Mode {
     List,
     Detail(Detail),
@@ -292,8 +306,55 @@ enum Mode {
     /// The assignee of this issue, as typed so far.
     Assign(IssueId, Prompt),
     Choose(Choice),
+    Labels(Labels),
     /// The detail goes on showing, and Esc goes back to it.
     Comment(Detail, Prompt),
+}
+
+/// The labels of one issue being chosen: the workspace's labels as they
+/// were when the choice opened, which ones the issue had then, which are
+/// ticked now, and the one highlighted. Opened over the detail, it keeps
+/// the detail to go back to.
+struct Labels {
+    issue: IssueId,
+    names: Vec<String>,
+    had: Vec<bool>,
+    on: Vec<bool>,
+    at: usize,
+    detail: Option<Detail>,
+}
+
+impl Labels {
+    fn new(issue: &Issue, names: &[String], detail: Option<Detail>) -> Labels {
+        let had: Vec<bool> = names
+            .iter()
+            .map(|n| issue.labels.iter().any(|l| l.eq_ignore_ascii_case(n)))
+            .collect();
+        Labels {
+            issue: issue.id.clone(),
+            names: names.to_vec(),
+            on: had.clone(),
+            had,
+            at: 0,
+            detail,
+        }
+    }
+
+    /// The write that makes the ticks so, or None if they are as they were.
+    fn edit(&self) -> Option<Edit> {
+        let pick = |want: bool| -> Vec<String> {
+            (0..self.names.len())
+                .filter(|&n| self.on[n] == want && self.had[n] != want)
+                .map(|n| self.names[n].clone())
+                .collect()
+        };
+        let (add, remove) = (pick(true), pick(false));
+        (!add.is_empty() || !remove.is_empty()).then(|| Edit::Labels {
+            issue: self.issue.clone(),
+            add,
+            remove,
+        })
+    }
 }
 
 /// A new issue being typed: its title, then its description.
@@ -562,6 +623,7 @@ impl App {
     pub fn open(&self) -> Option<&IssueId> {
         match &self.mode {
             Mode::Detail(d) | Mode::Comment(d, _) => Some(&d.id),
+            Mode::Labels(l) => l.detail.as_ref().map(|d| &d.id),
             Mode::List | Mode::Search(_) | Mode::Create(_) | Mode::Assign(..) | Mode::Choose(_) => {
                 None
             }
@@ -635,11 +697,15 @@ impl App {
     /// within it; 1-7 filter by status and 0 clears that filter, p goes to
     /// the next project, and `/` opens the prompt with the search in it; c
     /// starts a new issue; s and ! open a choice of the selected issue's
-    /// status and priority, and a opens a prompt holding its assignee; and
+    /// status and priority, a opens a prompt holding its assignee, and l a
+    /// choice of its labels; and
     /// Enter opens its detail, asking for a reload to read its comments. A
     /// new filter selects the first row. In the detail, keys scroll
-    /// (`Detail::scroll`), c starts a comment, and Esc goes back to the
-    /// list, as it was.
+    /// (`Detail::scroll`), c starts a comment, l opens a choice of the
+    /// issue's labels, and Esc goes back to the list, as it was. In a choice
+    /// of labels, j/k move, space ticks or unticks one, Enter writes what
+    /// changed, and Esc goes back with nothing written: to the detail, if
+    /// it was opened there.
     pub fn key(&mut self, key: KeyEvent) -> Action {
         if key.kind != KeyEventKind::Press {
             return Action::Stay;
@@ -647,6 +713,36 @@ impl App {
         self.failed = None;
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
             return Action::Quit;
+        }
+        if let Mode::Labels(l) = &mut self.mode {
+            match key.code {
+                KeyCode::Char('q') => return Action::Quit,
+                KeyCode::Char('j') | KeyCode::Down => {
+                    l.at = (l.at + 1).min(l.names.len().saturating_sub(1));
+                }
+                KeyCode::Char('k') | KeyCode::Up => l.at = l.at.saturating_sub(1),
+                KeyCode::Char(' ') => {
+                    if let Some(on) = l.on.get_mut(l.at) {
+                        *on = !*on;
+                    }
+                }
+                KeyCode::Enter | KeyCode::Esc => {
+                    let Mode::Labels(l) = std::mem::replace(&mut self.mode, Mode::List) else {
+                        return Action::Stay;
+                    };
+                    let edit = if key.code == KeyCode::Enter {
+                        l.edit()
+                    } else {
+                        None
+                    };
+                    if let Some(d) = l.detail {
+                        self.mode = Mode::Detail(d);
+                    }
+                    return edit.map_or(Action::Stay, Action::Write);
+                }
+                _ => {}
+            }
+            return Action::Stay;
         }
         if let Mode::Choose(c) = &mut self.mode {
             let last = c.field.len() - 1;
@@ -714,6 +810,7 @@ impl App {
             | Mode::Create(_)
             | Mode::Assign(..)
             | Mode::Choose(_)
+            | Mode::Labels(_)
             | Mode::Comment(..) => self.list_key(key.code),
             Mode::Detail(_) if key.code == KeyCode::Esc => {
                 self.mode = Mode::List;
@@ -722,6 +819,15 @@ impl App {
             Mode::Detail(_) if key.code == KeyCode::Char('c') => {
                 if let Mode::Detail(d) = std::mem::replace(&mut self.mode, Mode::List) {
                     self.mode = Mode::Comment(d, Prompt::new(""));
+                }
+                Action::Stay
+            }
+            Mode::Detail(d) if key.code == KeyCode::Char('l') => {
+                let id = d.id.clone();
+                if let Some(issue) = self.snapshot.issues.iter().find(|i| i.id == id)
+                    && let Mode::Detail(d) = std::mem::replace(&mut self.mode, Mode::List)
+                {
+                    self.mode = Mode::Labels(Labels::new(issue, &self.snapshot.labels, Some(d)));
                 }
                 Action::Stay
             }
@@ -769,6 +875,12 @@ impl App {
             }
             KeyCode::Char('s') => self.choose(Field::Status),
             KeyCode::Char('!') => self.choose(Field::Priority),
+            KeyCode::Char('l') => {
+                if let Some(issue) = self.selected_issue() {
+                    self.mode = Mode::Labels(Labels::new(issue, &self.snapshot.labels, None));
+                }
+                Action::Stay
+            }
             KeyCode::Char('a') => {
                 if let Some(issue) = self.selected_issue() {
                     let now = issue.assignee.as_deref().unwrap_or("");
@@ -847,7 +959,7 @@ impl App {
         match &self.mode {
             Mode::Search(p) | Mode::Comment(_, p) | Mode::Assign(_, p) => Some(p),
             Mode::Create(d) => Some(d.prompt()),
-            Mode::List | Mode::Detail(_) | Mode::Choose(_) => None,
+            Mode::List | Mode::Detail(_) | Mode::Choose(_) | Mode::Labels(_) => None,
         }
     }
 
@@ -1053,6 +1165,7 @@ impl App {
         let shown = match &self.mode {
             Mode::Detail(d) | Mode::Comment(d, _) => Some(&d.id),
             Mode::Choose(c) => Some(&c.issue),
+            Mode::Labels(l) => Some(&l.issue),
             Mode::Assign(id, _) => Some(id),
             Mode::List | Mode::Search(_) | Mode::Create(_) => None,
         };
@@ -1244,6 +1357,14 @@ impl App {
                 );
                 return;
             }
+            Mode::Labels(l) => {
+                match &l.detail {
+                    Some(d) => self.draw_detail(f, chunks[1], d),
+                    None => self.draw_list(f, chunks[1]),
+                }
+                self.draw_labels(f, chunks[1], l);
+                "j/k: move  Space: tick  Enter: save  Esc: cancel".into()
+            }
             Mode::Choose(c) => {
                 self.draw_list(f, chunks[1]);
                 self.draw_choice(f, chunks[1], c);
@@ -1257,6 +1378,30 @@ impl App {
             None => Paragraph::new(help).style(Style::default().add_modifier(Modifier::DIM)),
         };
         f.render_widget(line, chunks[2]);
+    }
+
+    /// The labels in a box over the list or the detail: a title naming the
+    /// issue, then each label, ticked if it will be on the issue. A
+    /// workspace with no labels says how to make one.
+    fn draw_labels(&self, f: &mut Frame, area: Rect, l: &Labels) {
+        let key = self
+            .snapshot
+            .issues
+            .iter()
+            .find(|i| i.id == l.issue)
+            .map_or(Cow::Borrowed(""), |i| clean(&i.identifier));
+        let title = format!(" {key} labels ");
+        let rows: Vec<String> = if l.names.is_empty() {
+            vec!["No labels: lcl label create NAME".into()]
+        } else {
+            l.names
+                .iter()
+                .zip(&l.on)
+                .map(|(name, on)| format!("[{}] {}", if *on { 'x' } else { ' ' }, clean(name)))
+                .collect()
+        };
+        let selected = (!l.names.is_empty()).then_some(l.at);
+        draw_box(f, area, &title, rows, selected);
     }
 
     /// The choice in a box over the list: a title naming the issue and the
@@ -1277,32 +1422,7 @@ impl App {
                 format!("{}  {}{mark}", c.field.digit(at), c.field.name(at))
             })
             .collect();
-        let inner = rows
-            .iter()
-            .map(|r| cells(r))
-            .chain([cells(&title)])
-            .max()
-            .unwrap_or(0)
-            + cells(SYMBOL);
-        // Two cells of border, then as much as fits.
-        let width = u16::try_from(inner + 2).unwrap_or(u16::MAX).min(area.width);
-        let height = u16::try_from(rows.len() + 2)
-            .unwrap_or(u16::MAX)
-            .min(area.height);
-        let rect = Rect {
-            x: area.x + (area.width - width) / 2,
-            y: area.y + (area.height - height) / 2,
-            width,
-            height,
-        };
-        let list = List::new(rows.into_iter().map(ListItem::new))
-            .block(Block::bordered().title(title))
-            .highlight_style(Style::default().bg(Color::DarkGray))
-            .highlight_symbol(SYMBOL);
-        let mut state = ListState::default();
-        state.select(Some(c.at));
-        f.render_widget(Clear, rect);
-        f.render_stateful_widget(list, rect, &mut state);
+        draw_box(f, area, &title, rows, Some(c.at));
     }
 
     /// The detail's lines that fit in `area`, from its scroll on; it keeps
@@ -1344,6 +1464,38 @@ impl App {
         state.select(Some(row - first));
         f.render_stateful_widget(list, area, &mut state);
     }
+}
+
+/// A box in the middle of `area`, as narrow as its title and rows let it
+/// be: `title` on its border, then the rows, with `selected` highlighted.
+/// The rows scroll so that the highlighted one is shown.
+fn draw_box(f: &mut Frame, area: Rect, title: &str, rows: Vec<String>, selected: Option<usize>) {
+    let inner = rows
+        .iter()
+        .map(|r| cells(r))
+        .chain([cells(title)])
+        .max()
+        .unwrap_or(0)
+        + cells(SYMBOL);
+    // Two cells of border, then as much as fits.
+    let width = u16::try_from(inner + 2).unwrap_or(u16::MAX).min(area.width);
+    let height = u16::try_from(rows.len() + 2)
+        .unwrap_or(u16::MAX)
+        .min(area.height);
+    let rect = Rect {
+        x: area.x + (area.width - width) / 2,
+        y: area.y + (area.height - height) / 2,
+        width,
+        height,
+    };
+    let list = List::new(rows.into_iter().map(ListItem::new))
+        .block(Block::bordered().title(title.to_string()))
+        .highlight_style(Style::default().bg(Color::DarkGray))
+        .highlight_symbol(SYMBOL);
+    let mut state = ListState::default();
+    state.select(selected);
+    f.render_widget(Clear, rect);
+    f.render_stateful_widget(list, rect, &mut state);
 }
 
 /// A prompt's line, `label` and its text, with the cursor on it. While the
@@ -1432,6 +1584,11 @@ fn load(store: &Store, request: &Request) -> Result<Snapshot> {
         workspace: store.get_meta("name")?.unwrap_or_default(),
         key: store.get_meta("key")?.unwrap_or_default(),
         issues,
+        labels: store
+            .list_labels(false)?
+            .into_iter()
+            .map(|l| l.name)
+            .collect(),
         comments: match &request.open {
             Some(id) => store.list_comments(id.as_str(), false)?,
             None => Vec::new(),
@@ -1445,7 +1602,8 @@ fn load(store: &Store, request: &Request) -> Result<Snapshot> {
 /// `Store::create_issue`, as `lcl issue create` does (Backlog, no
 /// priority, the author its creator), a change with `Store::update_issue`,
 /// as `lcl issue update` does (an assignee as `--assignee`, or
-/// `--no-assignee`), and a comment with `Store::add_comment`, as
+/// `--no-assignee`, labels as `--add-label` and `--remove-label`), and a
+/// comment with `Store::add_comment`, as
 /// `lcl issue comment` does (the author its author). The issue it wrote.
 fn write(store: &mut Store, edit: &Edit) -> Result<IssueId> {
     let (id, update) = match edit {
@@ -1475,6 +1633,17 @@ fn write(store: &mut Store, edit: &Edit) -> Result<IssueId> {
             id,
             IssueUpdate {
                 priority: Some(*priority),
+                ..Default::default()
+            },
+        ),
+        Edit::Labels { issue, add, remove } => (
+            issue,
+            IssueUpdate {
+                labels: LabelUpdate {
+                    add: add.clone(),
+                    remove: remove.clone(),
+                    ..Default::default()
+                },
                 ..Default::default()
             },
         ),
@@ -1634,6 +1803,7 @@ mod tests {
             workspace: "work".into(),
             key: "W".into(),
             issues,
+            labels: vec![],
             comments: vec![],
             search: None,
         }
@@ -1989,6 +2159,7 @@ mod tests {
             workspace: "solo".into(),
             key: String::new(),
             issues: vec![issue(1, Status::Todo)],
+            labels: vec![],
             comments: vec![],
             search: None,
         });
@@ -3136,6 +3307,191 @@ mod tests {
         let mut pressed = vec![press('a')];
         pressed.extend("cy".chars().map(press));
         pressed.push(code(KeyCode::Enter));
+        let out = run_on(&store, &mut app, &pressed).unwrap_err();
+        assert_eq!(out.to_string(), "out of keys");
+        assert!(matches!(app.mode, Mode::List));
+        assert_eq!(
+            frame(&app, 90, 6)[5].trim_end(),
+            "Not written: D-2 is in the trash; restore it with: lcl issue restore D-2"
+        );
+    }
+
+    /// `four`, with labels bug, docs and urgent, and bug on W-1.
+    fn labelled() -> App {
+        let mut snapshot = four();
+        snapshot.labels = ["bug", "docs", "urgent"].map(String::from).to_vec();
+        snapshot.issues[0].labels = vec!["bug".into()];
+        App::new(snapshot)
+    }
+
+    fn labels_edit(issue: &str, add: &[&str], remove: &[&str]) -> Action {
+        let names = |l: &[&str]| l.iter().map(|n| n.to_string()).collect();
+        Action::Write(Edit::Labels {
+            issue: id(issue),
+            add: names(add),
+            remove: names(remove),
+        })
+    }
+
+    #[test]
+    fn l_ticks_labels_and_enter_writes_what_changed() {
+        let mut app = labelled();
+        assert_eq!(app.key(press('l')), Action::Stay);
+        // A box over the list, the issue's own ticked.
+        let lines = frame(&app, 44, 9);
+        let boxed: Vec<&str> = lines[2..7].iter().map(|l| l.trim()).collect();
+        assert!(boxed[0].contains("┌ W-1 labels ─"), "{lines:#?}");
+        assert!(boxed[1].contains("│>> [x] bug"), "{lines:#?}");
+        assert!(boxed[2].contains("│   [ ] docs"), "{lines:#?}");
+        assert!(boxed[3].contains("│   [ ] urgent"), "{lines:#?}");
+        assert_eq!(lines[8], "j/k: move  Space: tick  Enter: save  Esc: ca");
+        // Esc: back, nothing written, even after a tick.
+        app.key(press(' '));
+        assert_eq!(app.key(code(KeyCode::Esc)), Action::Stay);
+        assert!(matches!(app.mode, Mode::List));
+        // Enter with nothing changed writes nothing.
+        app.key(press('l'));
+        assert_eq!(app.key(code(KeyCode::Enter)), Action::Stay);
+        assert!(matches!(app.mode, Mode::List));
+        // bug off, docs on: one write with both.
+        app.key(press('l'));
+        app.key(press(' '));
+        app.key(press('j'));
+        app.key(press(' '));
+        assert!(frame(&app, 44, 9)[4].contains("[x] docs"));
+        assert_eq!(
+            app.key(code(KeyCode::Enter)),
+            labels_edit("id-1", &["docs"], &["bug"])
+        );
+        assert!(matches!(app.mode, Mode::List));
+        // j stops at the last; a tick and its untick cancel out.
+        app.key(press('l'));
+        for _ in 0..9 {
+            app.key(press('j'));
+        }
+        app.key(press(' '));
+        app.key(press('k'));
+        app.key(press(' '));
+        app.key(press(' '));
+        assert_eq!(
+            app.key(code(KeyCode::Enter)),
+            labels_edit("id-1", &["urgent"], &[])
+        );
+        // In the choice, r is nothing, and q still quits.
+        app.key(press('l'));
+        assert_eq!(app.key(press('r')), Action::Stay);
+        assert_eq!(app.key(press('q')), Action::Quit);
+        // With nothing selected, l opens nothing.
+        let mut empty = App::new(work(vec![]));
+        empty.key(press('l'));
+        assert!(matches!(empty.mode, Mode::List));
+    }
+
+    #[test]
+    fn with_no_labels_the_choice_says_how_to_make_one() {
+        let mut app = App::new(four());
+        app.key(press('l'));
+        let lines = frame(&app, 44, 6);
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("│No labels: lcl label create NAME")),
+            "{lines:#?}"
+        );
+        assert_eq!(app.key(press(' ')), Action::Stay);
+        assert_eq!(app.key(code(KeyCode::Enter)), Action::Stay);
+        assert!(matches!(app.mode, Mode::List));
+    }
+
+    #[test]
+    fn l_in_the_detail_goes_back_to_the_detail() {
+        let mut app = labelled();
+        app.key(code(KeyCode::Enter));
+        assert_eq!(opened(&app), Some("id-1"));
+        app.key(press('l'));
+        // Over the detail, which a reload still reads the comments of.
+        assert_eq!(opened(&app), Some("id-1"));
+        assert!(frame(&app, 44, 9)[0].starts_with("work (W)"));
+        assert_eq!(app.key(code(KeyCode::Esc)), Action::Stay);
+        assert!(matches!(app.mode, Mode::Detail(_)));
+        app.key(press('l'));
+        app.key(press('j'));
+        app.key(press('j'));
+        app.key(press(' '));
+        assert_eq!(
+            app.key(code(KeyCode::Enter)),
+            labels_edit("id-1", &["urgent"], &[])
+        );
+        assert!(matches!(app.mode, Mode::Detail(_)));
+        assert_eq!(opened(&app), Some("id-1"));
+        // A reload that finds the issue gone goes back to the list.
+        app.key(press('l'));
+        app.reloaded(work(four().issues.into_iter().skip(1).collect()));
+        assert!(matches!(app.mode, Mode::List));
+    }
+
+    #[test]
+    fn labels_are_written_as_issue_update_adds_and_removes_them() {
+        let mut store = three();
+        for name in ["bug", "docs"] {
+            store
+                .create_label(&lcl_core::models::Label {
+                    id: format!("label-{name}"),
+                    name: name.into(),
+                    color: "#888888".into(),
+                    deleted_at: None,
+                })
+                .unwrap();
+        }
+        let store = RefCell::new(store);
+        let mut app = App::new(load(&store.borrow(), &Request::default()).unwrap());
+        assert_eq!(app.snapshot.labels, ["bug", "docs"]);
+        // D-2: bug and docs, in one write.
+        let pressed = [
+            press('j'),
+            press('l'),
+            press(' '),
+            press('j'),
+            press(' '),
+            code(KeyCode::Enter),
+            press('q'),
+        ];
+        run_on(&store, &mut app, &pressed).unwrap();
+        assert_eq!(app.selected_issue().unwrap().labels, ["bug", "docs"]);
+        // Then bug off.
+        let pressed = [press('l'), press(' '), code(KeyCode::Enter), press('q')];
+        run_on(&store, &mut app, &pressed).unwrap();
+        assert_eq!(app.selected_issue().unwrap().labels, ["docs"]);
+        // One change log entry for each write, by the store's author.
+        let two = IssueRef::Number {
+            key: None,
+            number: 2,
+        };
+        let history = store.borrow().issue_history(&two).unwrap();
+        let entries: Vec<Vec<(String, String, String)>> = history[1..]
+            .iter()
+            .map(|e| {
+                assert_eq!(e.author.as_deref(), Some("al"));
+                e.changes
+                    .iter()
+                    .map(|c| (c.field.clone(), c.old.to_string(), c.new.to_string()))
+                    .collect()
+            })
+            .collect();
+        let change =
+            |old: &str, new: &str| ("labels".to_string(), old.to_string(), new.to_string());
+        assert_eq!(
+            entries,
+            [
+                vec![change("null", r#""bug""#), change("null", r#""docs""#)],
+                vec![change(r#""bug""#, "null")],
+            ]
+        );
+
+        // On an issue trashed behind the TUI: not written, said on the
+        // bottom line, and the list goes on as it was.
+        store.borrow_mut().delete_issue(&two).unwrap();
+        let pressed = [press('l'), press(' '), code(KeyCode::Enter)];
         let out = run_on(&store, &mut app, &pressed).unwrap_err();
         assert_eq!(out.to_string(), "out of keys");
         assert!(matches!(app.mode, Mode::List));
