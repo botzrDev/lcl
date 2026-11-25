@@ -6,6 +6,10 @@ All notable changes to lcl are recorded here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- docs/json-contract.md and the skill say what a release may do to the `--json` contract from 1.0: inside a major version it may add keys to an output, commands, flags and error kinds, and never removes, renames or retypes a key, changes an exit status, or changes what a value means. A reader ignores keys it doesn't know and reads an unknown error kind as `other`.
+
 ### Fixed
 
 - The text of `lcl issue history` shows where an edit is when it is past the first 60 characters of a title, a description or a comment, or past its first line: up to 20 characters before it and 40 from it, with `…` for what is left out and `↵` for a line break. 0.3.0-alpha.3 printed the same first 60 characters before and after the arrow. An edit in the first 60 characters prints as it did. `--json` is unchanged.

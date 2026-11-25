@@ -1,6 +1,11 @@
 # The `--json` contract (draft)
 
-This note is a draft. Through 0.x a shape here can change between versions, and `CHANGELOG.md` lists every such change. At 1.0 it becomes the rule that a shape does not change inside a major version.
+This note is a draft. Through 0.x a shape here can change between versions, and `CHANGELOG.md` lists every such change. From 1.0 a release inside a major version may add to the contract but not change it:
+
+- It may add keys to an object, add commands and flags, and add error kinds.
+- It never removes, renames or retypes a key, changes an exit status, or changes what a value means. Any of those is a new major version.
+
+So a reader ignores keys it doesn't know, and reads an error kind it doesn't know as `other`. The shapes below are those of this release, exactly.
 
 The shapes below are checked. `crates/lcl-cli/tests/contract.rs` reads this file, runs each command, and fails when the output and the shape differ, when a command has no section here, or when a section names a command that does not exist.
 
@@ -18,7 +23,7 @@ With `--json`, a command that succeeds prints one JSON value on stdout and nothi
 
 There are two exceptions. `lcl export` without `--output` prints the export itself, which is `lcl-export/1`: one JSON object per line. `lcl tui` takes the terminal and prints no JSON.
 
-The order of an object's keys is not part of the contract. A timestamp is Unix seconds. A date is `YYYY-MM-DD`.
+The order of an object's keys is not part of the contract, and neither is the absence of a key this note doesn't show: a later release may add one. A timestamp is Unix seconds. A date is `YYYY-MM-DD`.
 
 ## stderr
 
