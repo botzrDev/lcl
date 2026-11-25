@@ -6,6 +6,10 @@ All notable changes to lcl are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- In `lcl tui`, `a` sets the selected issue's assignee: a prompt holds the one it has, Enter sets what is typed, as `issue update --assignee` does, and an empty line clears it, as `--no-assignee` does. Esc writes nothing.
+
 ### Changed
 
 - Four names and shapes that disagreed, fixed before 1.0 freezes them:

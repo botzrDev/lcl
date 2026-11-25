@@ -18,7 +18,7 @@ use crossterm::event::{
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
-use lcl_core::db::{IssueFilter, IssueSort, IssueUpdate, NewIssue, Page, Placement, Store};
+use lcl_core::db::{Change, IssueFilter, IssueSort, IssueUpdate, NewIssue, Page, Placement, Store};
 use lcl_core::models::{Comment, Issue, IssueId, IssueRef, Priority, Status};
 use lcl_core::search::SearchQuery;
 use ratatui::buffer::CellWidth;
@@ -31,7 +31,7 @@ use std::io::{IsTerminal, stdout};
 use std::time::Duration;
 use unicode_segmentation::UnicodeSegmentation;
 
-const LIST_HELP: &str = "j/k: move  Enter: open  c: create  s: status  !: priority  /: search  p: project  1-7: filter  0: all  r: reload  q: quit";
+const LIST_HELP: &str = "j/k: move  Enter: open  c: create  s: status  !: priority  a: assignee  /: search  p: project  1-7: filter  0: all  r: reload  q: quit";
 const DETAIL_HELP: &str = "j/k: scroll  PgUp/PgDn: page  c: comment  Esc: back  r: reload  q: quit";
 
 /// What marks the selected row. Every row is indented by its width.
@@ -250,7 +250,13 @@ pub struct Request {
 pub enum Edit {
     Status(IssueId, Status),
     Priority(IssueId, Priority),
-    Create { title: String, description: String },
+    /// A name sets the assignee, as `issue update --assignee` does; None
+    /// clears it, as `--no-assignee` does.
+    Assignee(IssueId, Option<String>),
+    Create {
+        title: String,
+        description: String,
+    },
     Comment(IssueId, String),
 }
 
@@ -274,15 +280,17 @@ pub enum Action {
 }
 
 /// What the screen shows, and where keys go: the list, the detail of one
-/// issue, a prompt under the list (the search, or a new issue's title and
-/// description), a choice of status or priority over it, or a comment
-/// being typed under the detail. Each one's state exists only while it is
-/// shown.
+/// issue, a prompt under the list (the search, a new issue's title and
+/// description, or an issue's assignee), a choice of status or priority
+/// over it, or a comment being typed under the detail. Each one's state
+/// exists only while it is shown.
 enum Mode {
     List,
     Detail(Detail),
     Search(Prompt),
     Create(Draft),
+    /// The assignee of this issue, as typed so far.
+    Assign(IssueId, Prompt),
     Choose(Choice),
     /// The detail goes on showing, and Esc goes back to it.
     Comment(Detail, Prompt),
@@ -554,7 +562,9 @@ impl App {
     pub fn open(&self) -> Option<&IssueId> {
         match &self.mode {
             Mode::Detail(d) | Mode::Comment(d, _) => Some(&d.id),
-            Mode::List | Mode::Search(_) | Mode::Create(_) | Mode::Choose(_) => None,
+            Mode::List | Mode::Search(_) | Mode::Create(_) | Mode::Assign(..) | Mode::Choose(_) => {
+                None
+            }
         }
     }
 
@@ -617,14 +627,15 @@ impl App {
     /// the list as it was, or from a comment to the detail, with nothing
     /// written. At the search prompt, Enter searches. At a new issue's
     /// title, Enter goes on to its description, and there Enter creates it.
-    /// At a comment, Enter adds it. Elsewhere q quits. In a
+    /// At a comment, Enter adds it. At an assignee, Enter sets it, or clears
+    /// it if the line is empty. Elsewhere q quits. In a
     /// choice, j/k (or the arrows) move, and Enter, or a value's number,
     /// sets it; Esc goes back with nothing written. In the list and the
     /// detail, r asks for a reload. In the list, j/k (or the arrows) move
     /// within it; 1-7 filter by status and 0 clears that filter, p goes to
     /// the next project, and `/` opens the prompt with the search in it; c
     /// starts a new issue; s and ! open a choice of the selected issue's
-    /// status and priority; and
+    /// status and priority, and a opens a prompt holding its assignee; and
     /// Enter opens its detail, asking for a reload to read its comments. A
     /// new filter selects the first row. In the detail, keys scroll
     /// (`Detail::scroll`), c starts a comment, and Esc goes back to the
@@ -666,8 +677,9 @@ impl App {
         }
         let searching = matches!(self.mode, Mode::Search(_));
         let commenting = matches!(self.mode, Mode::Comment(..));
+        let assigning = matches!(self.mode, Mode::Assign(..));
         let prompt = match &mut self.mode {
-            Mode::Search(p) | Mode::Comment(_, p) => Some(p),
+            Mode::Search(p) | Mode::Comment(_, p) | Mode::Assign(_, p) => Some(p),
             Mode::Create(d) => Some(d.prompt_mut()),
             _ => None,
         };
@@ -683,6 +695,7 @@ impl App {
                 }
                 KeyCode::Enter if searching => self.submit(),
                 KeyCode::Enter if commenting => self.add_comment(),
+                KeyCode::Enter if assigning => self.assign(),
                 KeyCode::Enter => self.next_draft(),
                 _ => {
                     p.key(key);
@@ -699,6 +712,7 @@ impl App {
             Mode::List
             | Mode::Search(_)
             | Mode::Create(_)
+            | Mode::Assign(..)
             | Mode::Choose(_)
             | Mode::Comment(..) => self.list_key(key.code),
             Mode::Detail(_) if key.code == KeyCode::Esc => {
@@ -755,8 +769,36 @@ impl App {
             }
             KeyCode::Char('s') => self.choose(Field::Status),
             KeyCode::Char('!') => self.choose(Field::Priority),
+            KeyCode::Char('a') => {
+                if let Some(issue) = self.selected_issue() {
+                    let now = issue.assignee.as_deref().unwrap_or("");
+                    self.mode = Mode::Assign(issue.id.clone(), Prompt::new(now));
+                }
+                Action::Stay
+            }
             _ => Action::Stay,
         }
+    }
+
+    /// Enter at an assignee. A name the command line takes
+    /// (`parse::assignee`: trimmed) sets it, and an empty line clears it;
+    /// either way the list comes back. Nothing is written when the issue
+    /// has that assignee already.
+    fn assign(&mut self) -> Action {
+        let Mode::Assign(id, p) = std::mem::replace(&mut self.mode, Mode::List) else {
+            return Action::Stay;
+        };
+        let new = lcl_core::parse::assignee(&p.text).ok();
+        let now = self
+            .snapshot
+            .issues
+            .iter()
+            .find(|i| i.id == id)
+            .map(|i| i.assignee.clone());
+        if now == Some(new.clone()) {
+            return Action::Stay;
+        }
+        Action::Write(Edit::Assignee(id, new))
     }
 
     /// Opens a choice of `field` for the selected issue, at its value.
@@ -803,7 +845,7 @@ impl App {
     /// The prompt being typed in, if one is shown.
     fn prompt(&self) -> Option<&Prompt> {
         match &self.mode {
-            Mode::Search(p) | Mode::Comment(_, p) => Some(p),
+            Mode::Search(p) | Mode::Comment(_, p) | Mode::Assign(_, p) => Some(p),
             Mode::Create(d) => Some(d.prompt()),
             Mode::List | Mode::Detail(_) | Mode::Choose(_) => None,
         }
@@ -813,7 +855,7 @@ impl App {
     /// it does nothing.
     pub fn paste(&mut self, text: &str) -> Action {
         let prompt = match &mut self.mode {
-            Mode::Search(p) | Mode::Comment(_, p) => Some(p),
+            Mode::Search(p) | Mode::Comment(_, p) | Mode::Assign(_, p) => Some(p),
             Mode::Create(d) => Some(d.prompt_mut()),
             _ => None,
         };
@@ -1011,6 +1053,7 @@ impl App {
         let shown = match &self.mode {
             Mode::Detail(d) | Mode::Comment(d, _) => Some(&d.id),
             Mode::Choose(c) => Some(&c.issue),
+            Mode::Assign(id, _) => Some(id),
             Mode::List | Mode::Search(_) | Mode::Create(_) => None,
         };
         if let Some(id) = shown
@@ -1183,6 +1226,22 @@ impl App {
             Mode::Comment(d, p) => {
                 self.draw_detail(f, chunks[1], d);
                 draw_prompt(f, chunks[2], "Comment: ", p);
+                return;
+            }
+            Mode::Assign(id, p) => {
+                self.draw_list(f, chunks[1]);
+                let key = self
+                    .snapshot
+                    .issues
+                    .iter()
+                    .find(|i| &i.id == id)
+                    .map_or(Cow::Borrowed(""), |i| clean(&i.identifier));
+                draw_prompt(
+                    f,
+                    chunks[2],
+                    &format!("Assignee of {key} (empty: none): "),
+                    p,
+                );
                 return;
             }
             Mode::Choose(c) => {
@@ -1385,7 +1444,8 @@ fn load(store: &Store, request: &Request) -> Result<Snapshot> {
 /// change log records under the store's author: a new issue with
 /// `Store::create_issue`, as `lcl issue create` does (Backlog, no
 /// priority, the author its creator), a change with `Store::update_issue`,
-/// as `lcl issue update` does, and a comment with `Store::add_comment`, as
+/// as `lcl issue update` does (an assignee as `--assignee`, or
+/// `--no-assignee`), and a comment with `Store::add_comment`, as
 /// `lcl issue comment` does (the author its author). The issue it wrote.
 fn write(store: &mut Store, edit: &Edit) -> Result<IssueId> {
     let (id, update) = match edit {
@@ -1415,6 +1475,16 @@ fn write(store: &mut Store, edit: &Edit) -> Result<IssueId> {
             id,
             IssueUpdate {
                 priority: Some(*priority),
+                ..Default::default()
+            },
+        ),
+        Edit::Assignee(id, assignee) => (
+            id,
+            IssueUpdate {
+                assignee: match assignee {
+                    Some(name) => Change::Set(name.clone()),
+                    None => Change::Clear,
+                },
                 ..Default::default()
             },
         ),
@@ -1874,7 +1944,7 @@ mod tests {
                 "   W-4  Backlog     None    issue 4                         ",
                 "   W-5  Backlog     None    issue 5                         ",
                 "                                                            ",
-                "j/k: move  Enter: open  c: create  s: status  !: priority  /",
+                "j/k: move  Enter: open  c: create  s: status  !: priority  a",
             ]
             .map(String::from)
         );
@@ -1891,7 +1961,7 @@ mod tests {
                 "work (W) · 2 of 5 issues · status: Done                     ",
                 "   W-1  Done        None    issue 1                         ",
                 ">> W-3  Done        None    issue 3                         ",
-                "j/k: move  Enter: open  c: create  s: status  !: priority  /",
+                "j/k: move  Enter: open  c: create  s: status  !: priority  a",
             ]
             .map(String::from)
         );
@@ -1942,7 +2012,7 @@ mod tests {
                 "   W-10   InProgress  High    Tabs and newlines                       ",
                 "   W-112  Todo        Low     Short               a very long…        ",
                 "                                                                      ",
-                "j/k: move  Enter: open  c: create  s: status  !: priority  /: search  ",
+                "j/k: move  Enter: open  c: create  s: status  !: priority  a: assignee",
             ]
             .map(String::from)
         );
@@ -2946,6 +3016,133 @@ mod tests {
         empty.key(press('s'));
         empty.key(press('!'));
         assert!(matches!(empty.mode, Mode::List));
+    }
+
+    #[test]
+    fn a_opens_the_assignee_and_enter_sets_or_clears_it() {
+        let mut app = App::new(four());
+        // W-1's assignee, austin, in a prompt under the list.
+        assert_eq!(app.key(press('a')), Action::Stay);
+        let lines = frame(&app, 44, 6);
+        assert_eq!(lines[1], ">> W-1    Done        Urgent  Fix the login…");
+        assert_eq!(lines[5], "Assignee of W-1 (empty: none): austin       ");
+        // q and r are typed, not quit or reload; Esc writes nothing.
+        assert_eq!(app.key(press('q')), Action::Stay);
+        assert_eq!(app.key(press('r')), Action::Stay);
+        assert_eq!(app.key(code(KeyCode::Esc)), Action::Stay);
+        assert!(matches!(app.mode, Mode::List));
+        // The assignee it has: nothing to write.
+        app.key(press('a'));
+        assert_eq!(app.key(code(KeyCode::Enter)), Action::Stay);
+        assert!(matches!(app.mode, Mode::List));
+        // A new name, trimmed as the command line trims it.
+        app.key(press('a'));
+        for _ in 0.."austin".len() {
+            app.key(code(KeyCode::Backspace));
+        }
+        app.paste("  bo ");
+        assert_eq!(
+            app.key(code(KeyCode::Enter)),
+            Action::Write(Edit::Assignee(id("id-1"), Some("bo".into())))
+        );
+        assert!(matches!(app.mode, Mode::List));
+        // An empty line, or a blank one, clears it.
+        app.key(press('a'));
+        for _ in 0.."austin".len() {
+            app.key(code(KeyCode::Backspace));
+        }
+        app.key(press(' '));
+        assert_eq!(
+            app.key(code(KeyCode::Enter)),
+            Action::Write(Edit::Assignee(id("id-1"), None))
+        );
+        // W-10 has none: the prompt starts empty, and empty writes nothing.
+        app.key(press('j'));
+        app.key(press('j'));
+        app.key(press('a'));
+        assert_eq!(
+            frame(&app, 44, 6)[5].trim_end(),
+            "Assignee of W-10 (empty: none):"
+        );
+        assert_eq!(app.key(code(KeyCode::Enter)), Action::Stay);
+        // With nothing selected, a opens nothing.
+        let mut empty = App::new(work(vec![]));
+        empty.key(press('a'));
+        assert!(matches!(empty.mode, Mode::List));
+    }
+
+    #[test]
+    fn an_assignee_prompt_closes_if_a_reload_finds_its_issue_gone() {
+        let mut app = App::new(five());
+        app.key(press('a'));
+        app.reloaded(work(five().issues.into_iter().skip(1).collect()));
+        assert!(matches!(app.mode, Mode::List));
+    }
+
+    #[test]
+    fn an_assignee_is_set_and_cleared_as_issue_update_does_it() {
+        let store = RefCell::new(three());
+        let mut app = App::new(load(&store.borrow(), &Request::default()).unwrap());
+        // D-2 to bo.
+        let mut pressed = vec![press('j'), press('a')];
+        pressed.extend("bo".chars().map(press));
+        pressed.extend([code(KeyCode::Enter), press('q')]);
+        run_on(&store, &mut app, &pressed).unwrap();
+        let issue = app.selected_issue().unwrap();
+        assert_eq!(
+            (issue.identifier.as_str(), issue.assignee.as_deref()),
+            ("D-2", Some("bo"))
+        );
+        // Cleared: the line emptied, then Enter.
+        let pressed = [
+            press('a'),
+            code(KeyCode::Backspace),
+            code(KeyCode::Backspace),
+            code(KeyCode::Enter),
+            press('q'),
+        ];
+        run_on(&store, &mut app, &pressed).unwrap();
+        assert_eq!(app.selected_issue().unwrap().assignee, None);
+        // Each write is one entry in the change log, by the store's author.
+        let two = IssueRef::Number {
+            key: None,
+            number: 2,
+        };
+        let history = store.borrow().issue_history(&two).unwrap();
+        let assignees: Vec<_> = history[1..]
+            .iter()
+            .map(|e| {
+                let c = &e.changes[0];
+                // The values as JSON text.
+                (
+                    e.author.as_deref(),
+                    c.field.as_str(),
+                    c.old.to_string(),
+                    c.new.to_string(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            assignees,
+            [
+                (Some("al"), "assignee", "null".into(), r#""bo""#.into()),
+                (Some("al"), "assignee", r#""bo""#.into(), "null".into()),
+            ]
+        );
+
+        // On an issue trashed behind the TUI: not written, said on the
+        // bottom line, and the list goes on as it was.
+        store.borrow_mut().delete_issue(&two).unwrap();
+        let mut pressed = vec![press('a')];
+        pressed.extend("cy".chars().map(press));
+        pressed.push(code(KeyCode::Enter));
+        let out = run_on(&store, &mut app, &pressed).unwrap_err();
+        assert_eq!(out.to_string(), "out of keys");
+        assert!(matches!(app.mode, Mode::List));
+        assert_eq!(
+            frame(&app, 90, 6)[5].trim_end(),
+            "Not written: D-2 is in the trash; restore it with: lcl issue restore D-2"
+        );
     }
 
     #[test]
