@@ -33,7 +33,7 @@ use std::io::{IsTerminal, stdout};
 use std::time::Duration;
 use unicode_segmentation::UnicodeSegmentation;
 
-const LIST_HELP: &str = "j/k: move  Enter: open  c: create  s: status  !: priority  a: assignee  l: labels  m: project  /: search  p: project  1-7: filter  0: all  r: reload  q: quit";
+const LIST_HELP: &str = "j/k: move  Enter: open  c: create  s: status  !: priority  a: assignee  l: labels  m: project  y: cycle  /: search  p: project  Y: cycle  1-7: filter  0: all  r: reload  q: quit";
 const DETAIL_HELP: &str =
     "j/k: scroll  PgUp/PgDn: page  c: comment  l: labels  Esc: back  r: reload  q: quit";
 /// The detail's keys when the issue links to others.
@@ -231,6 +231,8 @@ pub struct Snapshot {
     /// The projects, as `lcl project list` orders them, each with its
     /// milestones.
     pub projects: Vec<ProjectEntry>,
+    /// The cycles' ids and names, as `lcl cycle list` orders them.
+    pub cycles: Vec<(String, String)>,
     /// The comments of the issue that was open (`Request::open`) when this
     /// was read, oldest first; none while the list is shown.
     pub comments: Vec<Comment>,
@@ -291,6 +293,9 @@ pub enum Edit {
         project: Option<String>,
         milestone: Option<String>,
     },
+    /// The one cycle the issue is in, by id, as `issue update --cycle`
+    /// does; None takes it out of every cycle, as `--no-cycle` does.
+    Cycle(IssueId, Option<String>),
     Create {
         title: String,
         description: String,
@@ -337,12 +342,13 @@ enum Mode {
     Comment(Detail, Prompt),
 }
 
-/// What a pick sets: the issue's project, or its milestone in the project
-/// already picked (by id).
+/// What a pick sets: the issue's project, its milestone in the project
+/// already picked (by id), or its cycle.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Picks {
     Project,
     Milestone { project: String },
+    Cycle,
 }
 
 /// One value of the issue's being picked from a list that starts with
@@ -717,6 +723,8 @@ pub struct App {
     widths: Widths,
     filter: Option<Status>,
     project: Option<ProjectFilter>,
+    /// A cycle the list is narrowed to: its id, and its name as last read.
+    cycle: Option<ProjectFilter>,
     /// The search a reload asks for. What it found is `snapshot.search`.
     search: Option<SearchQuery>,
     selected: Option<IssueId>,
@@ -737,6 +745,7 @@ impl App {
             snapshot,
             filter: None,
             project: None,
+            cycle: None,
             search: None,
             selected: None,
             mode: Mode::List,
@@ -790,7 +799,7 @@ impl App {
         self.selected = id;
     }
 
-    /// The issues the status and project filters let through: in list
+    /// The issues the status, project and cycle filters let through: in list
     /// order, or under a search, the ones it found, best first.
     pub fn visible(&self) -> Vec<&Issue> {
         let keep = |i: &&Issue| {
@@ -799,6 +808,10 @@ impl App {
                     .project
                     .as_ref()
                     .is_none_or(|p| i.project_id.as_deref() == Some(p.id.as_str()))
+                && self
+                    .cycle
+                    .as_ref()
+                    .is_none_or(|c| i.cycles.iter().any(|ic| ic.id == c.id))
         };
         match &self.snapshot.search {
             None => self.snapshot.issues.iter().filter(keep).collect(),
@@ -831,8 +844,9 @@ impl App {
     /// the next project, and `/` opens the prompt with the search in it; c
     /// starts a new issue; s and ! open a choice of the selected issue's
     /// status and priority, a opens a prompt holding its assignee, l a
-    /// choice of its labels, and m a pick of its project, then of a
-    /// milestone in that project (`App::picked`); and
+    /// choice of its labels, m a pick of its project, then of a milestone
+    /// in that project, and y a pick of its cycle (`App::picked`); Y goes to
+    /// the next cycle, as p does to the next project; and
     /// Enter opens its detail, asking for a reload to read its comments. A
     /// new filter selects the first row. In the detail, keys scroll
     /// (`Detail::scroll`), Tab and Shift-Tab highlight the next and the
@@ -998,7 +1012,9 @@ impl App {
         }
     }
 
-    /// Enter in a pick. A project with milestones goes on to a pick of
+    /// Enter in a pick. A cycle, or none, is written unless the issue is in
+    /// just that one already (or in none). A project with milestones goes
+    /// on to a pick of
     /// them, at the issue's own if it is in that project already, else at
     /// none; otherwise, and at a milestone, the issue is placed there, with
     /// no milestone for a project without any or for none. Moving to
@@ -1012,6 +1028,18 @@ impl App {
             return Action::Stay;
         };
         let chosen = p.rows[p.at].1.clone();
+        if p.picks == Picks::Cycle {
+            let now: Vec<&str> = issue.cycles.iter().map(|c| c.id.as_str()).collect();
+            let same = match &chosen {
+                None => now.is_empty(),
+                Some(id) => now == [id.as_str()],
+            };
+            return if same {
+                Action::Stay
+            } else {
+                Action::Write(Edit::Cycle(p.issue, chosen))
+            };
+        }
         let (project, milestone) = match (&p.picks, chosen) {
             (Picks::Project, None) => (None, None),
             (Picks::Project, Some(project)) => {
@@ -1031,6 +1059,7 @@ impl App {
                 }
             }
             (Picks::Milestone { project }, milestone) => (Some(project.clone()), milestone),
+            (Picks::Cycle, _) => return Action::Stay,
         };
         if issue.project_id == project && issue.milestone_id == milestone {
             return Action::Stay;
@@ -1173,6 +1202,25 @@ impl App {
                 if let Some(issue) = self.selected_issue() {
                     self.mode = Mode::Labels(Labels::new(issue, &self.snapshot.labels, None));
                 }
+                Action::Stay
+            }
+            KeyCode::Char('y') => {
+                if let Some(issue) = self.selected_issue() {
+                    // In several cycles (from an import), it is in none of
+                    // the rows alone.
+                    let now = match issue.cycles.as_slice() {
+                        [] => Some(None),
+                        [one] => Some(Some(one.id.as_str())),
+                        _ => None,
+                    };
+                    let cycles = self.snapshot.cycles.clone();
+                    let pick = Pick::new(issue, Picks::Cycle, "cycle".into(), &cycles, now);
+                    self.mode = Mode::Pick(pick);
+                }
+                Action::Stay
+            }
+            KeyCode::Char('Y') => {
+                self.next_cycle();
                 Action::Stay
             }
             KeyCode::Char('m') => {
@@ -1372,6 +1420,13 @@ impl App {
             self.project = None;
         }
         if self
+            .cycle
+            .as_ref()
+            .is_some_and(|c| !issue.cycles.iter().any(|ic| ic.id == c.id))
+        {
+            self.cycle = None;
+        }
+        if self
             .snapshot
             .search
             .as_ref()
@@ -1441,6 +1496,24 @@ impl App {
         self.select_row(0);
     }
 
+    /// The workspace's cycles, as `lcl cycle list` orders them, then none,
+    /// in turn.
+    fn next_cycle(&mut self) {
+        let at = self
+            .cycle
+            .as_ref()
+            .and_then(|c| self.snapshot.cycles.iter().position(|(id, _)| *id == c.id));
+        let next = match at {
+            None => self.snapshot.cycles.first(),
+            Some(n) => self.snapshot.cycles.get(n + 1),
+        };
+        self.cycle = next.map(|(id, name)| ProjectFilter {
+            id: id.clone(),
+            name: name.clone(),
+        });
+        self.select_row(0);
+    }
+
     /// Takes a fresh read of the workspace, keeping the filters and the
     /// selected issue, whatever row it is on now. If that issue is no longer
     /// in the filtered list, the selection goes to the row it was on (else
@@ -1462,6 +1535,12 @@ impl App {
                 .and_then(|i| i.project.clone())
         {
             p.name = name;
+        }
+        if let Some(c) = &self.cycle {
+            match self.snapshot.cycles.iter().find(|(id, _)| *id == c.id) {
+                Some((_, name)) => self.cycle.as_mut().unwrap().name = name.clone(),
+                None => self.cycle = None,
+            }
         }
         if new_search {
             self.select_row(0);
@@ -1506,7 +1585,11 @@ impl App {
         let total = self.snapshot.issues.len();
         let issues = if total == 1 { "issue" } else { "issues" };
         let search = self.snapshot.search.as_ref();
-        if self.filter.is_none() && self.project.is_none() && search.is_none() {
+        if self.filter.is_none()
+            && self.project.is_none()
+            && self.cycle.is_none()
+            && search.is_none()
+        {
             out.push_str(&format!(" · {total} {issues}"));
         } else {
             out.push_str(&format!(" · {} of {total} {issues}", self.visible().len()));
@@ -1516,6 +1599,9 @@ impl App {
         }
         if let Some(p) = &self.project {
             out.push_str(&format!(" · project: {}", clean(&p.name)));
+        }
+        if let Some(c) = &self.cycle {
+            out.push_str(&format!(" · cycle: {}", clean(&c.name)));
         }
         if let Some(found) = search {
             out.push_str(&format!(" · search: {}", found.query));
@@ -1980,6 +2066,11 @@ fn load(store: &Store, request: &Request) -> Result<Snapshot> {
             .into_iter()
             .map(|l| l.name)
             .collect(),
+        cycles: store
+            .list_cycles()?
+            .into_iter()
+            .map(|c| (c.cycle.id, c.cycle.name))
+            .collect(),
         projects: {
             let milestones = store.list_milestones(None)?;
             store
@@ -2014,7 +2105,8 @@ fn load(store: &Store, request: &Request) -> Result<Snapshot> {
 /// priority, the author its creator), a change with `Store::update_issue`,
 /// as `lcl issue update` does (an assignee as `--assignee`, or
 /// `--no-assignee`, labels as `--add-label` and `--remove-label`, a project
-/// and milestone as `--project` and `--milestone`), and a comment with `Store::add_comment`, as
+/// and milestone as `--project` and `--milestone`, a cycle as `--cycle` or
+/// `--no-cycle`), and a comment with `Store::add_comment`, as
 /// `lcl issue comment` does (the author its author). The issue it wrote.
 fn write(store: &mut Store, edit: &Edit) -> Result<IssueId> {
     let (id, update) = match edit {
@@ -2057,6 +2149,15 @@ fn write(store: &mut Store, edit: &Edit) -> Result<IssueId> {
                 project: set(project),
                 milestone: set(milestone),
                 cycle: Change::Keep,
+            };
+            let r = IssueRef::Id(issue.as_str().to_string());
+            store.update_issue(&r, &placement, &IssueUpdate::default())?;
+            return Ok(issue.clone());
+        }
+        Edit::Cycle(issue, cycle) => {
+            let placement = Placement {
+                cycle: cycle.clone().map_or(Change::Clear, Change::Set),
+                ..Default::default()
             };
             let r = IssueRef::Id(issue.as_str().to_string());
             store.update_issue(&r, &placement, &IssueUpdate::default())?;
@@ -2231,6 +2332,7 @@ mod tests {
             issues,
             labels: vec![],
             projects: vec![],
+            cycles: vec![],
             comments: vec![],
             relations: None,
             search: None,
@@ -2589,6 +2691,7 @@ mod tests {
             issues: vec![issue(1, Status::Todo)],
             labels: vec![],
             projects: vec![],
+            cycles: vec![],
             comments: vec![],
             relations: None,
             search: None,
@@ -4320,6 +4423,215 @@ mod tests {
         // bottom line, and the list goes on as it was.
         store.borrow_mut().delete_issue(&two).unwrap();
         let pressed = [press('m'), press('k'), press('k'), code(KeyCode::Enter)];
+        let out = run_on(&store, &mut app, &pressed).unwrap_err();
+        assert_eq!(out.to_string(), "out of keys");
+        assert!(matches!(app.mode, Mode::List));
+        assert_eq!(
+            frame(&app, 90, 6)[5].trim_end(),
+            "Not written: D-2 is in the trash; restore it with: lcl issue restore D-2"
+        );
+    }
+
+    fn cycle_ref(id: &str, name: &str) -> lcl_core::models::CycleRef {
+        lcl_core::models::CycleRef {
+            id: id.into(),
+            name: name.into(),
+        }
+    }
+
+    /// `four`, with cycles Sprint 2 and Sprint 1 (newest first), W-1 in
+    /// Sprint 1 and W-10 in Sprint 2.
+    fn cycled() -> Snapshot {
+        let mut snapshot = four();
+        snapshot.cycles = vec![
+            ("c-2".into(), "Sprint 2".into()),
+            ("c-1".into(), "Sprint 1".into()),
+        ];
+        snapshot.issues[0].cycles = vec![cycle_ref("c-1", "Sprint 1")];
+        snapshot.issues[2].cycles = vec![cycle_ref("c-2", "Sprint 2")];
+        snapshot
+    }
+
+    #[test]
+    fn y_puts_the_issue_in_one_cycle_or_none() {
+        let mut app = App::new(cycled());
+        assert_eq!(app.key(press('y')), Action::Stay);
+        assert_eq!(
+            boxed(&app),
+            ["none", "Sprint 2", ">> Sprint 1 (now)"].map(String::from)
+        );
+        let lines = frame(&app, 60, 12);
+        assert!(
+            lines.iter().any(|l| l.contains("┌ W-1 cycle ")),
+            "{lines:#?}"
+        );
+        // The cycle it is in: nothing written.
+        assert_eq!(app.key(code(KeyCode::Enter)), Action::Stay);
+        assert!(matches!(app.mode, Mode::List));
+        app.key(press('y'));
+        app.key(press('k'));
+        assert_eq!(
+            app.key(code(KeyCode::Enter)),
+            Action::Write(Edit::Cycle(id("id-1"), Some("c-2".into())))
+        );
+        app.key(press('y'));
+        app.key(press('k'));
+        app.key(press('k'));
+        assert_eq!(
+            app.key(code(KeyCode::Enter)),
+            Action::Write(Edit::Cycle(id("id-1"), None))
+        );
+        // W-2 is in none.
+        app.key(press('j'));
+        app.key(press('y'));
+        assert_eq!(
+            boxed(&app),
+            [">> none (now)", "Sprint 2", "Sprint 1"].map(String::from)
+        );
+        assert_eq!(app.key(code(KeyCode::Enter)), Action::Stay);
+        // Esc writes nothing.
+        app.key(press('y'));
+        app.key(press('j'));
+        assert_eq!(app.key(code(KeyCode::Esc)), Action::Stay);
+        assert!(matches!(app.mode, Mode::List));
+    }
+
+    /// An import can put an issue in several cycles: no row is its own, and
+    /// none takes it out of them all.
+    #[test]
+    fn an_issue_in_several_cycles_is_in_no_one_row() {
+        let mut snapshot = cycled();
+        snapshot.issues[0].cycles.push(cycle_ref("c-2", "Sprint 2"));
+        let mut app = App::new(snapshot);
+        app.key(press('y'));
+        assert_eq!(
+            boxed(&app),
+            [">> none", "Sprint 2", "Sprint 1"].map(String::from)
+        );
+        assert_eq!(
+            app.key(code(KeyCode::Enter)),
+            Action::Write(Edit::Cycle(id("id-1"), None))
+        );
+        app.key(press('y'));
+        app.key(press('j'));
+        assert_eq!(
+            app.key(code(KeyCode::Enter)),
+            Action::Write(Edit::Cycle(id("id-1"), Some("c-2".into())))
+        );
+    }
+
+    #[test]
+    fn shift_y_narrows_the_list_to_each_cycle_in_turn() {
+        let mut app = App::new(cycled());
+        app.key(press('Y'));
+        assert_eq!(app.header(), "work (W) · 1 of 4 issues · cycle: Sprint 2");
+        assert_eq!(selected(&app), "W-10");
+        app.key(press('Y'));
+        assert_eq!(app.header(), "work (W) · 1 of 4 issues · cycle: Sprint 1");
+        assert_eq!(selected(&app), "W-1");
+        app.key(press('Y'));
+        assert_eq!(app.header(), "work (W) · 4 issues");
+        // A reload brings a cycle's new name, and one gone takes the filter
+        // away.
+        app.key(press('Y'));
+        let mut renamed = cycled();
+        renamed.cycles[0].1 = "Sprint Two".into();
+        app.reloaded(renamed);
+        assert_eq!(app.header(), "work (W) · 1 of 4 issues · cycle: Sprint Two");
+        let mut gone = cycled();
+        gone.cycles.remove(0);
+        app.reloaded(gone);
+        assert_eq!(app.header(), "work (W) · 4 issues");
+        // With no cycles, Y does nothing.
+        let mut none = App::new(four());
+        none.key(press('Y'));
+        assert_eq!(none.header(), "work (W) · 4 issues");
+    }
+
+    #[test]
+    fn a_cycle_is_set_as_issue_update_sets_it() {
+        let mut store = three();
+        for (name, at) in [("S1", 100), ("S2", 200)] {
+            store
+                .create_cycle(lcl_core::models::Cycle {
+                    id: String::new(),
+                    name: name.into(),
+                    start_date: None,
+                    end_date: None,
+                    created_at: at,
+                })
+                .unwrap();
+        }
+        let store = RefCell::new(store);
+        let mut app = App::new(load(&store.borrow(), &Request::default()).unwrap());
+        let names: Vec<&str> = app
+            .snapshot
+            .cycles
+            .iter()
+            .map(|(_, n)| n.as_str())
+            .collect();
+        assert_eq!(names, ["S2", "S1"]);
+        // D-2 into S1, then under the S1 filter, out of it.
+        let pressed = [
+            press('j'),
+            press('y'),
+            press('j'),
+            press('j'),
+            code(KeyCode::Enter),
+            press('q'),
+        ];
+        run_on(&store, &mut app, &pressed).unwrap();
+        let cycles: Vec<&str> = app
+            .selected_issue()
+            .unwrap()
+            .cycles
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect();
+        assert_eq!(cycles, ["S1"]);
+        let pressed = [
+            press('Y'),
+            press('Y'),
+            press('y'),
+            press('k'),
+            press('k'),
+            code(KeyCode::Enter),
+            press('q'),
+        ];
+        run_on(&store, &mut app, &pressed).unwrap();
+        assert_eq!(app.header(), "demo (D) · 0 of 3 issues · cycle: S1");
+        let two = IssueRef::Number {
+            key: None,
+            number: 2,
+        };
+        let history = store.borrow().issue_history(&two).unwrap();
+        let fields: Vec<Vec<String>> = history[1..]
+            .iter()
+            .map(|e| {
+                assert_eq!(e.author.as_deref(), Some("al"));
+                e.changes
+                    .iter()
+                    .map(|c| format!("{} {} -> {}", c.field, c.old, c.new))
+                    .collect()
+            })
+            .collect();
+        assert_eq!(
+            fields,
+            [
+                vec![r#"cycles null -> "S1""#.to_string()],
+                vec![r#"cycles "S1" -> null"#.to_string()],
+            ]
+        );
+
+        // On an issue trashed behind the TUI: not written, said on the
+        // bottom line, and the list goes on as it was.
+        let pressed = [press('Y'), press('q')];
+        run_on(&store, &mut app, &pressed).unwrap();
+        store.borrow_mut().delete_issue(&two).unwrap();
+        while selected(&app) != "D-2" {
+            app.key(press('j'));
+        }
+        let pressed = [press('y'), press('j'), code(KeyCode::Enter)];
         let out = run_on(&store, &mut app, &pressed).unwrap_err();
         assert_eq!(out.to_string(), "out of keys");
         assert!(matches!(app.mode, Mode::List));
