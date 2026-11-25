@@ -9,6 +9,7 @@ All notable changes to lcl are recorded here. The format follows
 ### Fixed
 
 - The text of `lcl issue history` shows where an edit is when it is past the first 60 characters of a title, a description or a comment, or past its first line: up to 20 characters before it and 40 from it, with `…` for what is left out and `↵` for a line break. 0.3.0-alpha.3 printed the same first 60 characters before and after the arrow. An edit in the first 60 characters prints as it did. `--json` is unchanged.
+- `lcl issue history` shows a write made without lcl (a hand edit to the file) as an entry of its own, at the time of lcl's last write, with no author (`anon` in text). 0.3.0-alpha.3 put its changes in lcl's last write's entry, under that write's author. `--json` has the same new entry.
 
 ## [0.3.0-alpha.3] - 2026-11-24
 

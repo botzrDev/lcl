@@ -378,7 +378,7 @@ With `--trashed`, the issue's comments that are in the trash, and no others.
 
 ### `lcl issue history`
 
-Oldest first, one entry per write. The first entry sets every field that isn't null, `old` null: the issue's creation, or for an issue made before lcl kept history, or brought in by `lcl import`, its fields when lcl began to record them (its `created_at` change says when the issue was made). An issue in the trash has a history too; a purged one has none.
+Oldest first, one entry per write. A write made without lcl (a hand edit) is an entry of its own, at the time of lcl's last write, with `author` null. The first entry sets every field that isn't null, `old` null: the issue's creation, or for an issue made before lcl kept history, or brought in by `lcl import`, its fields when lcl began to record them (its `created_at` change says when the issue was made). An issue in the trash has a history too; a purged one has none.
 
 ```json
 ["HistoryEntry"]

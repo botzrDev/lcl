@@ -478,6 +478,61 @@ fn trash_restore_and_purge() {
     );
 }
 
+/// A write made without lcl (a hand edit) is logged with the clock of lcl's
+/// last write and no author: it is an entry of its own, not part of that
+/// write's under its author's name.
+#[test]
+fn a_hand_edit_is_its_own_entry() {
+    let env = workspace();
+    let as_ann = |cmd: &mut std::process::Command| {
+        cmd.env("LCL_AUTHOR", "ann");
+    };
+    env.lcl_with(&["issue", "create", "--title", "Old title"], as_ann)
+        .assert_ok();
+    env.lcl_with(
+        &[
+            "issue",
+            "update",
+            "1",
+            "--priority",
+            "low",
+            "--add-label",
+            "bug",
+        ],
+        as_ann,
+    )
+    .assert_ok();
+    common::exec(
+        &env.db_path(),
+        "UPDATE issues SET title = 'By hand' WHERE number = 1",
+    );
+
+    let h = history(&env, "1");
+    assert_eq!(h.len(), 3, "{h:#?}");
+    assert_eq!(h[1]["author"], json!("ann"));
+    let fields: Vec<&Value> = h[1]["changes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| &c["field"])
+        .collect();
+    assert_eq!(fields, [&json!("priority"), &json!("labels")]);
+    assert_eq!(h[2]["author"], Value::Null);
+    assert_eq!(h[2]["at"], h[1]["at"], "the clock of lcl's last write");
+    assert_eq!(
+        h[2]["changes"],
+        json!([{"field": "title", "comment_id": null, "old": "Old title", "new": "By hand"}])
+    );
+    let text = env
+        .lcl(&["issue", "history", "1"])
+        .assert_ok()
+        .stdout
+        .clone();
+    let heads: Vec<&str> = text.lines().filter(|l| !l.starts_with(' ')).collect();
+    assert!(heads[1].ends_with(" · ann"), "{text}");
+    assert!(heads[2].ends_with(" · anon"), "{text}");
+}
+
 #[test]
 fn an_import_begins_each_history_with_the_issue_as_it_was() {
     let env = workspace();

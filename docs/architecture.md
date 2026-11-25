@@ -71,7 +71,7 @@ Every write to a record appends rows to the `changes` table in its own transacti
 - The clock is a hybrid logical clock, `MS-COUNTER-MACHINE`, which orders as text and never goes back. The machine is `local` until sync gives it an id. One write's rows share its clock.
 - A write puts its clock and author in `meta` (`clock`, `author`) for the triggers, since a trigger in the file can't read the connection's temp tables. `author` leaves when the write ends. A write that logged nothing puts the clock back, so it leaves the log and the clock as they were.
 - Deleting a record row is a purge. The record's rows, and the memberships that name it, leave the log. One row with no values and a tombstone in `purged` (kind, UUID, issue number, clock) take their place. Rows are never changed or deleted otherwise.
-- A hand edit to the file is logged too, under the clock of lcl's last write and with no author.
+- A hand edit to the file is logged too, under the clock of lcl's last write and with no author. `issue history` makes an entry of each clock and author, so the hand edit is an entry of its own, not part of that write's.
 
 ## Schema
 

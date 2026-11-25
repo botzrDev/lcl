@@ -187,31 +187,38 @@ impl Store {
     /// from null: the issue's creation, or for an issue made before lcl
     /// kept history, or brought in by `lcl import`, its fields as they were
     /// when lcl started to record it (its `created_at` says when it was
-    /// made). A purge leaves no history: a purged comment's changes go with
-    /// it, and so do a purged label's and a deleted cycle's memberships.
+    /// made). A write made without lcl (a hand edit) is an entry of its
+    /// own, at the clock of lcl's last write, with no author. A purge leaves
+    /// no history: a purged comment's changes go with it, and so do a purged
+    /// label's and a deleted cycle's memberships.
     pub fn issue_history(&self, r: &IssueRef) -> Result<Vec<HistoryEntry>> {
         self.read(|conn| {
             let issue = resolve_issue_or_trashed(conn, r)?;
             let rows = history_rows(conn, issue.id.as_str())?;
             let mut names = Names::new(conn)?;
             let mut out: Vec<HistoryEntry> = Vec::new();
-            let mut last_clock: Option<String> = None;
+            // An entry is one clock and one author. A write made without
+            // lcl (a hand edit) is logged with the clock of lcl's last write
+            // but no author, so it is an entry of its own, not part of
+            // that write's.
+            let mut last: Option<(String, Option<String>)> = None;
             for row in rows {
                 let changes = names.field_changes(issue.id.as_str(), &row)?;
                 if changes.is_empty() {
                     continue;
                 }
+                let same_write = last
+                    .as_ref()
+                    .is_some_and(|(clock, author)| *clock == row.clock && *author == row.author);
                 match out.last_mut() {
-                    Some(entry) if last_clock.as_deref() == Some(row.clock.as_str()) => {
-                        entry.changes.extend(changes)
-                    }
+                    Some(entry) if same_write => entry.changes.extend(changes),
                     _ => out.push(HistoryEntry {
                         at: clock_seconds(&row.clock),
                         author: row.author.clone(),
                         changes,
                     }),
                 }
-                last_clock = Some(row.clock);
+                last = Some((row.clock, row.author));
             }
             Ok(out)
         })
