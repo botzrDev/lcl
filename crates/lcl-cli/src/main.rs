@@ -2037,6 +2037,13 @@ fn history_text(history: &[lcl_core::changes::HistoryEntry]) -> String {
             other => other.to_string(),
         }
     };
+    let change = |field: &str, old: &Value, new: &Value| -> String {
+        let (old, new) = match (old, new) {
+            (Value::String(a), Value::String(b)) => text_change(a, b),
+            _ => (shown(field, old), shown(field, new)),
+        };
+        format!("{old} → {new}")
+    };
     let mut out = Vec::new();
     for (i, entry) in history.iter().enumerate() {
         let mut head = format!(
@@ -2065,11 +2072,9 @@ fn history_text(history: &[lcl_core::changes::HistoryEntry]) -> String {
                     format!("comment {id}: to the trash")
                 }
                 (Some(id), "deleted_at") => format!("comment {id}: restored"),
-                (Some(id), field) => format!(
-                    "comment {id}: {field}: {} → {}",
-                    shown(field, &c.old),
-                    shown(field, &c.new)
-                ),
+                (Some(id), field) => {
+                    format!("comment {id}: {field}: {}", change(field, &c.old, &c.new))
+                }
                 (None, field) if SETS.contains(&field) => {
                     if c.old.is_null() {
                         format!("{field}: + {}", shown(field, &c.new))
@@ -2083,11 +2088,7 @@ fn history_text(history: &[lcl_core::changes::HistoryEntry]) -> String {
                     }
                     format!("{field}: {}", shown(field, &c.new))
                 }
-                (None, field) => format!(
-                    "{field}: {} → {}",
-                    shown(field, &c.old),
-                    shown(field, &c.new)
-                ),
+                (None, field) => format!("{field}: {}", change(field, &c.old, &c.new)),
             };
             out.push(format!("  {line}"));
         }
@@ -2104,6 +2105,40 @@ fn one_line(s: &str) -> String {
         out.push('…');
     }
     out
+}
+
+/// OLD and NEW of a text's change, each on one line for a history. Where
+/// they first differ is in what `one_line` keeps of either, they are that.
+/// Past it, `one_line` would show the same text twice, so each is where
+/// they first differ instead: up to 20 characters before it and 40 from
+/// it, with `…` for what is left out and `↵` for a line break.
+fn text_change(old: &str, new: &str) -> (String, String) {
+    let (a, b): (Vec<char>, Vec<char>) = (old.chars().collect(), new.chars().collect());
+    let at = a.iter().zip(&b).take_while(|(x, y)| x == y).count();
+    let kept = |s: &str| s.lines().next().unwrap_or("").chars().take(60).count();
+    if at < kept(old) || at < kept(new) {
+        return (one_line(old), one_line(new));
+    }
+    let start = at.saturating_sub(20);
+    let around = |s: &[char]| {
+        let end = s.len().min(at + 40);
+        let mut out = String::new();
+        if start > 0 {
+            out.push('…');
+        }
+        for &c in &s[start..end] {
+            match c {
+                '\n' => out.push('↵'),
+                '\r' => {}
+                c => out.push(c),
+            }
+        }
+        if end < s.len() {
+            out.push('…');
+        }
+        out
+    };
+    (around(&a), around(&b))
 }
 
 /// Comments for people: each as `comment_text`, a blank line between them.

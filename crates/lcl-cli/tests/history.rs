@@ -264,6 +264,77 @@ fn the_text_history_reads_as_changes() {
     );
 }
 
+/// The change lines of `issue history ID`'s text, from the first
+/// `OLD → NEW` on, with each comment's id as ID.
+fn later_lines(env: &Env, id: &str) -> Vec<String> {
+    let text = env
+        .lcl(&["issue", "history", id])
+        .assert_ok()
+        .stdout
+        .clone();
+    text.lines()
+        .filter(|l| l.starts_with("  "))
+        .skip_while(|l| !l.contains(" → "))
+        .map(|l| match l.strip_prefix("  comment ") {
+            Some(rest) => format!("  comment ID: {}", rest.split_once(": ").unwrap().1),
+            None => l.to_string(),
+        })
+        .collect()
+}
+
+#[test]
+fn an_edit_past_what_the_text_history_keeps_shows_where_it_is() {
+    let env = workspace();
+    // 70 characters: the history keeps 60 of it.
+    let first = "The parser drops the last token when the input ends without a newline.";
+    let desc = format!("{first}\nSeen in 0.3.0.");
+    j(
+        &env,
+        &[
+            "issue",
+            "create",
+            "--title",
+            "Parser",
+            "--description",
+            &desc,
+        ],
+    );
+    // At the end of a long description: 20 characters before the change,
+    // and a line break as ↵.
+    let longer = format!("{desc} Also in 0.2.0.");
+    j(&env, &["issue", "update", "1", "--description", &longer]);
+    // In the first 60 characters, and from the start: as before.
+    let reworded = longer.replace("without a newline", "with no newline at all");
+    j(&env, &["issue", "update", "1", "--description", &reworded]);
+    j(&env, &["issue", "update", "1", "--description", "Short."]);
+    // In a later line of a comment.
+    let c = j(&env, &["issue", "comment", "1", "line one\nline two"]);
+    let c = c["id"].as_str().unwrap().to_string();
+    j(&env, &["comment", "edit", &c, "line one\nline 2"]);
+    // In the middle of a long line, at its 61st character: 40 characters
+    // from the change.
+    let title = "Parser drops the last token of an input that ends without a newline, \
+                 and the lexer reports the wrong column for it";
+    j(&env, &["issue", "update", "1", "--title", title]);
+    let retitled = title.replace("newline", "line break");
+    j(&env, &["issue", "update", "1", "--title", &retitled]);
+
+    assert_eq!(
+        later_lines(&env, "1"),
+        [
+            "  description: …line.↵Seen in 0.3.0. → …line.↵Seen in 0.3.0. Also in 0.2.0.",
+            "  description: The parser drops the last token when the input ends without … \
+             → The parser drops the last token when the input ends with no …",
+            "  description: The parser drops the last token when the input ends with no … → Short.",
+            "  comment ID: + line one…",
+            "  comment ID: body: line one↵line two → line one↵line 2",
+            "  title: Parser → Parser drops the last token of an input that ends without a …",
+            "  title: …that ends without a newline, and the lexer reports the wrong… \
+             → …that ends without a line break, and the lexer reports the wr…",
+        ]
+    );
+}
+
 #[test]
 fn a_write_that_fails_or_changes_nothing_logs_nothing() {
     let env = workspace();

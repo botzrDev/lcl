@@ -6,6 +6,10 @@ All notable changes to lcl are recorded here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- The text of `lcl issue history` shows where an edit is when it is past the first 60 characters of a title, a description or a comment, or past its first line: up to 20 characters before it and 40 from it, with `…` for what is left out and `↵` for a line break. 0.3.0-alpha.3 printed the same first 60 characters before and after the arrow. An edit in the first 60 characters prints as it did. `--json` is unchanged.
+
 ## [0.3.0-alpha.3] - 2026-11-24
 
 The third alpha: issue history, the sync client, writes in the TUI, insights, similar issues, the cycle report, and Linear import.
