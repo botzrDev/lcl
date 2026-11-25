@@ -1,0 +1,129 @@
+name: winget
+
+# Makes the winget manifests for the newest release with
+# packaging/winget/manifests.sh and checks them against winget's schemas.
+# On Windows, where the runner has winget, it also runs `winget validate`
+# and installs lcl from them. Runs when the packaging changes, after a
+# release is published, and by hand.
+#
+# The submission to microsoft/winget-pkgs is the owner's step (LOCL-15):
+# what passes here is the folder that goes there.
+
+on:
+  push:
+    branches: ["**"]
+    paths:
+      - packaging/winget/**
+      - .github/workflows/winget.yml
+  workflow_run:
+    workflows: [release]
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  GH_TOKEN: ${{ github.token }}
+  # The schemas of the manifest version manifests.sh writes.
+  SCHEMAS: https://raw.githubusercontent.com/microsoft/winget-cli/master/schemas/JSON/manifests/v1.10.0
+
+jobs:
+  # A release run that published nothing (a dry run, or a failure) is not a
+  # reason to run: a tag push that succeeded is.
+  gate:
+    if: >-
+      github.event_name != 'workflow_run' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       startsWith(github.event.workflow_run.head_branch, 'v'))
+    runs-on: ubuntu-24.04
+    outputs:
+      tag: ${{ steps.newest.outputs.tag }}
+    steps:
+      - id: newest
+        run: echo "tag=$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=1" --jq '.[0].tag_name')" >>"$GITHUB_OUTPUT"
+
+  schemas:
+    needs: gate
+    runs-on: ubuntu-24.04
+    env:
+      TAG: ${{ needs.gate.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: shellcheck -s sh packaging/winget/manifests.sh
+      # Ubuntu's own Python refuses pip installs (PEP 668).
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - run: python3 -m pip install --quiet pyyaml jsonschema
+      - name: Fetch winget's schemas
+        run: |
+          mkdir -p "$RUNNER_TEMP/schemas"
+          for kind in version installer defaultLocale; do
+            curl -fsSL "$SCHEMAS/manifest.$kind.1.10.0.json" -o "$RUNNER_TEMP/schemas/$kind.json"
+          done
+      - name: Write and check the manifests
+        run: |
+          dir=$(packaging/winget/manifests.sh "$TAG" "$RUNNER_TEMP/out")
+          cat "$dir"/*.yaml
+          python3 -I packaging/winget/validate.py "$dir" "$RUNNER_TEMP/schemas"
+      - name: A broken manifest is caught
+        run: |
+          dir=$(packaging/winget/manifests.sh "$TAG" "$RUNNER_TEMP/broken")
+          sed -i 's/InstallerType: zip/InstallerType: zipp/' "$dir/botzrDev.lcl.installer.yaml"
+          if python3 -I packaging/winget/validate.py "$dir" "$RUNNER_TEMP/schemas"; then
+            echo "::error::validate.py passed a manifest with a bad InstallerType"
+            exit 1
+          fi
+      - name: A release without the Windows zip writes nothing
+        run: |
+          gh release download "$TAG" --pattern SHA256SUMS --dir "$RUNNER_TEMP"
+          grep -v windows "$RUNNER_TEMP/SHA256SUMS" >"$RUNNER_TEMP/nowin"
+          if packaging/winget/manifests.sh "$TAG" "$RUNNER_TEMP/nowin-out" "$RUNNER_TEMP/nowin"; then
+            echo "::error::manifests.sh wrote manifests for a release without the Windows zip"
+            exit 1
+          fi
+          [[ ! -e "$RUNNER_TEMP/nowin-out" ]]
+      - uses: actions/upload-artifact@v4
+        with:
+          name: winget-manifests
+          path: ${{ runner.temp }}/out/manifests
+          if-no-files-found: error
+
+  install:
+    needs: [gate, schemas]
+    runs-on: windows-latest
+    env:
+      TAG: ${{ needs.gate.outputs.tag }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: winget-manifests
+          path: manifests
+      - name: Validate and install with winget, where the runner has it
+        shell: pwsh
+        run: |
+          if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
+            Write-Output "::notice::this runner has no winget: the manifests were checked against the schemas only"
+            exit 0
+          }
+          $version = $env:TAG.Substring(1)
+          $dir = "manifests\b\botzrDev\lcl\$version"
+          winget validate --manifest $dir
+          if ($LASTEXITCODE) { throw "winget validate exited $LASTEXITCODE" }
+          winget settings --enable LocalManifestFiles
+          winget install --manifest $dir --accept-package-agreements --accept-source-agreements --disable-interactivity
+          if ($LASTEXITCODE) { throw "winget install exited $LASTEXITCODE" }
+          # winget put its Links folder on the stored PATH, which this
+          # session hasn't read yet.
+          $env:PATH = [Environment]::GetEnvironmentVariable('PATH', 'Machine') + ';' + [Environment]::GetEnvironmentVariable('PATH', 'User')
+          $lcl = (Get-Command lcl -ErrorAction Stop).Source
+          Write-Output "lcl is $lcl"
+          $printed = & $lcl --version
+          if ($printed -ne "lcl $version") { throw "lcl --version printed $printed" }
+          Set-Location (New-Item -ItemType Directory -Path (Join-Path $env:RUNNER_TEMP 'ws'))
+          & $lcl init demo --key DEMO
+          if ($LASTEXITCODE) { throw "lcl init exited $LASTEXITCODE" }
+          & $lcl --json issue create --title "installed with winget"
+          if ($LASTEXITCODE) { throw "lcl issue create exited $LASTEXITCODE" }
