@@ -33,7 +33,7 @@ use std::io::{IsTerminal, stdout};
 use std::time::Duration;
 use unicode_segmentation::UnicodeSegmentation;
 
-const LIST_HELP: &str = "j/k: move  Enter: open  c: create  s: status  !: priority  a: assignee  l: labels  /: search  p: project  1-7: filter  0: all  r: reload  q: quit";
+const LIST_HELP: &str = "j/k: move  Enter: open  c: create  s: status  !: priority  a: assignee  l: labels  m: project  /: search  p: project  1-7: filter  0: all  r: reload  q: quit";
 const DETAIL_HELP: &str =
     "j/k: scroll  PgUp/PgDn: page  c: comment  l: labels  Esc: back  r: reload  q: quit";
 /// The detail's keys when the issue links to others.
@@ -228,6 +228,9 @@ pub struct Snapshot {
     /// The names of the labels not in the trash, as `lcl label list`
     /// orders them.
     pub labels: Vec<String>,
+    /// The projects, as `lcl project list` orders them, each with its
+    /// milestones.
+    pub projects: Vec<ProjectEntry>,
     /// The comments of the issue that was open (`Request::open`) when this
     /// was read, oldest first; none while the list is shown.
     pub comments: Vec<Comment>,
@@ -236,6 +239,15 @@ pub struct Snapshot {
     pub relations: Option<(IssueId, Relations)>,
     /// The search asked for (`Request::search`), if one was.
     pub search: Option<Found>,
+}
+
+/// A project an issue can be put in: its id and name, and its milestones'
+/// ids and names, as `lcl milestone list --project` orders them.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProjectEntry {
+    pub id: String,
+    pub name: String,
+    pub milestones: Vec<(String, String)>,
 }
 
 /// What a search found: its query as typed, and the issues, best first, as
@@ -270,6 +282,14 @@ pub enum Edit {
         issue: IssueId,
         add: Vec<String>,
         remove: Vec<String>,
+    },
+    /// A project and a milestone in it, by id; None clears each, as
+    /// `issue update --project` and `--milestone`, or `--no-project` and
+    /// `--no-milestone`, do.
+    Place {
+        issue: IssueId,
+        project: Option<String>,
+        milestone: Option<String>,
     },
     Create {
         title: String,
@@ -312,8 +332,59 @@ enum Mode {
     Assign(IssueId, Prompt),
     Choose(Choice),
     Labels(Labels),
+    Pick(Pick),
     /// The detail goes on showing, and Esc goes back to it.
     Comment(Detail, Prompt),
+}
+
+/// What a pick sets: the issue's project, or its milestone in the project
+/// already picked (by id).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Picks {
+    Project,
+    Milestone { project: String },
+}
+
+/// One value of the issue's being picked from a list that starts with
+/// none: each row's name and id, the issue's own (if it is among them),
+/// and the one highlighted.
+struct Pick {
+    issue: IssueId,
+    picks: Picks,
+    /// What the box's title names after the issue.
+    title: String,
+    rows: Vec<(String, Option<String>)>,
+    now: Option<usize>,
+    at: usize,
+}
+
+impl Pick {
+    /// A pick whose first row is none, then `values` (id, name); `now` is
+    /// the issue's own id, None for none.
+    fn new(
+        issue: &Issue,
+        picks: Picks,
+        title: String,
+        values: &[(String, String)],
+        now: Option<Option<&str>>,
+    ) -> Pick {
+        let rows: Vec<(String, Option<String>)> = std::iter::once(("none".to_string(), None))
+            .chain(
+                values
+                    .iter()
+                    .map(|(id, name)| (name.clone(), Some(id.clone()))),
+            )
+            .collect();
+        let now = now.and_then(|now| rows.iter().position(|(_, id)| id.as_deref() == now));
+        Pick {
+            issue: issue.id.clone(),
+            picks,
+            title,
+            rows,
+            at: now.unwrap_or(0),
+            now,
+        }
+    }
 }
 
 /// The labels of one issue being chosen: the workspace's labels as they
@@ -683,9 +754,12 @@ impl App {
         match &self.mode {
             Mode::Detail(d) | Mode::Comment(d, _) => Some(&d.id),
             Mode::Labels(l) => l.detail.as_ref().map(|d| &d.id),
-            Mode::List | Mode::Search(_) | Mode::Create(_) | Mode::Assign(..) | Mode::Choose(_) => {
-                None
-            }
+            Mode::List
+            | Mode::Search(_)
+            | Mode::Create(_)
+            | Mode::Assign(..)
+            | Mode::Choose(_)
+            | Mode::Pick(_) => None,
         }
     }
 
@@ -756,8 +830,9 @@ impl App {
     /// within it; 1-7 filter by status and 0 clears that filter, p goes to
     /// the next project, and `/` opens the prompt with the search in it; c
     /// starts a new issue; s and ! open a choice of the selected issue's
-    /// status and priority, a opens a prompt holding its assignee, and l a
-    /// choice of its labels; and
+    /// status and priority, a opens a prompt holding its assignee, l a
+    /// choice of its labels, and m a pick of its project, then of a
+    /// milestone in that project (`App::picked`); and
     /// Enter opens its detail, asking for a reload to read its comments. A
     /// new filter selects the first row. In the detail, keys scroll
     /// (`Detail::scroll`), Tab and Shift-Tab highlight the next and the
@@ -775,6 +850,17 @@ impl App {
         self.failed = None;
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
             return Action::Quit;
+        }
+        if let Mode::Pick(p) = &mut self.mode {
+            match key.code {
+                KeyCode::Char('q') => return Action::Quit,
+                KeyCode::Esc => self.mode = Mode::List,
+                KeyCode::Char('j') | KeyCode::Down => p.at = (p.at + 1).min(p.rows.len() - 1),
+                KeyCode::Char('k') | KeyCode::Up => p.at = p.at.saturating_sub(1),
+                KeyCode::Enter => return self.picked(),
+                _ => {}
+            }
+            return Action::Stay;
         }
         if let Mode::Labels(l) = &mut self.mode {
             match key.code {
@@ -873,6 +959,7 @@ impl App {
             | Mode::Assign(..)
             | Mode::Choose(_)
             | Mode::Labels(_)
+            | Mode::Pick(_)
             | Mode::Comment(..) => self.list_key(key.code),
             Mode::Detail(_) if key.code == KeyCode::Esc => self.back(),
             Mode::Detail(d) if matches!(key.code, KeyCode::Tab | KeyCode::BackTab) => {
@@ -909,6 +996,50 @@ impl App {
                 Action::Stay
             }
         }
+    }
+
+    /// Enter in a pick. A project with milestones goes on to a pick of
+    /// them, at the issue's own if it is in that project already, else at
+    /// none; otherwise, and at a milestone, the issue is placed there, with
+    /// no milestone for a project without any or for none. Moving to
+    /// another project takes away a milestone that isn't in it. Nothing is
+    /// written when the issue is placed so already.
+    fn picked(&mut self) -> Action {
+        let Mode::Pick(p) = std::mem::replace(&mut self.mode, Mode::List) else {
+            return Action::Stay;
+        };
+        let Some(issue) = self.snapshot.issues.iter().find(|i| i.id == p.issue) else {
+            return Action::Stay;
+        };
+        let chosen = p.rows[p.at].1.clone();
+        let (project, milestone) = match (&p.picks, chosen) {
+            (Picks::Project, None) => (None, None),
+            (Picks::Project, Some(project)) => {
+                let entry = self.snapshot.projects.iter().find(|e| e.id == project);
+                match entry {
+                    Some(e) if !e.milestones.is_empty() => {
+                        let here = issue.project_id.as_deref() == Some(project.as_str());
+                        let now = here.then_some(issue.milestone_id.as_deref());
+                        let title = format!("milestone in {}", e.name);
+                        let picks = Picks::Milestone {
+                            project: project.clone(),
+                        };
+                        self.mode = Mode::Pick(Pick::new(issue, picks, title, &e.milestones, now));
+                        return Action::Stay;
+                    }
+                    _ => (Some(project), None),
+                }
+            }
+            (Picks::Milestone { project }, milestone) => (Some(project.clone()), milestone),
+        };
+        if issue.project_id == project && issue.milestone_id == milestone {
+            return Action::Stay;
+        }
+        Action::Write(Edit::Place {
+            issue: p.issue,
+            project,
+            milestone,
+        })
     }
 
     /// Esc in the detail: back to the detail a link was opened from,
@@ -1044,6 +1175,20 @@ impl App {
                 }
                 Action::Stay
             }
+            KeyCode::Char('m') => {
+                if let Some(issue) = self.selected_issue() {
+                    let projects: Vec<(String, String)> = self
+                        .snapshot
+                        .projects
+                        .iter()
+                        .map(|p| (p.id.clone(), p.name.clone()))
+                        .collect();
+                    let now = Some(issue.project_id.as_deref());
+                    let pick = Pick::new(issue, Picks::Project, "project".into(), &projects, now);
+                    self.mode = Mode::Pick(pick);
+                }
+                Action::Stay
+            }
             KeyCode::Char('a') => {
                 if let Some(issue) = self.selected_issue() {
                     let now = issue.assignee.as_deref().unwrap_or("");
@@ -1122,7 +1267,9 @@ impl App {
         match &self.mode {
             Mode::Search(p) | Mode::Comment(_, p) | Mode::Assign(_, p) => Some(p),
             Mode::Create(d) => Some(d.prompt()),
-            Mode::List | Mode::Detail(_) | Mode::Choose(_) | Mode::Labels(_) => None,
+            Mode::List | Mode::Detail(_) | Mode::Choose(_) | Mode::Labels(_) | Mode::Pick(_) => {
+                None
+            }
         }
     }
 
@@ -1329,6 +1476,7 @@ impl App {
             Mode::Detail(d) | Mode::Comment(d, _) => Some(&d.id),
             Mode::Choose(c) => Some(&c.issue),
             Mode::Labels(l) => Some(&l.issue),
+            Mode::Pick(p) => Some(&p.issue),
             Mode::Assign(id, _) => Some(id),
             Mode::List | Mode::Search(_) | Mode::Create(_) => None,
         };
@@ -1579,6 +1727,11 @@ impl App {
                 self.draw_labels(f, chunks[1], l);
                 "j/k: move  Space: tick  Enter: save  Esc: cancel".into()
             }
+            Mode::Pick(p) => {
+                self.draw_list(f, chunks[1]);
+                self.draw_pick(f, chunks[1], p);
+                "j/k: move  Enter: set  Esc: cancel".into()
+            }
             Mode::Choose(c) => {
                 self.draw_list(f, chunks[1]);
                 self.draw_choice(f, chunks[1], c);
@@ -1616,6 +1769,28 @@ impl App {
         };
         let selected = (!l.names.is_empty()).then_some(l.at);
         draw_box(f, area, &title, rows, selected);
+    }
+
+    /// A pick in a box over the list: a title naming the issue and what is
+    /// picked, then none and each value, the issue's own marked.
+    fn draw_pick(&self, f: &mut Frame, area: Rect, p: &Pick) {
+        let key = self
+            .snapshot
+            .issues
+            .iter()
+            .find(|i| i.id == p.issue)
+            .map_or(Cow::Borrowed(""), |i| clean(&i.identifier));
+        let title = format!(" {key} {} ", clean(&p.title));
+        let rows: Vec<String> = p
+            .rows
+            .iter()
+            .enumerate()
+            .map(|(n, (name, _))| {
+                let mark = if p.now == Some(n) { " (now)" } else { "" };
+                format!("{}{mark}", clean(name))
+            })
+            .collect();
+        draw_box(f, area, &title, rows, Some(p.at));
     }
 
     /// The choice in a box over the list: a title naming the issue and the
@@ -1805,6 +1980,22 @@ fn load(store: &Store, request: &Request) -> Result<Snapshot> {
             .into_iter()
             .map(|l| l.name)
             .collect(),
+        projects: {
+            let milestones = store.list_milestones(None)?;
+            store
+                .list_projects(&[])?
+                .into_iter()
+                .map(|p| ProjectEntry {
+                    milestones: milestones
+                        .iter()
+                        .filter(|m| m.project_id == p.id)
+                        .map(|m| (m.id.clone(), m.name.clone()))
+                        .collect(),
+                    id: p.id,
+                    name: p.name,
+                })
+                .collect()
+        },
         comments: match &request.open {
             Some(id) => store.list_comments(id.as_str(), false)?,
             None => Vec::new(),
@@ -1822,8 +2013,8 @@ fn load(store: &Store, request: &Request) -> Result<Snapshot> {
 /// `Store::create_issue`, as `lcl issue create` does (Backlog, no
 /// priority, the author its creator), a change with `Store::update_issue`,
 /// as `lcl issue update` does (an assignee as `--assignee`, or
-/// `--no-assignee`, labels as `--add-label` and `--remove-label`), and a
-/// comment with `Store::add_comment`, as
+/// `--no-assignee`, labels as `--add-label` and `--remove-label`, a project
+/// and milestone as `--project` and `--milestone`), and a comment with `Store::add_comment`, as
 /// `lcl issue comment` does (the author its author). The issue it wrote.
 fn write(store: &mut Store, edit: &Edit) -> Result<IssueId> {
     let (id, update) = match edit {
@@ -1856,6 +2047,21 @@ fn write(store: &mut Store, edit: &Edit) -> Result<IssueId> {
                 ..Default::default()
             },
         ),
+        Edit::Place {
+            issue,
+            project,
+            milestone,
+        } => {
+            let set = |id: &Option<String>| id.clone().map_or(Change::Clear, Change::Set);
+            let placement = Placement {
+                project: set(project),
+                milestone: set(milestone),
+                cycle: Change::Keep,
+            };
+            let r = IssueRef::Id(issue.as_str().to_string());
+            store.update_issue(&r, &placement, &IssueUpdate::default())?;
+            return Ok(issue.clone());
+        }
         Edit::Labels { issue, add, remove } => (
             issue,
             IssueUpdate {
@@ -2024,6 +2230,7 @@ mod tests {
             key: "W".into(),
             issues,
             labels: vec![],
+            projects: vec![],
             comments: vec![],
             relations: None,
             search: None,
@@ -2381,6 +2588,7 @@ mod tests {
             key: String::new(),
             issues: vec![issue(1, Status::Todo)],
             labels: vec![],
+            projects: vec![],
             comments: vec![],
             relations: None,
             search: None,
@@ -3903,6 +4111,221 @@ mod tests {
         assert_eq!(
             frame(&app, 50, 12)[9].trim_end(),
             "Blocked by  D-2  Backlog     two"
+        );
+    }
+
+    /// `four`, with projects converter (no milestones) and tui (Alpha and
+    /// Beta), and W-1 in tui at Alpha.
+    fn placed() -> App {
+        let mut snapshot = four();
+        snapshot.projects = vec![
+            ProjectEntry {
+                id: "p-converter".into(),
+                name: "converter".into(),
+                milestones: vec![],
+            },
+            ProjectEntry {
+                id: "p-tui".into(),
+                name: "tui".into(),
+                milestones: vec![
+                    ("m-alpha".into(), "Alpha".into()),
+                    ("m-beta".into(), "Beta".into()),
+                ],
+            },
+        ];
+        snapshot.issues[0].milestone_id = Some("m-alpha".into());
+        snapshot.issues[0].milestone = Some("Alpha".into());
+        App::new(snapshot)
+    }
+
+    fn place(issue: &str, project: Option<&str>, milestone: Option<&str>) -> Action {
+        Action::Write(Edit::Place {
+            issue: id(issue),
+            project: project.map(String::from),
+            milestone: milestone.map(String::from),
+        })
+    }
+
+    /// The rows of the box on screen, inside its borders, trimmed.
+    fn boxed(app: &App) -> Vec<String> {
+        frame(app, 60, 12)
+            .iter()
+            .filter_map(|l| {
+                let (_, inner) = l.split_once('│')?;
+                Some(inner.split('│').next()?.trim().to_string())
+            })
+            .collect()
+    }
+
+    #[test]
+    fn m_picks_a_project_then_a_milestone_in_it() {
+        let mut app = placed();
+        assert_eq!(app.key(press('m')), Action::Stay);
+        assert_eq!(
+            boxed(&app),
+            ["none", "converter", ">> tui (now)"].map(String::from)
+        );
+        let lines = frame(&app, 60, 12);
+        assert!(
+            lines.iter().any(|l| l.contains("┌ W-1 project ")),
+            "{lines:#?}"
+        );
+        assert_eq!(lines[11].trim_end(), "j/k: move  Enter: set  Esc: cancel");
+        // Esc: nothing written.
+        assert_eq!(app.key(code(KeyCode::Esc)), Action::Stay);
+        assert!(matches!(app.mode, Mode::List));
+        // tui has milestones: a pick of them, at the issue's own.
+        app.key(press('m'));
+        assert_eq!(app.key(code(KeyCode::Enter)), Action::Stay);
+        assert_eq!(
+            boxed(&app),
+            ["none", ">> Alpha (now)", "Beta"].map(String::from)
+        );
+        let lines = frame(&app, 60, 12);
+        assert!(
+            lines.iter().any(|l| l.contains("┌ W-1 milestone in tui ")),
+            "{lines:#?}"
+        );
+        // Where it is already: nothing written.
+        assert_eq!(app.key(code(KeyCode::Enter)), Action::Stay);
+        assert!(matches!(app.mode, Mode::List));
+        // Beta.
+        app.key(press('m'));
+        app.key(code(KeyCode::Enter));
+        app.key(press('j'));
+        assert_eq!(
+            app.key(code(KeyCode::Enter)),
+            place("id-1", Some("p-tui"), Some("m-beta"))
+        );
+        // converter has none: written at once, with no milestone.
+        app.key(press('m'));
+        app.key(press('k'));
+        assert_eq!(
+            app.key(code(KeyCode::Enter)),
+            place("id-1", Some("p-converter"), None)
+        );
+        // none: no project, no milestone.
+        app.key(press('m'));
+        app.key(press('k'));
+        app.key(press('k'));
+        assert_eq!(app.key(code(KeyCode::Enter)), place("id-1", None, None));
+        // In a pick, q quits.
+        app.key(press('m'));
+        assert_eq!(app.key(press('q')), Action::Quit);
+    }
+
+    #[test]
+    fn an_issue_in_no_project_is_picked_into_one() {
+        let mut app = placed();
+        app.key(press('j'));
+        app.key(press('j'));
+        assert_eq!(selected(&app), "W-10");
+        app.key(press('m'));
+        assert_eq!(
+            boxed(&app),
+            [">> none (now)", "converter", "tui"].map(String::from)
+        );
+        assert_eq!(app.key(code(KeyCode::Enter)), Action::Stay);
+        assert!(matches!(app.mode, Mode::List));
+        // Into tui: its milestones, at none, none of them marked.
+        app.key(press('m'));
+        app.key(press('j'));
+        app.key(press('j'));
+        app.key(code(KeyCode::Enter));
+        assert_eq!(boxed(&app), [">> none", "Alpha", "Beta"].map(String::from));
+        assert_eq!(
+            app.key(code(KeyCode::Enter)),
+            place("id-10", Some("p-tui"), None)
+        );
+        // With nothing selected, m opens nothing; a reload that finds the
+        // issue gone closes the pick.
+        let mut empty = App::new(work(vec![]));
+        empty.key(press('m'));
+        assert!(matches!(empty.mode, Mode::List));
+        app.key(press('m'));
+        app.reloaded(work(vec![]));
+        assert!(matches!(app.mode, Mode::List));
+    }
+
+    #[test]
+    fn a_project_and_milestone_are_set_as_issue_update_sets_them() {
+        let mut store = three();
+        for name in ["api", "web"] {
+            store
+                .create_project(name, "", lcl_core::models::ProjectStatus::Backlog, None)
+                .unwrap();
+        }
+        store.create_milestone("M1", "api", "", None, 0).unwrap();
+        let store = RefCell::new(store);
+        let mut app = App::new(load(&store.borrow(), &Request::default()).unwrap());
+        // D-2 into api, at M1.
+        let pressed = [
+            press('j'),
+            press('m'),
+            press('j'),
+            code(KeyCode::Enter),
+            press('j'),
+            code(KeyCode::Enter),
+            press('q'),
+        ];
+        run_on(&store, &mut app, &pressed).unwrap();
+        let issue = app.selected_issue().unwrap();
+        assert_eq!(
+            (
+                issue.identifier.as_str(),
+                issue.project.as_deref(),
+                issue.milestone.as_deref()
+            ),
+            ("D-2", Some("api"), Some("M1"))
+        );
+        // Then to web, which takes M1 away: it isn't in web.
+        let pressed = [press('m'), press('j'), code(KeyCode::Enter), press('q')];
+        run_on(&store, &mut app, &pressed).unwrap();
+        let issue = app.selected_issue().unwrap();
+        assert_eq!(
+            (issue.project.as_deref(), issue.milestone.as_deref()),
+            (Some("web"), None)
+        );
+        // One change log entry for each write, by the store's author.
+        let two = IssueRef::Number {
+            key: None,
+            number: 2,
+        };
+        let history = store.borrow().issue_history(&two).unwrap();
+        let fields: Vec<Vec<String>> = history[1..]
+            .iter()
+            .map(|e| {
+                assert_eq!(e.author.as_deref(), Some("al"));
+                e.changes
+                    .iter()
+                    .map(|c| format!("{} {} -> {}", c.field, c.old, c.new))
+                    .collect()
+            })
+            .collect();
+        assert_eq!(
+            fields,
+            [
+                vec![
+                    r#"project null -> "api""#.to_string(),
+                    r#"milestone null -> "M1""#.to_string()
+                ],
+                vec![
+                    r#"project "api" -> "web""#.to_string(),
+                    r#"milestone "M1" -> null"#.to_string()
+                ],
+            ]
+        );
+
+        // On an issue trashed behind the TUI: not written, said on the
+        // bottom line, and the list goes on as it was.
+        store.borrow_mut().delete_issue(&two).unwrap();
+        let pressed = [press('m'), press('k'), press('k'), code(KeyCode::Enter)];
+        let out = run_on(&store, &mut app, &pressed).unwrap_err();
+        assert_eq!(out.to_string(), "out of keys");
+        assert!(matches!(app.mode, Mode::List));
+        assert_eq!(
+            frame(&app, 90, 6)[5].trim_end(),
+            "Not written: D-2 is in the trash; restore it with: lcl issue restore D-2"
         );
     }
 

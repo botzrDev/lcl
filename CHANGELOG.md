@@ -8,6 +8,7 @@ All notable changes to lcl are recorded here. The format follows
 
 ### Added
 
+- In `lcl tui`, `m` sets the selected issue's project: a box of the projects, and none, with its own marked. A project with milestones goes on to a box of them, and none. It writes as `issue update --project` and `--milestone` do; moving to another project takes away a milestone that isn't in it. Esc writes nothing.
 - In `lcl tui`, an issue's detail lists its parent, its sub-issues, and the issues it blocks, is blocked by, is related to, is a duplicate of and has as duplicates, each with its status and title. Tab and Shift-Tab pick one, Enter opens it, and Esc goes back the way it came.
 - In `lcl tui`, `l` in the list or the detail opens a choice of the workspace's labels, the selected issue's own ticked. Space ticks or unticks one, Enter writes what changed, as `issue update --add-label` and `--remove-label` do, in one write, and Esc writes nothing.
 - In `lcl tui`, `a` sets the selected issue's assignee: a prompt holds the one it has, Enter sets what is typed, as `issue update --assignee` does, and an empty line clears it, as `--no-assignee` does. Esc writes nothing.
